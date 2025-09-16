@@ -1,25 +1,31 @@
-import os
+# app/db_utils.py
 import streamlit as st
 import psycopg2
 import psycopg2.extras
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import yfinance as yf
 
+# -----------------------------
+# KONEKSI
+# -----------------------------
 def _dsn_from_secrets() -> str:
     host = st.secrets.get("DB_HOST")
-    port = int(st.secrets.get("DB_PORT", 6543))
+    port = int(st.secrets.get("DB_PORT", 6543))  # pooled PgBouncer
     db   = st.secrets.get("DB_NAME", "postgres")
     user = st.secrets.get("DB_USER", "postgres")
     pwd  = st.secrets.get("DB_PASSWORD")
 
     if not all([host, port, db, user, pwd]):
-        raise RuntimeError("Secrets DB belum lengkap. Harus ada DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.")
+        raise RuntimeError(
+            "Secrets DB belum lengkap. Harus ada DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD."
+        )
 
-    # DSN dengan SSL wajib + keepalive biar stabil di serverless
+    # SSL wajib untuk Supabase; keepalive agar stabil di serverless
     return (
         f"host={host} port={port} dbname={db} user={user} password={pwd} "
-        "sslmode=require connect_timeout=10 keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=3"
+        "sslmode=require connect_timeout=10 keepalives=1 keepalives_idle=30 "
+        "keepalives_interval=10 keepalives_count=3"
     )
 
 @st.cache_resource(show_spinner=False)
@@ -28,28 +34,32 @@ def get_connection():
     try:
         dsn = _dsn_from_secrets()
         conn = psycopg2.connect(dsn)
-        conn.autocommit = False  # kita commit manual saat DML
+        conn.autocommit = False
         return conn
     except Exception as e:
         st.error(f"Gagal terhubung ke database: {e}")
         return None
 
-def fetch_data(query: str, params: tuple = None) -> List[Dict[str, Any]] | None:
-    """SELECT → list of dicts. Koneksi disimpan (tidak di-close)."""
+# Backward compatibility: beberapa halaman memanggil nama ini
+def get_db_connection():
+    return get_connection()
+
+# -----------------------------
+# HELPER QUERY
+# -----------------------------
+def fetch_data(query: str, params: Optional[tuple] = None) -> Optional[list]:
     conn = get_connection()
     if conn is None:
         return None
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
-            data = cur.fetchall()
-        return data
+            return cur.fetchall()
     except Exception as e:
         st.error(f"Terjadi kesalahan saat menjalankan query: {e}")
         return None
 
-def execute_query(query: str, params: tuple = None) -> bool:
-    """INSERT/UPDATE/DELETE."""
+def execute_query(query: str, params: Optional[tuple] = None) -> bool:
     conn = get_connection()
     if conn is None:
         return False
@@ -63,41 +73,57 @@ def execute_query(query: str, params: tuple = None) -> bool:
         st.error(f"Terjadi kesalahan saat mengeksekusi query: {e}")
         return False
 
+# -----------------------------
+# FUNGSI UTIL / KONSOL DB
+# -----------------------------
+def get_table_list(schema: str = "public") -> List[str]:
+    """Kembalikan daftar tabel pada schema (default: public)."""
+    q = """
+    SELECT tablename
+    FROM pg_catalog.pg_tables
+    WHERE schemaname = %s
+    ORDER BY tablename;
+    """
+    rows = fetch_data(q, (schema,))
+    return [r["tablename"] for r in rows] if rows else []
+
+# -----------------------------
+# FUNGSI DOMAIN: SAHAM
+# -----------------------------
 def get_saved_tickers_summary() -> pd.DataFrame:
-    query = """
+    q = """
     SELECT Ticker,
            COUNT(*) AS "Jumlah_Data",
            MIN(Tanggal) AS "Tanggal_Awal",
            MAX(Tanggal) AS "Tanggal_Terakhir",
-           (SELECT "Close" FROM stock_prices_history WHERE Ticker = T.Ticker ORDER BY "Tanggal" DESC LIMIT 1) AS "Harga_Penutupan_Terakhir",
+           (SELECT "Close" FROM stock_prices_history
+              WHERE Ticker = T.Ticker ORDER BY "Tanggal" DESC LIMIT 1) AS "Harga_Penutupan_Terakhir",
            MAX("High") AS "Harga_Tertinggi_Periode",
-           MIN("Low") AS "Harga_Terendah_Periode"
+           MIN("Low")  AS "Harga_Terendah_Periode"
     FROM stock_prices_history T
     GROUP BY Ticker
     ORDER BY Ticker ASC;
     """
-    data = fetch_data(query)
-    if data:
-        return pd.DataFrame(data)
-    return pd.DataFrame()
+    rows = fetch_data(q)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 def fetch_stock_prices_from_db(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    query = """
+    q = """
     SELECT "Tanggal", "Open", "High", "Low", "Close", "Volume"
     FROM stock_prices_history
     WHERE "Ticker" = %s AND "Tanggal" BETWEEN %s AND %s
     ORDER BY "Tanggal" ASC;
     """
-    data = fetch_data(query, (ticker, start_date, end_date))
-    if data:
-        df = pd.DataFrame(data)
-        df['Tanggal'] = pd.to_datetime(df['Tanggal'])
-        df.set_index('Tanggal', inplace=True)
-        return df
-    return pd.DataFrame()
+    rows = fetch_data(q, (ticker, start_date, end_date))
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["Tanggal"] = pd.to_datetime(df["Tanggal"])
+    df.set_index("Tanggal", inplace=True)
+    return df
 
 def insert_stock_price_data(ticker: str, data: pd.DataFrame) -> bool:
-    """Simpan harga saham (UPSERT)."""
+    """UPSERT harga saham per tanggal."""
     conn = get_connection()
     if conn is None:
         st.error("Tidak dapat menyimpan data: koneksi database gagal.")
@@ -105,24 +131,26 @@ def insert_stock_price_data(ticker: str, data: pd.DataFrame) -> bool:
     try:
         with conn.cursor() as cur:
             for index, row in data.iterrows():
-                query = """
+                q = """
                 INSERT INTO stock_prices_history ("Ticker", "Tanggal", "Open", "High", "Low", "Close", "Volume")
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT ("Ticker", "Tanggal") DO UPDATE
-                SET "Open" = EXCLUDED."Open", "High" = EXCLUDED."High", "Low" = EXCLUDED."Low",
-                    "Close" = EXCLUDED."Close", "Volume" = EXCLUDED."Volume";
+                SET "Open" = EXCLUDED."Open",
+                    "High" = EXCLUDED."High",
+                    "Low"  = EXCLUDED."Low",
+                    "Close"= EXCLUDED."Close",
+                    "Volume"=EXCLUDED."Volume";
                 """
-                cur.execute(query, (
+                cur.execute(q, (
                     ticker,
-                    index.strftime('%Y-%m-%d'),
-                    float(row['Open']) if 'Open' in row else None,
-                    float(row['High']) if 'High' in row else None,
-                    float(row['Low']) if 'Low' in row else None,
-                    float(row['Close']) if 'Close' in row else None,
-                    float(row['Volume']) if 'Volume' in row else None,
+                    index.strftime("%Y-%m-%d"),
+                    float(row.get("Open")) if row.get("Open") is not None else None,
+                    float(row.get("High")) if row.get("High") is not None else None,
+                    float(row.get("Low"))  if row.get("Low")  is not None else None,
+                    float(row.get("Close"))if row.get("Close")is not None else None,
+                    float(row.get("Volume")) if row.get("Volume") is not None else None,
                 ))
         conn.commit()
-        st.success(f"Berhasil menyimpan {len(data)} baris data untuk ticker {ticker}.")
         return True
     except Exception as e:
         conn.rollback()
@@ -130,20 +158,15 @@ def insert_stock_price_data(ticker: str, data: pd.DataFrame) -> bool:
         return False
 
 def get_distinct_tickers() -> List[str]:
-    data = fetch_data('SELECT DISTINCT "Ticker" FROM stock_prices_history ORDER BY "Ticker" ASC;')
-    if data:
-        return [row['Ticker'] for row in data]
-    return []
+    rows = fetch_data('SELECT DISTINCT "Ticker" FROM stock_prices_history ORDER BY "Ticker" ASC;')
+    return [r["Ticker"] for r in rows] if rows else []
 
-# --- Tambahan: fungsi yang memang dipanggil dari halaman 1 tapi belum ada di file lama
 def get_stock_info(ticker: str) -> Dict[str, Any]:
-    """Ambil info singkat via yfinance agar tidak error import di pages/1_Harga_Saham."""
+    """Info ringkas via yfinance agar import tidak error di halaman Harga Saham."""
     try:
         y = yf.Ticker(ticker)
-        info = {}
-        # Beberapa field populer; aman jika tidak ada
-        for k in ["trailingPE", "forwardPE", "marketCap", "shortName", "longName"]:
-            info[k] = y.info.get(k)
-        return info
+        info = y.info or {}
+        keep = ["trailingPE", "forwardPE", "marketCap", "shortName", "longName", "currency"]
+        return {k: info.get(k) for k in keep}
     except Exception:
         return {}
