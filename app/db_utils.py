@@ -3,14 +3,14 @@
 from __future__ import annotations
 import os, tempfile, textwrap
 from datetime import date
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import mysql.connector
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# Key wajib untuk koneksi
+# Kunci wajib untuk koneksi
 REQUIRED_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
 
 # -----------------------------------------------------------------------------
@@ -36,7 +36,6 @@ def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
                     v = v.strip()
                 cfg[k] = v
     except Exception:
-        # st.secrets bisa tidak tersedia saat run lokal tanpa secrets.toml
         pass
     # env fallback
     for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
@@ -98,19 +97,17 @@ def get_db_connection():
         st.error(f"Gagal membuka koneksi MySQL: {e}")
         raise
 
-# Alias kalau ada kode lama yang pakai nama ini
+# Alias kompatibilitas
 get_connection = get_db_connection
 get_db_conn = get_db_connection
 
 def get_db_name() -> str:
-    """Ambil nama DB aktif dari secrets/env."""
     cfg, _ = _load_cfg()
     return str(cfg.get("DB_NAME", "")).strip()
 
 def get_connection_info() -> Dict[str, Any]:
-    """Info ringkas koneksi (tanpa password) untuk tampilan UI/diagnostik."""
     cfg, _ = _load_cfg()
-    info = {
+    return {
         "host": cfg.get("DB_HOST", ""),
         "port": cfg.get("DB_PORT", ""),
         "name": cfg.get("DB_NAME", ""),
@@ -118,7 +115,6 @@ def get_connection_info() -> Dict[str, Any]:
         "kind": cfg.get("DB_KIND", "mysql"),
         "ssl": "yes" if cfg.get("DB_SSL_CA") else "no",
     }
-    return info
 
 # -----------------------------------------------------------------------------
 # Helper eksekusi SQL
@@ -246,8 +242,42 @@ def get_saved_tickers_summary() -> pd.DataFrame:
     if "Tanggal_Terakhir" in df: df["Tanggal_Terakhir"] = pd.to_datetime(df["Tanggal_Terakhir"], errors="coerce")
     return df
 
+def get_table_list() -> List[str]:
+    """Daftar tabel di database aktif."""
+    rows, err = execute_query("SHOW TABLES;", fetch_all=True)
+    if err or not rows:
+        return []
+    # mysql-connector dict cursor -> key pertama adalah nama kolom "Tables_in_<DBNAME>"
+    if isinstance(rows[0], dict):
+        key = list(rows[0].keys())[0]
+        return [r[key] for r in rows]
+    if isinstance(rows[0], (list, tuple)):
+        return [r[0] for r in rows]
+    return []
+
+def get_distinct_tickers_from_price_history_with_suffix(suffix: Optional[str] = None) -> List[str]:
+    """
+    Ambil daftar DISTINCT Ticker dari stock_prices_history.
+    Jika suffix diberikan (mis. '.JK'), filter yang berakhiran suffix tsb.
+    """
+    if suffix:
+        q = "SELECT DISTINCT Ticker FROM stock_prices_history WHERE Ticker LIKE %s ORDER BY Ticker ASC;"
+        params = [f"%{suffix}"]
+    else:
+        q = "SELECT DISTINCT Ticker FROM stock_prices_history ORDER BY Ticker ASC;"
+        params = []
+    rows, err = execute_query(q, params=params, fetch_all=True)
+    if err or not rows:
+        return []
+    if isinstance(rows[0], dict):
+        key = list(rows[0].keys())[0]
+        return [r[key] for r in rows]
+    if isinstance(rows[0], (list, tuple)):
+        return [r[0] for r in rows]
+    return []
+
 # -----------------------------------------------------------------------------
-# Tambahan utilitas eksternal
+# Util eksternal
 # -----------------------------------------------------------------------------
 def get_stock_info(ticker: str) -> Dict[str, Any]:
     """
@@ -256,25 +286,22 @@ def get_stock_info(ticker: str) -> Dict[str, Any]:
     """
     try:
         y = yf.Ticker(ticker)
-        out: Dict[str, Any] = {}
         fi = getattr(y, "fast_info", None)
         if fi:
-            out = {
+            return {
                 "last_price": getattr(fi, "last_price", None),
                 "previous_close": getattr(fi, "previous_close", None),
                 "currency": getattr(fi, "currency", None),
                 "market_cap": getattr(fi, "market_cap", None),
             }
-        else:
-            hist = y.history(period="5d")
-            last = float(hist["Close"][-1]) if not hist.empty else None
-            out = {"last_price": last}
-        return out
+        hist = y.history(period="5d")
+        last = float(hist["Close"][-1]) if not hist.empty else None
+        return {"last_price": last}
     except Exception as e:
         return {"error": str(e)}
 
 # -----------------------------------------------------------------------------
-# Ekspor konstanta DB_NAME (untuk kompatibilitas import di pages/Konsol)
+# Ekspor konstanta DB_NAME (untuk kompatibilitas import)
 # -----------------------------------------------------------------------------
 try:
     _cfg_for_export, _err_ = _load_cfg()
