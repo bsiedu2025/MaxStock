@@ -11,7 +11,7 @@ import yfinance as yf
 # -----------------------------
 def _dsn_from_secrets() -> str:
     host = st.secrets.get("DB_HOST")
-    port = int(st.secrets.get("DB_PORT", 6543))  # pooled PgBouncer
+    port = int(st.secrets.get("DB_PORT", 6542))  # pooled PgBouncer
     db   = st.secrets.get("DB_NAME", "postgres")
     user = st.secrets.get("DB_USER", "postgres")
     pwd  = st.secrets.get("DB_PASSWORD")
