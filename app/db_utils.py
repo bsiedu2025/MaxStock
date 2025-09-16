@@ -1,172 +1,144 @@
 # app/db_utils.py
-import streamlit as st
+import os
 import psycopg2
-import psycopg2.extras
-import pandas as pd
-from typing import List, Dict, Any, Optional
-import yfinance as yf
+import streamlit as st
+from typing import Dict, Any, Tuple, Optional
 
-# -----------------------------
-# KONEKSI
-# -----------------------------
-def _dsn_from_secrets() -> str:
-    host = st.secrets.get("DB_HOST")
-    port = int(st.secrets.get("DB_PORT", 6543))  # pooled PgBouncer
-    db   = st.secrets.get("DB_NAME", "postgres")
-    user = st.secrets.get("DB_USER", "postgres")
-    pwd  = st.secrets.get("Jakartabersih2025!")
 
-    if not all([host, port, db, user, pwd]):
-        raise RuntimeError(
-            "Secrets DB belum lengkap. Harus ada DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD."
+# ----------------------------
+# Utilities
+# ----------------------------
+REQUIRED_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+
+def debug_secrets() -> None:
+    """Tampilkan key yang terbaca dari st.secrets (untuk debug di UI)."""
+    try:
+        keys = list(st.secrets.keys())
+        st.caption("🔑 Keys yang ditemukan di st.secrets:")
+        st.code(", ".join(keys) if keys else "(kosong)")
+    except Exception as e:
+        st.error(f"Gagal membaca st.secrets: {e}")
+
+
+def _load_db_config() -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Baca konfigurasi DB dari st.secrets (prioritas) atau ENV (fallback).
+    Return: (config_dict, error_message_if_any)
+    """
+    cfg: Dict[str, Any] = {}
+    missing = []
+
+    # 1) Ambil dari st.secrets kalau ada
+    try:
+        for k in REQUIRED_KEYS:
+            if k in st.secrets:
+                cfg[k] = str(st.secrets[k]).strip()
+    except Exception:
+        # st.secrets belum tersedia (mis. saat run lokal tanpa .streamlit/secrets.toml)
+        pass
+
+    # 2) Fallback ke environment variables kalau masih kosong
+    for k in REQUIRED_KEYS:
+        if k not in cfg or cfg[k] == "":
+            env_val = os.getenv(k)
+            if env_val:
+                cfg[k] = env_val.strip()
+
+    # 3) Validasi
+    for k in REQUIRED_KEYS:
+        if k not in cfg or cfg[k] == "":
+            missing.append(k)
+
+    if missing:
+        return cfg, (
+            "Secrets DB belum lengkap. Harus ada "
+            + ", ".join(REQUIRED_KEYS)
+            + f". (Missing: {', '.join(missing)})"
         )
 
-    # SSL wajib untuk Supabase; keepalive agar stabil di serverless
-    return (
-        f"host={host} port={port} dbname={db} user={user} password={pwd} "
-        "sslmode=require connect_timeout=10 keepalives=1 keepalives_idle=30 "
-        "keepalives_interval=10 keepalives_count=3"
-    )
+    return cfg, None
 
-@st.cache_resource(show_spinner=False)
+
+def check_secrets(show_in_ui: bool = True) -> bool:
+    """Cek apakah semua key DB ada. Tampilkan pesan kalau belum lengkap."""
+    _, err = _load_db_config()
+    if err:
+        if show_in_ui:
+            st.error(f"Gagal terhubung ke database: {err}")
+        return False
+    return True
+
+
+# ----------------------------
+# Connection
+# ----------------------------
 def get_connection():
-    """Satu koneksi global per proses Streamlit (jangan ditutup manual)."""
+    """
+    Buat koneksi psycopg2 ke Supabase Postgres (SSL required).
+    Dipakai oleh halaman-halaman lain.
+    """
+    cfg, err = _load_db_config()
+    if err:
+        # Sudah ditampilkan oleh check_secrets() di app_main; 
+        # di sini raise supaya caller bisa handle.
+        raise RuntimeError(err)
+
     try:
-        dsn = _dsn_from_secrets()
-        conn = psycopg2.connect(dsn)
-        conn.autocommit = False
+        conn = psycopg2.connect(
+            host=cfg["DB_HOST"],
+            port=cfg["DB_PORT"],
+            dbname=cfg["DB_NAME"],
+            user=cfg["DB_USER"],
+            password=cfg["DB_PASSWORD"],
+            sslmode="require",
+            connect_timeout=15,
+        )
         return conn
     except Exception as e:
-        st.error(f"Gagal terhubung ke database: {e}")
-        return None
+        # Perlihatkan error di UI agar mudah didiagnosa
+        st.error(f"Gagal membuka koneksi ke Postgres: {e}")
+        raise
 
-# Backward compatibility: beberapa halaman memanggil nama ini
-def get_db_connection():
-    return get_connection()
 
-# -----------------------------
-# HELPER QUERY
-# -----------------------------
-def fetch_data(query: str, params: Optional[tuple] = None) -> Optional[list]:
-    conn = get_connection()
-    if conn is None:
-        return None
+# Alias untuk kompatibilitas impor lama
+get_db_connection = get_connection
+
+
+# ----------------------------
+# Schema / Setup
+# ----------------------------
+DDL_STOCK_PRICES = """
+CREATE TABLE IF NOT EXISTS public.stock_prices_history (
+  "Ticker"  TEXT NOT NULL,
+  "Tanggal" DATE NOT NULL,
+  "Open"    DOUBLE PRECISION,
+  "High"    DOUBLE PRECISION,
+  "Low"     DOUBLE PRECISION,
+  "Close"   DOUBLE PRECISION,
+  "Volume"  DOUBLE PRECISION,
+  CONSTRAINT stock_prices_history_pk PRIMARY KEY ("Ticker","Tanggal")
+);
+"""
+
+def create_tables_if_not_exist() -> None:
+    """
+    Membuat tabel yang dibutuhkan jika belum ada.
+    Aman dipanggil berkali-kali (idempotent).
+    """
+    if not check_secrets(show_in_ui=True):
+        return
+
+    conn = None
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
-            return cur.fetchall()
-    except Exception as e:
-        st.error(f"Terjadi kesalahan saat menjalankan query: {e}")
-        return None
-
-def execute_query(query: str, params: Optional[tuple] = None) -> bool:
-    conn = get_connection()
-    if conn is None:
-        return False
-    try:
+        conn = get_connection()
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(DDL_STOCK_PRICES)
         conn.commit()
-        return True
+        st.success("✅ Inisialisasi schema selesai (tabel dicek/dibuat).")
     except Exception as e:
-        conn.rollback()
-        st.error(f"Terjadi kesalahan saat mengeksekusi query: {e}")
-        return False
-
-# -----------------------------
-# FUNGSI UTIL / KONSOL DB
-# -----------------------------
-def get_table_list(schema: str = "public") -> List[str]:
-    """Kembalikan daftar tabel pada schema (default: public)."""
-    q = """
-    SELECT tablename
-    FROM pg_catalog.pg_tables
-    WHERE schemaname = %s
-    ORDER BY tablename;
-    """
-    rows = fetch_data(q, (schema,))
-    return [r["tablename"] for r in rows] if rows else []
-
-# -----------------------------
-# FUNGSI DOMAIN: SAHAM
-# -----------------------------
-def get_saved_tickers_summary() -> pd.DataFrame:
-    q = """
-    SELECT Ticker,
-           COUNT(*) AS "Jumlah_Data",
-           MIN(Tanggal) AS "Tanggal_Awal",
-           MAX(Tanggal) AS "Tanggal_Terakhir",
-           (SELECT "Close" FROM stock_prices_history
-              WHERE Ticker = T.Ticker ORDER BY "Tanggal" DESC LIMIT 1) AS "Harga_Penutupan_Terakhir",
-           MAX("High") AS "Harga_Tertinggi_Periode",
-           MIN("Low")  AS "Harga_Terendah_Periode"
-    FROM stock_prices_history T
-    GROUP BY Ticker
-    ORDER BY Ticker ASC;
-    """
-    rows = fetch_data(q)
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-def fetch_stock_prices_from_db(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    q = """
-    SELECT "Tanggal", "Open", "High", "Low", "Close", "Volume"
-    FROM stock_prices_history
-    WHERE "Ticker" = %s AND "Tanggal" BETWEEN %s AND %s
-    ORDER BY "Tanggal" ASC;
-    """
-    rows = fetch_data(q, (ticker, start_date, end_date))
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["Tanggal"] = pd.to_datetime(df["Tanggal"])
-    df.set_index("Tanggal", inplace=True)
-    return df
-
-def insert_stock_price_data(ticker: str, data: pd.DataFrame) -> bool:
-    """UPSERT harga saham per tanggal."""
-    conn = get_connection()
-    if conn is None:
-        st.error("Tidak dapat menyimpan data: koneksi database gagal.")
-        return False
-    try:
-        with conn.cursor() as cur:
-            for index, row in data.iterrows():
-                q = """
-                INSERT INTO stock_prices_history ("Ticker", "Tanggal", "Open", "High", "Low", "Close", "Volume")
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT ("Ticker", "Tanggal") DO UPDATE
-                SET "Open" = EXCLUDED."Open",
-                    "High" = EXCLUDED."High",
-                    "Low"  = EXCLUDED."Low",
-                    "Close"= EXCLUDED."Close",
-                    "Volume"=EXCLUDED."Volume";
-                """
-                cur.execute(q, (
-                    ticker,
-                    index.strftime("%Y-%m-%d"),
-                    float(row.get("Open")) if row.get("Open") is not None else None,
-                    float(row.get("High")) if row.get("High") is not None else None,
-                    float(row.get("Low"))  if row.get("Low")  is not None else None,
-                    float(row.get("Close"))if row.get("Close")is not None else None,
-                    float(row.get("Volume")) if row.get("Volume") is not None else None,
-                ))
-        conn.commit()
-        return True
-    except Exception as e:
-        conn.rollback()
-        st.error(f"Gagal menyimpan data ke database: {e}")
-        return False
-
-def get_distinct_tickers() -> List[str]:
-    rows = fetch_data('SELECT DISTINCT "Ticker" FROM stock_prices_history ORDER BY "Ticker" ASC;')
-    return [r["Ticker"] for r in rows] if rows else []
-
-def get_stock_info(ticker: str) -> Dict[str, Any]:
-    """Info ringkas via yfinance agar import tidak error di halaman Harga Saham."""
-    try:
-        y = yf.Ticker(ticker)
-        info = y.info or {}
-        keep = ["trailingPE", "forwardPE", "marketCap", "shortName", "longName", "currency"]
-        return {k: info.get(k) for k in keep}
-    except Exception:
-        return {}
+        st.error(f"Gagal membuat/memvalidasi tabel: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
