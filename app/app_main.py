@@ -1,6 +1,6 @@
 # D:\Docker\BrokerSummary\app\app_main.py
 import streamlit as st
-from db_utils import create_tables_if_not_exist, get_db_connection
+# from db_utils import create_tables_if_not_exist, get_db_connection
 
 # --- Konfigurasi Halaman Streamlit ---
 # Ini harus menjadi perintah Streamlit pertama yang dijalankan, dan hanya sekali per aplikasi.
