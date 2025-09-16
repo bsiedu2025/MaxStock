@@ -1,13 +1,21 @@
+<<<<<<< HEAD
 # app/app_main.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import sys
+=======
+# app_main.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+>>>>>>> f21a75a (update: revisi app_main, db_utils, dan update data harga saham)
 import runpy
 from pathlib import Path
 from typing import Dict
 
 import streamlit as st
+<<<<<<< HEAD
 
 # Ambil util DB (versi yang sudah kita buat sebelumnya)
 from db_utils import (
@@ -21,6 +29,15 @@ from db_utils import (
 # -----------------------------------------------------------------------------
 # Konfigurasi halaman
 # -----------------------------------------------------------------------------
+=======
+from db_utils import (
+    check_secrets,
+    debug_secrets,
+    get_db_connection,
+    create_tables_if_not_exist,
+)
+
+>>>>>>> f21a75a (update: revisi app_main, db_utils, dan update data harga saham)
 st.set_page_config(
     page_title="Max Stock",
     page_icon="📈",
@@ -30,6 +47,7 @@ st.set_page_config(
 
 APP_DIR = Path(__file__).resolve().parent
 
+<<<<<<< HEAD
 # -----------------------------------------------------------------------------
 # Sidebar - Brand & Status
 # -----------------------------------------------------------------------------
@@ -58,12 +76,31 @@ if check_secrets(show_in_ui=True):
         db_ok = True
         status_placeholder.success("Status Database: Terhubung ✅")
         # Buat tabel jika belum ada
+=======
+st.sidebar.title("app main")
+status_placeholder = st.sidebar.empty()
+status_placeholder.info("Memeriksa koneksi database…")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Debug")
+debug_secrets()
+
+db_ok = False
+if check_secrets(show_in_ui=True):
+    try:
+        with st.spinner("Menyambungkan ke database…"):
+            conn = get_db_connection()
+            conn.close()
+        db_ok = True
+        status_placeholder.success("Status Database: Terhubung ✅")
+>>>>>>> f21a75a (update: revisi app_main, db_utils, dan update data harga saham)
         with st.spinner("Inisialisasi schema (jika perlu)…"):
             create_tables_if_not_exist()
     except Exception as e:
         db_ok = False
         status_placeholder.error(f"Status Database: Gagal Terhubung ❌\n\n{e}")
 else:
+<<<<<<< HEAD
     db_ok = False
     status_placeholder.error("Status Database: Gagal Terhubung ❌")
 
@@ -139,3 +176,53 @@ else:
 # -----------------------------------------------------------------------------
 st.markdown("---")
 st.caption("© 2025 — Max Stock • Streamlit + Supabase")
+=======
+    status_placeholder.error("Status Database: Gagal Terhubung ❌")
+
+st.title("Max Stock")
+st.caption("Terhubung ke MySQL (Aiven) via Streamlit Cloud.")
+
+st.header("Selamat Datang!")
+st.write(
+    """
+Aplikasi ini membantu analisis data harga saham.
+Gunakan sidebar untuk memilih halaman:
+- **Harga Saham**: Visualisasi & indikator.
+- **Update Data Harga Saham**: Unduh & simpan ke DB.
+- **Konsol Database**: Jalankan query SQL langsung.
+"""
+)
+
+if not db_ok:
+    st.error("Gagal terhubung ke database. Beberapa fitur tidak akan berfungsi.")
+    st.warning(
+        "Pastikan Secrets berisi DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, dan DB_SSL_CA (Aiven mewajibkan SSL)."
+    )
+
+PAGE_FILES: Dict[str, Path] = {
+    "Pergerakan IHSG": APP_DIR / "1_Harga_Saham.py",
+    "Harga Saham": APP_DIR / "1_Harga_Saham.py",
+    "Update Data Harga Saham": APP_DIR / "2_Update_Data_Harga_Saham.py",
+    "Konsol Database": APP_DIR / "3_Konsol_Database.py",
+    "Sinyal MACD": APP_DIR / "1_Harga_Saham.py",
+}
+available_pages = {n: p for n, p in PAGE_FILES.items() if p.exists()}
+
+st.markdown("---")
+st.subheader("Navigasi")
+if not available_pages:
+    st.info(
+        "File halaman tidak ditemukan. Pastikan 1_Harga_Saham.py, 2_Update_Data_Harga_Saham.py, 3_Konsol_Database.py ada di direktori app."
+    )
+else:
+    page = st.sidebar.radio("Pilih halaman:", list(available_pages.keys()), index=0)
+    try:
+        runpy.run_path(str(available_pages[page]), run_name="__main__")
+    except SystemExit:
+        pass
+    except Exception as e:
+        st.error(f"Gagal memuat halaman **{page}**: {e}")
+
+st.markdown("---")
+st.caption("© 2025 — Max Stock • Streamlit + Aiven MySQL")
+>>>>>>> f21a75a (update: revisi app_main, db_utils, dan update data harga saham)

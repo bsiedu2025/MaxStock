@@ -1,144 +1,213 @@
-# app/db_utils.py
-import os
-import psycopg2
+# db_utils.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+import os, tempfile, textwrap
+from datetime import date
+from typing import Dict, Any, Optional, Tuple
+
+import mysql.connector
+import pandas as pd
 import streamlit as st
-from typing import Dict, Any, Tuple, Optional
 
-
-# ----------------------------
-# Utilities
-# ----------------------------
 REQUIRED_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
 
 def debug_secrets() -> None:
-    """Tampilkan key yang terbaca dari st.secrets (untuk debug di UI)."""
     try:
-        keys = list(st.secrets.keys())
-        st.caption("🔑 Keys yang ditemukan di st.secrets:")
-        st.code(", ".join(keys) if keys else "(kosong)")
+        st.caption("🔑 Keys di st.secrets:")
+        st.code(", ".join(list(st.secrets.keys())), language="text")
     except Exception as e:
         st.error(f"Gagal membaca st.secrets: {e}")
 
-
-def _load_db_config() -> Tuple[Dict[str, Any], Optional[str]]:
-    """
-    Baca konfigurasi DB dari st.secrets (prioritas) atau ENV (fallback).
-    Return: (config_dict, error_message_if_any)
-    """
+def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
     cfg: Dict[str, Any] = {}
-    missing = []
-
-    # 1) Ambil dari st.secrets kalau ada
+    # ambil dari secrets
     try:
-        for k in REQUIRED_KEYS:
+        for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
             if k in st.secrets:
-                cfg[k] = str(st.secrets[k]).strip()
+                v = st.secrets[k]
+                if isinstance(v, str):
+                    v = v.strip()
+                cfg[k] = v
     except Exception:
-        # st.secrets belum tersedia (mis. saat run lokal tanpa .streamlit/secrets.toml)
         pass
-
-    # 2) Fallback ke environment variables kalau masih kosong
-    for k in REQUIRED_KEYS:
-        if k not in cfg or cfg[k] == "":
-            env_val = os.getenv(k)
-            if env_val:
-                cfg[k] = env_val.strip()
-
-    # 3) Validasi
-    for k in REQUIRED_KEYS:
-        if k not in cfg or cfg[k] == "":
-            missing.append(k)
-
+    # fallback env
+    for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
+        if k not in cfg or cfg[k] in ("", None):
+            v = os.getenv(k)
+            if v:
+                cfg[k] = v.strip()
+    missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
     if missing:
-        return cfg, (
-            "Secrets DB belum lengkap. Harus ada "
-            + ", ".join(REQUIRED_KEYS)
-            + f". (Missing: {', '.join(missing)})"
-        )
-
+        return cfg, f"Secrets DB belum lengkap. Missing: {', '.join(missing)}"
     return cfg, None
 
-
 def check_secrets(show_in_ui: bool = True) -> bool:
-    """Cek apakah semua key DB ada. Tampilkan pesan kalau belum lengkap."""
-    _, err = _load_db_config()
-    if err:
-        if show_in_ui:
-            st.error(f"Gagal terhubung ke database: {err}")
-        return False
-    return True
+    _, err = _load_cfg()
+    if err and show_in_ui:
+        st.error(f"Gagal terhubung ke database: {err}")
+    return err is None
 
+def _prepare_ssl_ca_file(cfg: Dict[str, Any]) -> Optional[str]:
+    ca_text = cfg.get("DB_SSL_CA")
+    if not ca_text:
+        return None
+    # tulis isi CA (multiline) ke file sementara
+    ca_text = textwrap.dedent(str(ca_text)).strip()
+    tmp = tempfile.NamedTemporaryFile(prefix="aiven_ca_", suffix=".pem", delete=False)
+    tmp.write(ca_text.encode("utf-8"))
+    tmp.flush()
+    tmp.close()
+    return tmp.name
 
-# ----------------------------
-# Connection
-# ----------------------------
-def get_connection():
-    """
-    Buat koneksi psycopg2 ke Supabase Postgres (SSL required).
-    Dipakai oleh halaman-halaman lain.
-    """
-    cfg, err = _load_db_config()
+def get_db_connection():
+    cfg, err = _load_cfg()
     if err:
-        # Sudah ditampilkan oleh check_secrets() di app_main; 
-        # di sini raise supaya caller bisa handle.
         raise RuntimeError(err)
 
+    ssl_args = {}
+    ca_path = _prepare_ssl_ca_file(cfg)
+    if ca_path:
+        ssl_args["ssl_ca"] = ca_path
+
     try:
-        conn = psycopg2.connect(
+        conn = mysql.connector.connect(
             host=cfg["DB_HOST"],
-            port=cfg["DB_PORT"],
-            dbname=cfg["DB_NAME"],
+            port=int(cfg["DB_PORT"]),
+            database=cfg["DB_NAME"],
             user=cfg["DB_USER"],
             password=cfg["DB_PASSWORD"],
-            sslmode="require",
-            connect_timeout=15,
+            charset="utf8mb4",
+            autocommit=False,
+            **ssl_args,  # Aiven requires ssl_ca
         )
         return conn
-    except Exception as e:
-        # Perlihatkan error di UI agar mudah didiagnosa
-        st.error(f"Gagal membuka koneksi ke Postgres: {e}")
+    except mysql.connector.Error as e:
+        st.error(f"Gagal membuka koneksi MySQL: {e}")
         raise
 
-
-# Alias untuk kompatibilitas impor lama
-get_db_connection = get_connection
-
-
-# ----------------------------
-# Schema / Setup
-# ----------------------------
-DDL_STOCK_PRICES = """
-CREATE TABLE IF NOT EXISTS public.stock_prices_history (
-  "Ticker"  TEXT NOT NULL,
-  "Tanggal" DATE NOT NULL,
-  "Open"    DOUBLE PRECISION,
-  "High"    DOUBLE PRECISION,
-  "Low"     DOUBLE PRECISION,
-  "Close"   DOUBLE PRECISION,
-  "Volume"  DOUBLE PRECISION,
-  CONSTRAINT stock_prices_history_pk PRIMARY KEY ("Ticker","Tanggal")
-);
-"""
-
-def create_tables_if_not_exist() -> None:
-    """
-    Membuat tabel yang dibutuhkan jika belum ada.
-    Aman dipanggil berkali-kali (idempotent).
-    """
-    if not check_secrets(show_in_ui=True):
-        return
-
-    conn = None
+def execute_query(query: str, params=None, fetch_one=False, fetch_all=False, is_dml_ddl=False):
+    conn = get_db_connection()
+    cursor = None
     try:
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute(DDL_STOCK_PRICES)
-        conn.commit()
-        st.success("✅ Inisialisasi schema selesai (tabel dicek/dibuat).")
-    except Exception as e:
-        st.error(f"Gagal membuat/memvalidasi tabel: {e}")
-        if conn:
+        cursor = conn.cursor(dictionary=(fetch_one or fetch_all))
+        cursor.execute(query, params or ())
+        if is_dml_ddl:
+            conn.commit()
+            return (cursor.rowcount if cursor.rowcount != -1 else True, None)
+        if fetch_one:
+            return (cursor.fetchone(), None)
+        if fetch_all:
+            return (cursor.fetchall(), None)
+        return (True, None)
+    except mysql.connector.Error as err:
+        if conn.is_connected():
             conn.rollback()
+        return (None if (fetch_one or fetch_all) else False, f"Error SQL: {err}")
     finally:
-        if conn:
+        if cursor:
+            cursor.close()
+        if conn and conn.is_connected():
             conn.close()
+
+def create_tables_if_not_exist():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS stock_prices_history (
+            Ticker  VARCHAR(20) NOT NULL,
+            Tanggal DATE NOT NULL,
+            Open    DECIMAL(19,4),
+            High    DECIMAL(19,4),
+            Low     DECIMAL(19,4),
+            Close   DECIMAL(19,4),
+            Volume  BIGINT,
+            PRIMARY KEY (Ticker, Tanggal)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+        conn.commit()
+        st.toast("Schema dicek/dibuat.", icon="✅")
+    finally:
+        cur.close(); conn.close()
+
+def insert_stock_price_data(df_stock, ticker_symbol: str) -> int:
+    if df_stock is None or df_stock.empty:
+        st.warning("DataFrame kosong; tidak ada yang disimpan.")
+        return 0
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        q = """INSERT IGNORE INTO stock_prices_history
+               (Ticker, Tanggal, Open, High, Low, Close, Volume)
+               VALUES (%s,%s,%s,%s,%s,%s,%s);"""
+        count = 0
+        for idx, row in df_stock.iterrows():
+            tanggal = idx.date() if hasattr(idx, "date") else idx
+            cur.execute(q, (
+                ticker_symbol, tanggal,
+                float(row.get("Open")) if pd.notna(row.get("Open")) else None,
+                float(row.get("High")) if pd.notna(row.get("High")) else None,
+                float(row.get("Low"))  if pd.notna(row.get("Low"))  else None,
+                float(row.get("Close"))if pd.notna(row.get("Close"))else None,
+                int(row.get("Volume")) if pd.notna(row.get("Volume")) else None,
+            ))
+            count += cur.rowcount
+        conn.commit()
+        return count
+    finally:
+        cur.close(); conn.close()
+
+def fetch_stock_prices_from_db(ticker_symbol: str, start_date: Optional[date]=None, end_date: Optional[date]=None) -> pd.DataFrame:
+    conn = get_db_connection()
+    q = "SELECT Tanggal, Open, High, Low, Close, Volume FROM stock_prices_history WHERE Ticker=%s"
+    params = [ticker_symbol]
+    if start_date and end_date:
+        q += " AND Tanggal BETWEEN %s AND %s"; params += [start_date, end_date]
+    elif start_date:
+        q += " AND Tanggal >= %s"; params += [start_date]
+    elif end_date:
+        q += " AND Tanggal <= %s"; params += [end_date]
+    q += " ORDER BY Tanggal ASC"
+    try:
+        df = pd.read_sql(q, conn, params=params, index_col="Tanggal")
+        if not df.empty:
+            df.index = pd.to_datetime(df.index)
+        return df
+    finally:
+        conn.close()
+
+def get_saved_tickers_summary() -> pd.DataFrame:
+    q = """
+    SELECT sph.Ticker, COUNT(*) as Jumlah_Data,
+           MIN(sph.Tanggal) as Tanggal_Awal,
+           MAX(sph.Tanggal) as Tanggal_Terakhir,
+           (SELECT sp_last.Close FROM stock_prices_history sp_last
+            WHERE sp_last.Ticker = sph.Ticker
+            ORDER BY sp_last.Tanggal DESC LIMIT 1) as Harga_Penutupan_Terakhir,
+           MAX(sph.High) as Harga_Tertinggi_Periode,
+           MIN(sph.Low)  as Harga_Terendah_Periode
+    FROM stock_prices_history sph
+    GROUP BY sph.Ticker
+    ORDER BY sph.Ticker ASC;
+    """
+    result, err = execute_query(q, fetch_all=True)
+    if err or not result:
+        return pd.DataFrame(columns=[
+            "Ticker","Jumlah_Data","Tanggal_Awal","Tanggal_Terakhir",
+            "Harga_Penutupan_Terakhir","Harga_Tertinggi_Periode","Harga_Terendah_Periode"
+        ])
+    df = pd.DataFrame(result)
+    if "Tanggal_Awal" in df: df["Tanggal_Awal"] = pd.to_datetime(df["Tanggal_Awal"], errors="coerce")
+    if "Tanggal_Terakhir" in df: df["Tanggal_Terakhir"] = pd.to_datetime(df["Tanggal_Terakhir"], errors="coerce")
+    return df
+
+def get_table_list():
+    rows, err = execute_query("SHOW TABLES;", fetch_all=True)
+    if err or not rows:
+        return []
+    if isinstance(rows[0], dict):
+        k = list(rows[0].keys())[0]
+        return [r[k] for r in rows]
+    if isinstance(rows[0], (list, tuple)):
+        return [r[0] for r in rows]
+    return []
