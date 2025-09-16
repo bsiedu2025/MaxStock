@@ -3,13 +3,13 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
-from db_utils import (
-    insert_stock_price_data,
-    fetch_stock_prices_from_db,
-    create_tables_if_not_exist,
-    get_saved_tickers_summary,
-    execute_query # [BARU] Import execute_query untuk mengambil list ticker
-)
+#from db_utils import (
+#    insert_stock_price_data,
+#    fetch_stock_prices_from_db,
+#    create_tables_if_not_exist,
+#    get_saved_tickers_summary,
+#    execute_query # [BARU] Import execute_query untuk mengambil list ticker
+#)
 
 st.set_page_config(page_title="Kelola Data Harga Saham", layout="wide")
 st.title("🛠️ Kelola Data Historis Harga Saham")
