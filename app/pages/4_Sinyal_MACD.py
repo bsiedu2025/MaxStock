@@ -9,8 +9,8 @@ st.set_page_config(page_title="Sinyal MACD", page_icon="📉", layout="wide")
 st.title("Sinyal Beli MACD (Histogram Hijau)")
 
 st.caption(
-    "Scan cepat: ambil semua harga penutupan **sekali query** (X hari terakhir) "
-    "lalu hitung MACD per-ticker di pandas. Lebih cepat dibanding query per-ticker."
+    "Scan cepat: ambil semua harga penutupan **sekali query** (X hari terakhir), "
+    "hitung MACD per-ticker di pandas, dan sediakan link ke halaman **Harga Saham**."
 )
 
 days = st.slider("Rentang hari historis", 60, 400, 200, step=20)
@@ -74,8 +74,32 @@ if st.button("🔍 Cari Sinyal MACD Terbaru", type="primary", use_container_widt
             continue
 
     st.subheader("Hasil")
+
     if not found:
         st.info("Belum ada sinyal beli (histogram hijau) pada periode ini.")
     else:
         out = pd.DataFrame(found).sort_values("Ticker").reset_index(drop=True)
-        st.dataframe(out, use_container_width=True)
+
+        # Tambahkan kolom link ke halaman internal /Harga_Saham?ticker=<kode>
+        out["Lihat"] = out["Ticker"].apply(lambda t: f"/Harga_Saham?ticker={t}")
+
+        # Tampilkan tabel dengan kolom link yang bisa diklik
+        st.data_editor(
+            out[["Ticker", "Tanggal", "Close_Terakhir", "Hist_-1", "Hist_0", "Lihat"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Lihat": st.column_config.LinkColumn(
+                    "Lihat",
+                    help="Buka halaman Harga Saham untuk ticker ini",
+                ),
+                "Close_Terakhir": st.column_config.NumberColumn(format="%.2f"),
+                "Hist_-1": st.column_config.NumberColumn(format="%.6f"),
+                "Hist_0": st.column_config.NumberColumn(format="%.6f"),
+                "Tanggal": st.column_config.DateColumn(),
+            },
+        )
+
+        # Opsi alternatif (kalau mau teks ticker-nya langsung jadi link):
+        # links = [f"- [{t}](/Harga_Saham?ticker={t})" for t in out['Ticker']]
+        # st.markdown("\n".join(links))
