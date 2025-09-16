@@ -14,7 +14,7 @@ def _dsn_from_secrets() -> str:
     port = int(st.secrets.get("DB_PORT", 6543))  # pooled PgBouncer
     db   = st.secrets.get("DB_NAME", "postgres")
     user = st.secrets.get("DB_USER", "postgres")
-    pwd  = st.secrets.get("DB_PASSWORD")
+    pwd  = st.secrets.get("Jakartabersih2025!")
 
     if not all([host, port, db, user, pwd]):
         raise RuntimeError(
