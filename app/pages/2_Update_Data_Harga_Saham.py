@@ -40,11 +40,18 @@ if not summary_df.empty:
     summary_df_display['Jumlah_Data'] = summary_df_display['Jumlah_Data'].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
     summary_df_display['Tanggal_Awal'] = pd.to_datetime(summary_df_display['Tanggal_Awal']).dt.strftime('%Y-%m-%d')
     summary_df_display['Tanggal_Terakhir'] = pd.to_datetime(summary_df_display['Tanggal_Terakhir']).dt.strftime('%Y-%m-%d')
-    
-    st.dataframe(summary_df_display, use_container_width=True)
+    price_cols_to_format = ['Harga_Penutupan_Terakhir', 'Harga_Tertinggi_Periode', 'Harga_Terendah_Periode']
+    for col in price_cols_to_format:
+        if col in summary_df_display.columns:
+            summary_df_display[col] = summary_df_display[col].apply(lambda x: f"{float(x):,.0f}" if pd.notna(x) else "N/A")
+    summary_df_display.rename(columns={'Ticker': 'Simbol Saham','Jumlah_Data': 'Total Baris Data','Tanggal_Awal': 'Dari Tanggal','Tanggal_Terakhir': 'Sampai Tanggal','Harga_Penutupan_Terakhir': 'Penutupan Terakhir (IDR)','Harga_Tertinggi_Periode': 'Tertinggi Tersimpan (IDR)','Harga_Terendah_Periode': 'Terendah Tersimpan (IDR)'}, inplace=True)
+    display_columns_ordered = ['Simbol Saham', 'Total Baris Data', 'Dari Tanggal', 'Sampai Tanggal', 'Penutupan Terakhir (IDR)', 'Tertinggi Tersimpan (IDR)', 'Terendah Tersimpan (IDR)']
+    final_display_columns = [col for col in display_columns_ordered if col in summary_df_display.columns]
+    st.dataframe(summary_df_display[final_display_columns], use_container_width=True)
 else:
     st.info("Belum ada data harga saham yang tersimpan di database.")
 st.markdown("---")
+
 
 # --- SEKSI UPDATE MASSAL ---
 st.subheader("🔄 Update Massal (Bulk Update)")
@@ -75,8 +82,9 @@ else:
             try:
                 stock_data = yf.Ticker(ticker).history(period=update_period, auto_adjust=True)
                 if not stock_data.empty:
-                    df_to_save = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-                    insert_stock_price_data(ticker, df_to_save)
+                    columns_to_keep = ['Open', 'High', 'Low', 'Close', 'Volume']
+                    df_to_save = stock_data[[col for col in columns_to_keep if col in stock_data.columns]].copy()
+                    insert_stock_price_data(df_to_save, ticker)
                 else:
                     st.toast(f"Tidak ada data baru ditemukan untuk {ticker}", icon="🤷‍♂️")
             except Exception as e:
