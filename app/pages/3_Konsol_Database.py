@@ -1,46 +1,70 @@
-# app/pages/3_Konsol_Database.py
-# -*- coding: utf-8 -*-
+# D:\Docker\BrokerSummary\app\pages\7_Konsol_Database.py
 import streamlit as st
-from db_utils import get_db_connection, execute_query, get_table_list, get_db_name
+import pandas as pd
+from db_utils import get_db_connection, execute_query, get_table_list, DB_NAME # Impor DB_NAME
 
-st.set_page_config(page_title="Konsol Database", page_icon="🗄️", layout="wide")
+st.set_page_config(page_title="Konsol Database", layout="wide")
+st.title(" Database Console") # "Konsol Database" dalam Cyrillic untuk ikon terminal
+st.markdown(f"Jalankan query SQL secara langsung pada database **`{DB_NAME}`**.")
 
-st.title("Konsol Database 🗄️")
-st.caption(f"Database aktif: **{get_db_name()}**")
+# --- Menampilkan Informasi Database dan Tabel ---
+st.sidebar.header("Info Database")
+st.sidebar.info(f"Terhubung ke: **`{DB_NAME}`**")
 
-with st.expander("ℹ️ Petunjuk", expanded=False):
-    st.markdown("""
-- Gunakan query **SELECT** untuk membaca data (ditampilkan sebagai tabel).
-- Untuk **DDL/DML** (CREATE/ALTER/INSERT/UPDATE/DELETE), centang opsi *Perintah DDL/DML*.
-- Klik **Jalankan** untuk mengeksekusi.
-    """)
+st.sidebar.subheader("Daftar Tabel")
+with st.spinner("Mengambil daftar tabel..."):
+    tables = get_table_list()
+if tables:
+    for table_name in tables:
+        st.sidebar.code(table_name, language='sql')
+else:
+    st.sidebar.warning("Tidak ada tabel ditemukan atau gagal mengambil daftar tabel.")
+st.sidebar.markdown("---")
 
-query = st.text_area("SQL", height=180, placeholder="SELECT * FROM stock_prices_history LIMIT 50;")
-is_dml = st.checkbox("Perintah DDL/DML (akan di-COMMIT)", value=False)
+# --- Area Input Query ---
+st.subheader("Masukkan Query SQL")
+query_input = st.text_area("Query:", height=150, placeholder="Contoh: SELECT * FROM transactions_raw LIMIT 10;")
 
-col1, col2 = st.columns([1, 2])
-with col1:
-    if st.button("Jalankan", type="primary", use_container_width=True):
-        if not query.strip():
-            st.warning("SQL masih kosong.")
-        else:
-            if is_dml:
-                ok, err = execute_query(query, is_dml_ddl=True)
-                if err:
-                    st.error(err)
-                else:
-                    st.success(f"Perintah berhasil. Rowcount: {ok}")
+if st.button("🚀 Jalankan Query", type="primary"):
+    if query_input.strip():
+        with st.spinner("Menjalankan query..."):
+            # Tentukan apakah query adalah SELECT atau DML/DDL
+            # Ini adalah heuristik sederhana; query kompleks mungkin memerlukan penanganan lebih baik
+            is_select_query = query_input.strip().upper().startswith("SELECT")
+            
+            if is_select_query:
+                result, error_message = execute_query(query_input, fetch_all=True)
             else:
-                rows, err = execute_query(query, fetch_all=True)
-                if err:
-                    st.error(err)
-                else:
-                    st.dataframe(rows if rows else [])
+                # Untuk DML (INSERT, UPDATE, DELETE) atau DDL (CREATE, ALTER, DROP)
+                result, error_message = execute_query(query_input, is_dml_ddl=True)
 
-with col2:
-    st.write("**Daftar Tabel**")
-    tabs = get_table_list()
-    if not tabs:
-        st.info("Belum ada tabel.")
+            st.markdown("---")
+            st.subheader("Hasil Query")
+
+            if error_message:
+                st.error(f"Terjadi kesalahan saat menjalankan query:\n```\n{error_message}\n```")
+            else:
+                if is_select_query:
+                    if result is not None:
+                        if result: # Jika ada baris data
+                            df_result = pd.DataFrame(result)
+                            st.success(f"Query SELECT berhasil dijalankan, {len(df_result)} baris data ditemukan.")
+                            st.dataframe(df_result, use_container_width=True)
+                        else: # Query SELECT berhasil tapi tidak ada data
+                            st.info("Query SELECT berhasil dijalankan, namun tidak ada data yang cocok.")
+                    else: # Seharusnya tidak terjadi jika error_message None, tapi sebagai jaga-jaga
+                        st.warning("Query SELECT mungkin berhasil tetapi tidak mengembalikan hasil yang diharapkan.")
+                else: # Untuk DML/DDL
+                    if isinstance(result, bool) and result:
+                        st.success("Query DML/DDL berhasil dijalankan.")
+                    elif isinstance(result, int): # rowcount dari DML
+                        st.success(f"Query DML berhasil dijalankan, {result} baris terpengaruh.")
+                    else: # Jika result bukan boolean True atau integer (misalnya, None dari error yang tidak tertangkap)
+                        st.warning("Status eksekusi query DML/DDL tidak diketahui atau mungkin gagal tanpa pesan error eksplisit.")
     else:
-        st.code("\n".join(tabs))
+        st.warning("Silakan masukkan query SQL untuk dijalankan.")
+
+st.markdown("---")
+st.caption("PERHATIAN: Menjalankan query DDL (seperti DROP TABLE) atau DML yang salah dapat merusak data Anda. Gunakan dengan hati-hati.")
+st.caption("SELECT * FROM transactions_raw ORDER BY Tanggal_Transaksi DESC")
+st.caption("SELECT Tanggal_Transaksi,COUNT(Kode_Broker) FROM transactions_raw GROUP  BY Tanggal_Transaksi ORDER BY Tanggal_Transaksi DESC")

@@ -36,6 +36,7 @@ def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
                     v = v.strip()
                 cfg[k] = v
     except Exception:
+        # st.secrets bisa tidak tersedia saat run lokal tanpa secrets.toml
         pass
     # env fallback
     for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
@@ -97,24 +98,14 @@ def get_db_connection():
         st.error(f"Gagal membuka koneksi MySQL: {e}")
         raise
 
-# Alias kompatibilitas
+# Alias kompatibilitas (kalau ada import lama)
 get_connection = get_db_connection
 get_db_conn = get_db_connection
 
 def get_db_name() -> str:
+    """Ambil nama DB aktif (berguna untuk tampilan UI)."""
     cfg, _ = _load_cfg()
     return str(cfg.get("DB_NAME", "")).strip()
-
-def get_connection_info() -> Dict[str, Any]:
-    cfg, _ = _load_cfg()
-    return {
-        "host": cfg.get("DB_HOST", ""),
-        "port": cfg.get("DB_PORT", ""),
-        "name": cfg.get("DB_NAME", ""),
-        "user": cfg.get("DB_USER", ""),
-        "kind": cfg.get("DB_KIND", "mysql"),
-        "ssl": "yes" if cfg.get("DB_SSL_CA") else "no",
-    }
 
 # -----------------------------------------------------------------------------
 # Helper eksekusi SQL
@@ -247,7 +238,7 @@ def get_table_list() -> List[str]:
     rows, err = execute_query("SHOW TABLES;", fetch_all=True)
     if err or not rows:
         return []
-    # mysql-connector dict cursor -> key pertama adalah nama kolom "Tables_in_<DBNAME>"
+    # dict cursor -> key pertama adalah "Tables_in_<DBNAME>"
     if isinstance(rows[0], dict):
         key = list(rows[0].keys())[0]
         return [r[key] for r in rows]
@@ -277,7 +268,7 @@ def get_distinct_tickers_from_price_history_with_suffix(suffix: Optional[str] = 
     return []
 
 # -----------------------------------------------------------------------------
-# Util eksternal
+# Util eksternal (dipakai halaman lain)
 # -----------------------------------------------------------------------------
 def get_stock_info(ticker: str) -> Dict[str, Any]:
     """
@@ -301,7 +292,7 @@ def get_stock_info(ticker: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 # -----------------------------------------------------------------------------
-# Ekspor konstanta DB_NAME (untuk kompatibilitas import)
+# Ekspor konstanta DB_NAME (untuk kompatibilitas import langsung di halaman)
 # -----------------------------------------------------------------------------
 try:
     _cfg_for_export, _err_ = _load_cfg()
