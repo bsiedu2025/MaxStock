@@ -1,110 +1,81 @@
-# D:\Docker\BrokerSummary\app\pages\4_Sinyal_MACD.py
+# app/pages/4_Sinyal_MACD.py
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-from db_utils import get_distinct_tickers_from_price_history_with_suffix, fetch_stock_prices_from_db
-from urllib.parse import quote_plus
+from ta.trend import MACD
+from db_utils import get_db_connection
 
-st.set_page_config(page_title="Sinyal Beli MACD", layout="wide")
+st.set_page_config(page_title="Sinyal MACD", page_icon="📉", layout="wide")
 st.title("Sinyal Beli MACD (Histogram Hijau)")
-st.markdown("Halaman ini menampilkan daftar saham dari database yang histogram MACD-nya baru saja berubah dari merah ke hijau, menandakan potensi sinyal momentum positif.")
-st.markdown("---")
 
-# --- Fungsi untuk Kalkulasi MACD (diambil dari 1_Harga_Saham.py) ---
-def calculate_macd_pandas(data_series, fast_window=12, slow_window=26, signal_window=9):
+st.caption(
+    "Scan cepat: ambil semua harga penutupan **sekali query** (X hari terakhir) "
+    "lalu hitung MACD per-ticker di pandas. Lebih cepat dibanding query per-ticker."
+)
+
+days = st.slider("Rentang hari historis", 60, 400, 200, step=20)
+min_rows = st.slider("Minimal baris per ticker (agar bisa hitung MACD)", 30, 200, 60, step=10)
+
+@st.cache_data(ttl=600, show_spinner="Memuat data harga dari database…")
+def load_recent_close(days_: int) -> pd.DataFrame:
+    sql = """
+        SELECT Ticker, Tanggal, Close
+        FROM stock_prices_history
+        WHERE Tanggal >= CURDATE() - INTERVAL %s DAY
+        ORDER BY Ticker, Tanggal
     """
-    Menghitung MACD, Signal Line, dan Histogram dari data harga penutupan.
-    """
-    if data_series is None or data_series.empty or len(data_series) < slow_window:
-        empty_series = pd.Series(dtype='float64', index=data_series.index)
-        return empty_series, empty_series, empty_series
-    ema_fast = data_series.ewm(span=fast_window, adjust=False).mean()
-    ema_slow = data_series.ewm(span=slow_window, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal_window, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql(sql, conn, params=(days_,))
+    finally:
+        conn.close()
+    if df.empty:
+        return df
+    df["Tanggal"] = pd.to_datetime(df["Tanggal"], errors="coerce")
+    df = df.dropna(subset=["Tanggal"])
+    return df
 
-# --- Main Logic ---
-st.info("Klik tombol di bawah untuk memindai semua saham yang tersimpan di database dan menemukan sinyal MACD terbaru.")
-if st.button("🔍 Cari Sinyal MACD Terbaru", type="primary"):
-    
-    with st.spinner("Memindai semua saham, harap tunggu..."):
-        all_tickers = get_distinct_tickers_from_price_history_with_suffix()
+if st.button("🔍 Cari Sinyal MACD Terbaru", type="primary", use_container_width=True):
+    df = load_recent_close(days)
+    if df.empty:
+        st.warning("Tidak ada data dalam rentang hari yang dipilih.")
+        st.stop()
 
-        if not all_tickers:
-            st.warning("Belum ada data saham tersimpan di database. Silakan unduh data terlebih dahulu di halaman 'Kelola Data Harga Saham'.")
-        else:
-            total_tickers = len(all_tickers)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            signal_tickers = []
-            
-            for i, ticker in enumerate(all_tickers):
-                status_text.info(f"Menganalisis {i+1}/{total_tickers}: **{ticker}**")
-                
-                # Mengambil data yang cukup untuk kalkulasi MACD (minimal 26+2 hari)
-                # Ambil 50 hari terakhir untuk aman
-                df = fetch_stock_prices_from_db(ticker, end_date=datetime.now().date(), start_date=datetime.now().date() - timedelta(days=50))
-                
-                if df.empty or len(df) < 27:
-                    continue # Lewati jika data tidak cukup
-                
-                # Pastikan data diurutkan berdasarkan tanggal
-                df = df.sort_index()
+    df = df[["Ticker", "Tanggal", "Close"]].sort_values(["Ticker", "Tanggal"])
 
-                # Hitung MACD
-                macd_line, signal_line, histogram = calculate_macd_pandas(df['Close'])
-                
-                # Pastikan MACD berhasil dihitung dan ada data yang cukup
-                if histogram.empty or len(histogram) < 2:
-                    continue
-                
-                # Ambil 2 nilai histogram terakhir
-                latest_hist = histogram.iloc[-1]
-                prev_hist = histogram.iloc[-2]
+    progress = st.progress(0.0, text=f"Menganalisis 0/{df['Ticker'].nunique()} ticker…")
+    found = []
 
-                # Cek kondisi sinyal: histogram berubah dari negatif ke positif
-                if prev_hist < 0 and latest_hist >= 0:
-                    latest_close = df['Close'].iloc[-1]
-                    latest_date = df.index[-1].strftime('%Y-%m-%d')
-                    
-                    signal_tickers.append({
+    total = df["Ticker"].nunique()
+    for i, (ticker, g) in enumerate(df.groupby("Ticker"), start=1):
+        progress.progress(i / total, text=f"Menganalisis {i}/{total}: {ticker}")
+        g = g.dropna(subset=["Close"])
+        if len(g) < min_rows:
+            continue
+
+        g = g.set_index("Tanggal").sort_index()
+        try:
+            macd = MACD(close=g["Close"], window_slow=26, window_fast=12, window_sign=9)
+            hist = macd.macd_diff()
+            if len(hist) < 2:
+                continue
+            # Transisi histogram dari negatif → positif
+            if (hist.iloc[-2] < 0) and (hist.iloc[-1] > 0):
+                found.append(
+                    {
                         "Ticker": ticker,
-                        "Tanggal Sinyal": latest_date,
-                        "Harga Penutupan": latest_close,
-                        "Histogram Terakhir": latest_hist,
-                        "Histogram Sebelumnya": prev_hist
-                    })
-                
-                progress_bar.progress((i + 1) / total_tickers)
-            
-            progress_bar.empty()
-            status_text.empty()
+                        "Tanggal": g.index[-1].date(),
+                        "Close_Terakhir": float(g["Close"].iloc[-1]),
+                        "Hist_-1": float(hist.iloc[-2]),
+                        "Hist_0": float(hist.iloc[-1]),
+                    }
+                )
+        except Exception:
+            continue
 
-            if signal_tickers:
-                st.success(f"🎉 Ditemukan **{len(signal_tickers)}** saham dengan sinyal MACD Buy!")
-                df_signals = pd.DataFrame(signal_tickers)
-                
-                # PERBAIKAN: Mengubah Ticker menjadi link dengan URL yang benar
-                # Nama file halaman adalah Harga_Saham.py
-                df_signals['Ticker'] = [
-                    f'<a href="/Harga_Saham?ticker={quote_plus(ticker)}" target="_self">{ticker}</a>'
-                    for ticker in df_signals['Ticker']
-                ]
-                
-                format_dict = {
-                    'Harga Penutupan': lambda x: f"{x:,.0f}",
-                    'Histogram Terakhir': lambda x: f"{x:.4f}",
-                    'Histogram Sebelumnya': lambda x: f"{x:.4f}"
-                }
-
-                st.markdown(df_signals.to_html(escape=False, formatters=format_dict), unsafe_allow_html=True)
-                
-                st.balloons()
-            else:
-                st.info("🤷‍♂️ Tidak ada saham yang terdeteksi dengan sinyal MACD Buy pada data terakhir.")
-                
-st.markdown("---")
-st.caption("Analisis ini bersifat otomatis dan hanya sebagai ilustrasi. Selalu lakukan riset pribadi sebelum mengambil keputusan investasi.")
+    st.subheader("Hasil")
+    if not found:
+        st.info("Belum ada sinyal beli (histogram hijau) pada periode ini.")
+    else:
+        out = pd.DataFrame(found).sort_values("Ticker").reset_index(drop=True)
+        st.dataframe(out, use_container_width=True)

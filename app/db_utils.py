@@ -5,10 +5,11 @@ import os, tempfile, textwrap
 from datetime import date
 from typing import Dict, Any, Optional, Tuple, List
 
-import mysql.connector
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import mysql.connector
+from mysql.connector import pooling
 
 # Kunci wajib untuk koneksi
 REQUIRED_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
@@ -56,9 +57,12 @@ def check_secrets(show_in_ui: bool = True) -> bool:
         st.error(f"Gagal terhubung ke database: {err}")
     return err is None
 
-def _prepare_ssl_ca_file(cfg: Dict[str, Any]) -> Optional[str]:
-    """Tulis string CA (multiline) dari secrets menjadi file sementara .pem."""
-    ca_text = cfg.get("DB_SSL_CA")
+# -----------------------------------------------------------------------------
+# SSL CA helper (cache sekali)
+# -----------------------------------------------------------------------------
+@st.cache_resource
+def _get_ssl_ca_path(ca_text: Optional[str]) -> Optional[str]:
+    """Tulis isi CA (multiline) ke file sementara, dikembalikan path-nya. Dicache sekali per session."""
     if not ca_text:
         return None
     ca_text = textwrap.dedent(str(ca_text)).strip()
@@ -69,36 +73,37 @@ def _prepare_ssl_ca_file(cfg: Dict[str, Any]) -> Optional[str]:
     return tmp.name
 
 # -----------------------------------------------------------------------------
-# Koneksi MySQL (Aiven)
+# Connection Pool (cache sekali)
 # -----------------------------------------------------------------------------
-def get_db_connection():
-    """Kembalikan koneksi mysql.connector ke Aiven (SSL REQUIRED)."""
+def _make_pool(cfg: Dict[str, Any]) -> pooling.MySQLConnectionPool:
+    ca_path = _get_ssl_ca_path(cfg.get("DB_SSL_CA"))
+    kwargs = dict(
+        host=cfg["DB_HOST"],
+        port=int(cfg["DB_PORT"]),
+        database=cfg["DB_NAME"],
+        user=cfg["DB_USER"],
+        password=cfg["DB_PASSWORD"],
+        charset="utf8mb4",
+        autocommit=False,
+        ssl_ca=ca_path if ca_path else None,
+    )
+    # Hapus field None agar tidak dipass ke driver
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
+    return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=5, **kwargs)
+
+@st.cache_resource
+def _get_pool() -> pooling.MySQLConnectionPool:
     cfg, err = _load_cfg()
     if err:
         raise RuntimeError(err)
+    return _make_pool(cfg)
 
-    ssl_args = {}
-    ca_path = _prepare_ssl_ca_file(cfg)
-    if ca_path:
-        ssl_args["ssl_ca"] = ca_path
+def get_db_connection():
+    """Ambil koneksi dari pool (lebih hemat latency daripada bikin koneksi baru)."""
+    pool = _get_pool()
+    return pool.get_connection()
 
-    try:
-        conn = mysql.connector.connect(
-            host=cfg["DB_HOST"],
-            port=int(cfg["DB_PORT"]),
-            database=cfg["DB_NAME"],
-            user=cfg["DB_USER"],
-            password=cfg["DB_PASSWORD"],
-            charset="utf8mb4",
-            autocommit=False,
-            **ssl_args,  # Aiven mewajibkan ssl_ca
-        )
-        return conn
-    except mysql.connector.Error as e:
-        st.error(f"Gagal membuka koneksi MySQL: {e}")
-        raise
-
-# Alias kompatibilitas (kalau ada import lama)
+# Alias kompatibilitas
 get_connection = get_db_connection
 get_db_conn = get_db_connection
 
@@ -106,6 +111,17 @@ def get_db_name() -> str:
     """Ambil nama DB aktif (berguna untuk tampilan UI)."""
     cfg, _ = _load_cfg()
     return str(cfg.get("DB_NAME", "")).strip()
+
+def get_connection_info() -> Dict[str, Any]:
+    cfg, _ = _load_cfg()
+    return {
+        "host": cfg.get("DB_HOST", ""),
+        "port": cfg.get("DB_PORT", ""),
+        "name": cfg.get("DB_NAME", ""),
+        "user": cfg.get("DB_USER", ""),
+        "kind": cfg.get("DB_KIND", "mysql"),
+        "ssl": "yes" if cfg.get("DB_SSL_CA") else "no",
+    }
 
 # -----------------------------------------------------------------------------
 # Helper eksekusi SQL
