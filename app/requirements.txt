@@ -1,0 +1,10 @@
+# D:\Docker\BrokerSummary\app\requirements.txt
+streamlit
+pandas
+mysql-connector-python
+matplotlib
+seaborn
+yfinance
+plotly
+ta
+psycopg2-binary

@@ -1,0 +1,48 @@
+# D:\Docker\BrokerSummary\docker-compose.yml
+# Baris 'version: '3.8'' telah dihapus
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb_broker
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword # Password untuk user root MariaDB
+      MYSQL_DATABASE: Broker_DB      # Nama database yang akan dibuat
+      MYSQL_USER: admin              # User baru yang akan dibuat
+      MYSQL_PASSWORD: adminpassword  # Password untuk user baru 'admin'
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./mariadb_init:/docker-entrypoint-initdb.d
+    ports:
+      - "3307:3306"
+    healthcheck:
+      # Menggunakan user aplikasi untuk healthcheck
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost", "-u", "admin", "-padminpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  streamlit_app:
+    container_name: streamlit_broker_app
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "8505:8501" # Port Streamlit diubah ke 8505 di host
+    volumes:
+      - ./app:/app
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+      DB_NAME: Broker_DB
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_PORT: 8501 # Port internal Streamlit di dalam container
+
+volumes:
+  mariadb_data:
