@@ -23,7 +23,7 @@ st.set_page_config(
 def main():
     """Fungsi utama untuk menjalankan aplikasi Streamlit."""
 
-    st.title("📊 Analisis Aktivitas Broker Saham")
+    st.title("📊 Max Stock")
     st.caption(f"Terhubung ke database MariaDB.")
 
     # --- Inisialisasi Database ---
@@ -31,7 +31,7 @@ def main():
     # Ini bisa dipindahkan ke bagian yang hanya dijalankan sekali jika diperlukan optimasi
     # Namun, untuk sekarang, ini memastikan tabel selalu ada.
     with st.spinner("Memeriksa dan menginisialisasi database jika perlu..."):
-        create_tables_if_not_exist() # Fungsi dari db_utils.py
+    #    create_tables_if_not_exist() # Fungsi dari db_utils.py
 
     st.sidebar.success("Pilih halaman di atas.")
 
