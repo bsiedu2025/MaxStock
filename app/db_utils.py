@@ -10,11 +10,12 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+# Key wajib untuk koneksi
 REQUIRED_KEYS = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
 
-# -----------------------------
+# -----------------------------------------------------------------------------
 # Secrets & Debug
-# -----------------------------
+# -----------------------------------------------------------------------------
 def debug_secrets() -> None:
     """Tampilkan daftar keys yang terbaca dari st.secrets (debug UI)."""
     try:
@@ -24,7 +25,7 @@ def debug_secrets() -> None:
         st.error(f"Gagal membaca st.secrets: {e}")
 
 def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
-    """Baca konfigurasi DB dari st.secrets/env, dan validasi."""
+    """Baca konfigurasi DB dari st.secrets/env, dan validasi wajib."""
     cfg: Dict[str, Any] = {}
     # secrets
     try:
@@ -35,6 +36,7 @@ def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
                     v = v.strip()
                 cfg[k] = v
     except Exception:
+        # st.secrets bisa tidak tersedia saat run lokal tanpa secrets.toml
         pass
     # env fallback
     for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
@@ -42,7 +44,7 @@ def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
             v = os.getenv(k)
             if v:
                 cfg[k] = v.strip()
-    # validasi
+    # validasi wajib
     missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
     if missing:
         return cfg, f"Secrets DB belum lengkap. Missing: {', '.join(missing)}"
@@ -66,9 +68,9 @@ def _prepare_ssl_ca_file(cfg: Dict[str, Any]) -> Optional[str]:
     tmp.close()
     return tmp.name
 
-# -----------------------------
+# -----------------------------------------------------------------------------
 # Koneksi MySQL (Aiven)
-# -----------------------------
+# -----------------------------------------------------------------------------
 def get_db_connection():
     """Kembalikan koneksi mysql.connector ke Aiven (SSL REQUIRED)."""
     cfg, err = _load_cfg()
@@ -96,6 +98,31 @@ def get_db_connection():
         st.error(f"Gagal membuka koneksi MySQL: {e}")
         raise
 
+# Alias kalau ada kode lama yang pakai nama ini
+get_connection = get_db_connection
+get_db_conn = get_db_connection
+
+def get_db_name() -> str:
+    """Ambil nama DB aktif dari secrets/env."""
+    cfg, _ = _load_cfg()
+    return str(cfg.get("DB_NAME", "")).strip()
+
+def get_connection_info() -> Dict[str, Any]:
+    """Info ringkas koneksi (tanpa password) untuk tampilan UI/diagnostik."""
+    cfg, _ = _load_cfg()
+    info = {
+        "host": cfg.get("DB_HOST", ""),
+        "port": cfg.get("DB_PORT", ""),
+        "name": cfg.get("DB_NAME", ""),
+        "user": cfg.get("DB_USER", ""),
+        "kind": cfg.get("DB_KIND", "mysql"),
+        "ssl": "yes" if cfg.get("DB_SSL_CA") else "no",
+    }
+    return info
+
+# -----------------------------------------------------------------------------
+# Helper eksekusi SQL
+# -----------------------------------------------------------------------------
 def execute_query(query: str, params=None, fetch_one=False, fetch_all=False, is_dml_ddl=False):
     """Helper eksekusi SQL dengan commit/rollback & hasil fleksibel."""
     conn = get_db_connection()
@@ -121,9 +148,9 @@ def execute_query(query: str, params=None, fetch_one=False, fetch_all=False, is_
         if conn and conn.is_connected():
             conn.close()
 
-# -----------------------------
+# -----------------------------------------------------------------------------
 # Schema & CRUD data saham
-# -----------------------------
+# -----------------------------------------------------------------------------
 def create_tables_if_not_exist():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -219,9 +246,9 @@ def get_saved_tickers_summary() -> pd.DataFrame:
     if "Tanggal_Terakhir" in df: df["Tanggal_Terakhir"] = pd.to_datetime(df["Tanggal_Terakhir"], errors="coerce")
     return df
 
-# -----------------------------
-# Tambahan yang diminta halaman: get_stock_info
-# -----------------------------
+# -----------------------------------------------------------------------------
+# Tambahan utilitas eksternal
+# -----------------------------------------------------------------------------
 def get_stock_info(ticker: str) -> Dict[str, Any]:
     """
     Ambil info ringkas saham via yfinance.
@@ -232,7 +259,6 @@ def get_stock_info(ticker: str) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
         fi = getattr(y, "fast_info", None)
         if fi:
-            # Beberapa atribut fast_info mungkin None, handle aman
             out = {
                 "last_price": getattr(fi, "last_price", None),
                 "previous_close": getattr(fi, "previous_close", None),
@@ -246,3 +272,12 @@ def get_stock_info(ticker: str) -> Dict[str, Any]:
         return out
     except Exception as e:
         return {"error": str(e)}
+
+# -----------------------------------------------------------------------------
+# Ekspor konstanta DB_NAME (untuk kompatibilitas import di pages/Konsol)
+# -----------------------------------------------------------------------------
+try:
+    _cfg_for_export, _err_ = _load_cfg()
+    DB_NAME: str = str(_cfg_for_export.get("DB_NAME", "")).strip()
+except Exception:
+    DB_NAME = ""
