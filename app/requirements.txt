@@ -1,7 +1,6 @@
 # D:\Docker\BrokerSummary\app\requirements.txt
 streamlit
 pandas
-mysql-connector-python
 matplotlib
 seaborn
 yfinance
