@@ -58,6 +58,8 @@ Gunakan sidebar untuk memilih halaman:
 - **Harga Saham**: Visualisasi & indikator.
 - **Update Data Harga Saham**: Unduh & simpan ke DB.
 - **Konsol Database**: Jalankan query SQL langsung.
+- **Sinyal MACD**: Pindai sinyal histogram hijau.
+- **Upload EOD (CSV)**: Unggah data harian tanpa duplikat.
 """
 )
 
@@ -67,12 +69,14 @@ if not db_ok:
         "Pastikan Secrets berisi DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, dan DB_SSL_CA (Aiven mewajibkan SSL)."
     )
 
+# ====== Daftar halaman ======
 PAGE_FILES: Dict[str, Path] = {
     "Pergerakan IHSG": APP_DIR / "1_Harga_Saham.py",
     "Harga Saham": APP_DIR / "1_Harga_Saham.py",
     "Update Data Harga Saham": APP_DIR / "2_Update_Data_Harga_Saham.py",
     "Konsol Database": APP_DIR / "3_Konsol_Database.py",
-    "Sinyal MACD": APP_DIR / "1_Harga_Saham.py",
+    "Sinyal MACD": APP_DIR / "4_Sinyal_MACD.py",      # diperbaiki
+    "Upload EOD (CSV)": APP_DIR / "5_Upload_EOD.py",   # halaman baru
 }
 available_pages = {n: p for n, p in PAGE_FILES.items() if p.exists()}
 
@@ -80,7 +84,8 @@ st.markdown("---")
 st.subheader("Navigasi")
 if not available_pages:
     st.info(
-        "File halaman tidak ditemukan. Pastikan 1_Harga_Saham.py, 2_Update_Data_Harga_Saham.py, 3_Konsol_Database.py ada di direktori app."
+        "File halaman tidak ditemukan. Pastikan 1_Harga_Saham.py, 2_Update_Data_Harga_Saham.py, "
+        "3_Konsol_Database.py, 4_Sinyal_MACD.py, 5_Upload_EOD.py ada di direktori app."
     )
 else:
     page = st.sidebar.radio("Pilih halaman:", list(available_pages.keys()), index=0)

@@ -100,6 +100,6 @@ if st.button("🔍 Cari Sinyal MACD Terbaru", type="primary", use_container_widt
             },
         )
 
-        # Opsi alternatif (kalau mau teks ticker-nya langsung jadi link):
+        # Alternatif jika ingin teks ticker langsung jadi link:
         # links = [f"- [{t}](/Harga_Saham?ticker={t})" for t in out['Ticker']]
         # st.markdown("\n".join(links))
