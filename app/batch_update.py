@@ -20,7 +20,7 @@ from db_utils import (
     insert_stock_price_data,
 )
 
-def download_prices(ticker: str, period: str = "1mo") -> pd.DataFrame:
+def download_prices(ticker: str, period: str = "5ds") -> pd.DataFrame:
     """Unduh harga historis via yfinance untuk periode tertentu."""
     try:
         df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
@@ -72,7 +72,7 @@ def run_update(period: str, suffix: Optional[str], max_tickers: Optional[int]) -
 
 def main():
     p = argparse.ArgumentParser(description="Batch update harga saham ke MySQL")
-    p.add_argument("--period", default="1mo", help="Periode yfinance (contoh: 5d, 1mo, 3mo)")
+    p.add_argument("--period", default="5d", help="Periode yfinance (contoh: 5d, 1mo, 3mo)")
     p.add_argument("--suffix", default=".JK", help="Filter ticker berakhiran suffix ini (contoh .JK). Kosongkan untuk semua.")
     p.add_argument("--max-tickers", type=int, default=0, help="Batas jumlah ticker (0=semua yang cocok)")
     args = p.parse_args()
