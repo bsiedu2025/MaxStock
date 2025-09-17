@@ -243,7 +243,7 @@ else:
         """
 
 with engine.connect() as con:
-    df = pd.read_sql(text(sql), con, params={"sym": symbol})(text(sql), con, params={"sym": symbol})
+    df = pd.read_sql(text(sql), con, params={'sym': symbol})
 
 if df.empty:
     st.warning("Data tidak tersedia untuk simbol ini pada periode terpilih.")
