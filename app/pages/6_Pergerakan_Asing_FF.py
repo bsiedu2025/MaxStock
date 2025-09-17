@@ -7,6 +7,7 @@ from sqlalchemy import text, create_engine
 from urllib.parse import quote_plus
 import os, tempfile, streamlit as st
 import plotly.graph_objects as go
+import numpy as np
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", layout="wide")
@@ -296,11 +297,22 @@ fig.add_trace(
 )
 
 # Row 2: Foreign Net (bar)
+
+# Color by sign: positive=green, negative=red, zero=gray
+colors = np.where(df["foreign_net"] > 0, "rgba(0,160,0,0.85)",
+          np.where(df["foreign_net"] < 0, "rgba(220,0,0,0.85)", "rgba(160,160,160,0.6)"))
+
 fig.add_trace(
-    go.Bar(x=df["trade_date"], y=df["foreign_net"], name="Foreign Net", marker_line_width=0, opacity=0.85),
+    go.Bar(
+        x=df["trade_date"],
+        y=df["foreign_net"],
+        name="Foreign Net",
+        marker=dict(color=colors),
+        marker_line_width=0,
+        opacity=0.95,
+    ),
     row=2, col=1
 )
-
 # Row 3: Pa/Ri
 fig.add_trace(
     go.Scatter(x=df["trade_date"], y=df["Pa_pct"], name="Pa (%)", mode="lines"),
