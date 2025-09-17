@@ -192,20 +192,111 @@ def coerce_ksei_df_local(df: pd.DataFrame) -> pd.DataFrame:
     out = out.drop_duplicates(subset=["base_symbol","trade_date"])
     return out
 
+
 def parse_balancepos_txt_local(uploaded_file) -> pd.DataFrame:
-    # Try common delimiters
+    """
+    Parser lokal untuk file Balancepos (KSEI) *.txt / *.csv.
+    - Deteksi delimiter termasuk pipe ("|")
+    - Tangani kolom duplikat ("Total", "Total.1")
+    - Hitung foreign_pct, retail_pct, total_volume, total_value
+    """
     raw = uploaded_file.read()
-    for enc in ("utf-8","latin-1"):
-        try:
-            text = raw.decode(enc)
-            break
-        except Exception:
-            continue
-    # Detect delimiter by header
-    head = text.splitlines()[0]
-    delim = ";" if head.count(";") >= head.count(",") and head.count(";") >= head.count("\t") else ("," if head.count(",") >= head.count("\t") else "\t")
-    df = pd.read_csv(io.StringIO(text), delimiter=delim)
-    return df
+    text = raw.decode("utf-8", errors="ignore")
+
+    # Deteksi delimiter: prioritas ke yang paling sering muncul
+    first = text.splitlines()[0] if text else ""
+    delims = {",": first.count(","), ";": first.count(";"), "\t": first.count("\t"), "|": first.count("|")}
+    delim = max(delims, key=delims.get) if delims else "|"
+    if delim == "\t":
+        delim = "	"
+
+    df = pd.read_csv(io.StringIO(text), sep=delim)
+
+    # Normalisasi nama kolom biar konsisten
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    # Khusus format Balancepos standar: 'Date' + 'Code' + ... + 'Total' (local) + ... + 'Total' (foreign)
+    # Pandas otomatis rename duplikat 'Total' menjadi 'Total' dan 'Total.1'
+    # Jika tidak, coba cari manual berdasarkan posisi.
+    if "Total" in df.columns and "Total.1" in df.columns:
+        local_total_col = "Total"
+        foreign_total_col = "Total.1"
+    else:
+        # fallback: cari dua kolom 'Total' terdekat ke blok 'Foreign IS'
+        local_total_col = None
+        foreign_total_col = None
+        if "Total" in df.columns:
+            local_total_col = "Total"
+        # cari kolom setelah ada kolom dengan prefix 'Foreign '
+        for i, c in enumerate(df.columns):
+            if isinstance(c, str) and c.startswith("Foreign "):
+                # cari 'Total' di sisa kolom
+                for c2 in df.columns[i:]:
+                    if c2.strip().lower() == "total":
+                        foreign_total_col = c2
+                        break
+                break
+
+    # Build output frame
+    out = pd.DataFrame()
+    # Tanggal
+    if "Date" in df.columns:
+        out["trade_date"] = pd.to_datetime(df["Date"], format="%d-%b-%Y", errors="coerce").dt.date
+    else:
+        # fallback
+        out["trade_date"] = pd.to_datetime(df.iloc[:,0], errors="coerce").dt.date
+
+    # Simbol
+    code_col = "Code" if "Code" in df.columns else ( "base_symbol" if "base_symbol" in df.columns else df.columns[1] )
+    out["base_symbol"] = df[code_col].astype(str).str.strip().str.upper().str.replace(r"\s+FF$", "", regex=True)
+
+    # Harga (opsional, untuk total_value)
+    price_col = "Price" if "Price" in df.columns else None
+    price = pd.to_numeric(df[price_col], errors="coerce") if price_col else None
+
+    # Totals
+    local_total = pd.to_numeric(df.get(local_total_col, None), errors="coerce") if local_total_col else None
+    foreign_total = pd.to_numeric(df.get(foreign_total_col, None), errors="coerce") if foreign_total_col else None
+
+    # Jika tidak ada, coba agregasi dari sub-kolom Local*/Foreign*
+    if local_total is None:
+        local_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Local ")]
+        local_total = pd.to_numeric(df[local_cols], errors="coerce").fillna(0).sum(axis=1) if local_cols else None
+    if foreign_total is None:
+        foreign_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Foreign ")]
+        foreign_total = pd.to_numeric(df[foreign_cols], errors="coerce").fillna(0).sum(axis=1) if foreign_cols else None
+
+    total_volume = None
+    if local_total is not None and foreign_total is not None:
+        total_volume = local_total.fillna(0) + foreign_total.fillna(0)
+
+    out["foreign_pct"] = None
+    out["retail_pct"] = None
+    out["total_volume"] = None
+    out["total_value"] = None
+
+    if total_volume is not None:
+        out["total_volume"] = total_volume
+        # Pct
+        with pd.option_context('mode.use_inf_as_na', True):
+            out["foreign_pct"] = (foreign_total / total_volume * 100).round(2)
+            out["retail_pct"]  = (100 - out["foreign_pct"]).round(2)
+        # Value (opsional)
+        if price is not None:
+            out["total_value"] = (total_volume * price).astype("Int64")
+
+    # Cleanup
+    out = out.dropna(subset=["trade_date","base_symbol"])
+    out = out.drop_duplicates(subset=["base_symbol","trade_date"])
+
+    # Pastikan tipe numeric benar
+    for col in ["foreign_pct","retail_pct","total_volume","total_value"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    return out
+
 
 # -------------------- UI (Tabs) --------------------
 tab1, tab2 = st.tabs(["📤 Upload EOD (CSV)", "📥 Import KSEI (CSV/TXT)"])
