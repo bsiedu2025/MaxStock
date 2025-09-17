@@ -17,9 +17,8 @@ st.title("📤 Upload EOD (CSV) & 📥 Import KSEI")
 st.caption("Satu halaman untuk input EOD raw ke `eod_prices_raw` dan data partisipasi ke `ksei_daily`.")
 
 # -------------------- DB UTILS --------------------
-@st.cache_resource(show_spinner=False)
 def get_conn():
-    # Expect secrets/ENV: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_SSL_CA
+    # Selalu kembalikan koneksi FRESH (jangan cache), supaya tidak reuse yang sudah ditutup saat rerun Streamlit
     host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
     port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
     database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
@@ -28,7 +27,6 @@ def get_conn():
     ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
 
     ssl_ca_file = None
-    ssl_args = None
     if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
         tmp.write(ssl_ca.encode("utf-8"))
@@ -36,18 +34,20 @@ def get_conn():
         ssl_ca_file = tmp.name
         ssl_args = {"ssl_ca": ssl_ca_file, "ssl_disabled": False}
     else:
-        # Allow local testing without SSL_CA
         ssl_args = {"ssl_disabled": True}
 
     conn = mysql.connector.connect(
-        host=host,
-        port=port,
-        database=database,
-        user=user,
-        password=password,
-        **ssl_args,
-        autocommit=True,
+        host=host, port=port, database=database,
+        user=user, password=password, autocommit=True, **ssl_args
     )
+
+    # Pastikan live
+    try:
+        if hasattr(conn, "is_connected") and not conn.is_connected():
+            conn.reconnect(attempts=2, delay=1)
+    except Exception:
+        pass
+
     return conn, ssl_ca_file
 
 def close_conn(conn_tuple):
