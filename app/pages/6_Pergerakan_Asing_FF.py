@@ -3,8 +3,9 @@
 
 import streamlit as st
 import pandas as pd
-from sqlalchemy import text
-from db import get_engine
+from sqlalchemy import text, create_engine
+from urllib.parse import quote_plus
+import os, tempfile, streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -12,7 +13,38 @@ st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", lay
 st.title("📈 Analisa Foreign Flow")
 st.caption("Harga (Line/Candle) + Foreign Flow + Partisipasi Asing/Ritel (pakai KSEI jika tersedia).")
 
-engine = get_engine()
+
+# Build SQLAlchemy engine from Streamlit secrets / ENV (fallback if no `db.get_engine` module)
+def _build_engine():
+    host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
+    port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
+    database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
+    user = os.getenv("DB_USER", st.secrets.get("DB_USER", ""))
+    password = os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", ""))
+    ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
+
+    # URL encode password safely
+    pwd = quote_plus(str(password))
+
+    connect_args = {"pool_pre_ping": True}
+    # MySQL Connector/Python SSL
+    extra_connect_args = {}
+    if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+        tmp.write(ssl_ca.encode("utf-8")); tmp.flush()
+        extra_connect_args = {"ssl_ca": tmp.name}
+    # Create engine (mysql+mysqlconnector)
+    url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
+    eng = create_engine(url, connect_args=extra_connect_args, pool_recycle=300, pool_pre_ping=True)
+    return eng
+
+try:
+    # If a project-level get_engine() exists, try it; otherwise fallback
+    from db import get_engine as _project_get_engine  # type: ignore
+    engine = _project_get_engine()
+except Exception:
+    engine = _build_engine()
+
 
 # ── Ambil daftar simbol (non-FF)
 
