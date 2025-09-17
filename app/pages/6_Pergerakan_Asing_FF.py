@@ -3,85 +3,24 @@
 
 import streamlit as st
 import pandas as pd
-from sqlalchemy import text, create_engine
-from urllib.parse import quote_plus
-import os, tempfile, streamlit as st
+from sqlalchemy import text
+from db import get_engine
 import plotly.graph_objects as go
-import numpy as np
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", layout="wide")
 st.title("📈 Analisa Foreign Flow")
 st.caption("Harga (Line/Candle) + Foreign Flow + Partisipasi Asing/Ritel (pakai KSEI jika tersedia).")
 
-
-# Build SQLAlchemy engine from Streamlit secrets / ENV (fallback if no `db.get_engine` module)
-def _build_engine():
-    host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
-    port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
-    database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
-    user = os.getenv("DB_USER", st.secrets.get("DB_USER", ""))
-    password = os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", ""))
-    ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
-
-    # URL encode password safely
-    pwd = quote_plus(str(password))
-
-    connect_args = {"pool_pre_ping": True}
-    # MySQL Connector/Python SSL
-    extra_connect_args = {}
-    if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-        tmp.write(ssl_ca.encode("utf-8")); tmp.flush()
-        extra_connect_args = {"ssl_ca": tmp.name}
-    # Create engine (mysql+mysqlconnector)
-    url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
-    eng = create_engine(url, connect_args=extra_connect_args, pool_recycle=300, pool_pre_ping=True)
-    return eng
-
-try:
-    # If a project-level get_engine() exists, try it; otherwise fallback
-    from db import get_engine as _project_get_engine  # type: ignore
-    engine = _project_get_engine()
-except Exception:
-    engine = _build_engine()
-
-# ── Helper: check if a table exists
-def _table_exists(engine, table_name: str) -> bool:
-    try:
-        with engine.connect() as con:
-            q = text("""
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                WHERE table_schema = DATABASE() AND table_name = :t
-            """)
-            n = con.execute(q, {"t": table_name}).scalar()
-            return bool(n)
-    except Exception:
-        return False
-
-USE_EOD_TABLE = _table_exists(engine, "eod")
-USE_KSEI = _table_exists(engine, "ksei_daily")
-
+engine = get_engine()
 
 # ── Ambil daftar simbol (non-FF)
 
 with engine.connect() as con:
-    if USE_EOD_TABLE:
-        syms = pd.read_sql(
-            "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol",
-            con,
-        )["base_symbol"].tolist()
-    else:
-        syms = pd.read_sql(
-            """
-            SELECT DISTINCT Ticker AS base_symbol
-            FROM eod_prices_raw
-            WHERE Ticker NOT LIKE '%% FF'
-            ORDER BY base_symbol
-            """,
-            con,
-        )["base_symbol"].tolist()
+    syms = pd.read_sql(
+        "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol",
+        con,
+    )["base_symbol"].tolist()
 
 if not syms:
     st.warning("Belum ada data harga. Silakan import EOD/History terlebih dahulu.")
@@ -105,7 +44,7 @@ win = st.slider(
 
 # ── Cek keberadaan tabel ksei_daily
 with engine.connect() as con:
-    USE_KSEI = bool(
+    ksei_exists = bool(
         con.execute(
             text(
                 """
@@ -127,124 +66,51 @@ if period != "ALL":
         n = int(period[:-1])
         date_filter = f"AND p.trade_date >= CURDATE() - INTERVAL {n} YEAR"
 
-# ── SQL: pakai `eod` jika ada; jika tidak, turunkan dari `eod_prices_raw`
-if USE_EOD_TABLE:
-    if USE_KSEI:
-        sql = f"""
-        SELECT
-          p.trade_date,
-          p.base_symbol,
-          p.open, p.high, p.low, p.close,
-          p.volume AS volume_price,
-          COALESCE(f.foreign_net, 0) AS foreign_net,
-          k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
-        FROM eod p
-        LEFT JOIN eod f
-          ON f.trade_date = p.trade_date
-         AND f.base_symbol = p.base_symbol
-         AND f.is_foreign_flow = 1
-        LEFT JOIN ksei_daily k
-          ON k.trade_date  = p.trade_date
-         AND k.base_symbol = p.base_symbol
-        WHERE p.base_symbol = :sym
-          AND p.is_foreign_flow = 0
-        {date_filter}
-        ORDER BY p.trade_date
-        """
-    else:
-        sql = f"""
-        SELECT
-          p.trade_date,
-          p.base_symbol,
-          p.open, p.high, p.low, p.close,
-          p.volume AS volume_price,
-          COALESCE(f.foreign_net, 0) AS foreign_net,
-          NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
-        FROM eod p
-        LEFT JOIN eod f
-          ON f.trade_date = p.trade_date
-         AND f.base_symbol = p.base_symbol
-         AND f.is_foreign_flow = 1
-        WHERE p.base_symbol = :sym
-          AND p.is_foreign_flow = 0
-        {date_filter}
-        ORDER BY p.trade_date
-        """
+# ── SQL: pakai JOIN ke ksei_daily jika ada
+if ksei_exists:
+    sql = f"""
+    SELECT
+      p.trade_date,
+      p.base_symbol,
+      p.open, p.high, p.low, p.close,
+      p.volume AS volume_price,
+      COALESCE(f.foreign_net, 0) AS foreign_net,
+      k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
+    FROM eod p
+    LEFT JOIN eod f
+      ON f.trade_date = p.trade_date
+     AND f.base_symbol = p.base_symbol
+     AND f.is_foreign_flow = 1
+    LEFT JOIN ksei_daily k
+      ON k.trade_date  = p.trade_date
+     AND k.base_symbol = p.base_symbol
+    WHERE p.base_symbol = :sym
+      AND p.is_foreign_flow = 0
+    {date_filter}
+    ORDER BY p.trade_date
+    """
 else:
-    # Derive from eod_prices_raw
-    # Build date filter for Tanggal field
-    date_filter_raw = ""
-    if period != "ALL":
-        if period.endswith("M"):
-            n = int(period[:-1])
-            date_filter_raw = f"AND Tanggal >= CURDATE() - INTERVAL {n} MONTH"
-        else:
-            n = int(period[:-1])
-            date_filter_raw = f"AND Tanggal >= CURDATE() - INTERVAL {n} YEAR"
-
-    if USE_KSEI:
-        sql = f"""
-        SELECT
-            p.trade_date,
-            p.base_symbol,
-            p.open, p.high, p.low, p.close,
-            p.volume_price,
-            COALESCE(f.foreign_net, 0) AS foreign_net,
-            k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
-        FROM
-            (SELECT DATE(Tanggal) AS trade_date,
-                    Ticker AS base_symbol,
-                    `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
-                    Volume AS volume_price
-             FROM eod_prices_raw
-             WHERE Ticker = :sym
-               AND Ticker NOT LIKE '%% FF'
-               {date_filter_raw}) AS p
-        LEFT JOIN
-            (SELECT DATE(Tanggal) AS trade_date,
-                    TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
-                    Volume AS foreign_net
-             FROM eod_prices_raw
-             WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym
-               AND Ticker LIKE '%% FF'
-               {date_filter_raw}) AS f
-        ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
-        LEFT JOIN ksei_daily k
-          ON k.trade_date = p.trade_date AND k.base_symbol = p.base_symbol
-        ORDER BY p.trade_date
-        """
-    else:
-        sql = f"""
-        SELECT
-            p.trade_date,
-            p.base_symbol,
-            p.open, p.high, p.low, p.close,
-            p.volume_price,
-            COALESCE(f.foreign_net, 0) AS foreign_net,
-            NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
-        FROM
-            (SELECT DATE(Tanggal) AS trade_date,
-                    Ticker AS base_symbol,
-                    `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
-                    Volume AS volume_price
-             FROM eod_prices_raw
-             WHERE Ticker = :sym
-               AND Ticker NOT LIKE '%% FF'
-               {date_filter_raw}) AS p
-        LEFT JOIN
-            (SELECT DATE(Tanggal) AS trade_date,
-                    TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
-                    Volume AS foreign_net
-             FROM eod_prices_raw
-             WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym
-               AND Ticker LIKE '%% FF'
-               {date_filter_raw}) AS f
-        ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
-        ORDER BY p.trade_date
-        """
+    sql = f"""
+    SELECT
+      p.trade_date,
+      p.base_symbol,
+      p.open, p.high, p.low, p.close,
+      p.volume AS volume_price,
+      COALESCE(f.foreign_net, 0) AS foreign_net,
+      NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
+    FROM eod p
+    LEFT JOIN eod f
+      ON f.trade_date = p.trade_date
+     AND f.base_symbol = p.base_symbol
+     AND f.is_foreign_flow = 1
+    WHERE p.base_symbol = :sym
+      AND p.is_foreign_flow = 0
+    {date_filter}
+    ORDER BY p.trade_date
+    """
 
 with engine.connect() as con:
-    df = pd.read_sql(text(sql), con, params={'sym': symbol})
+    df = pd.read_sql(text(sql), con, params={"sym": symbol})
 
 if df.empty:
     st.warning("Data tidak tersedia untuk simbol ini pada periode terpilih.")
@@ -297,22 +163,11 @@ fig.add_trace(
 )
 
 # Row 2: Foreign Net (bar)
-
-# Color by sign: positive=green, negative=red, zero=gray
-colors = np.where(df["foreign_net"] > 0, "rgba(0,160,0,0.85)",
-          np.where(df["foreign_net"] < 0, "rgba(220,0,0,0.85)", "rgba(160,160,160,0.6)"))
-
 fig.add_trace(
-    go.Bar(
-        x=df["trade_date"],
-        y=df["foreign_net"],
-        name="Foreign Net",
-        marker=dict(color=colors),
-        marker_line_width=0,
-        opacity=0.95,
-    ),
+    go.Bar(x=df["trade_date"], y=df["foreign_net"], name="Foreign Net", marker_line_width=0, opacity=0.85),
     row=2, col=1
 )
+
 # Row 3: Pa/Ri
 fig.add_trace(
     go.Scatter(x=df["trade_date"], y=df["Pa_pct"], name="Pa (%)", mode="lines"),
