@@ -45,14 +45,42 @@ try:
 except Exception:
     engine = _build_engine()
 
+# ── Helper: check if a table exists
+def _table_exists(engine, table_name: str) -> bool:
+    try:
+        with engine.connect() as con:
+            q = text("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = :t
+            """)
+            n = con.execute(q, {"t": table_name}).scalar()
+            return bool(n)
+    except Exception:
+        return False
+
+USE_EOD_TABLE = _table_exists(engine, "eod")
+USE_KSEI = _table_exists(engine, "ksei_daily")
+
 
 # ── Ambil daftar simbol (non-FF)
 
 with engine.connect() as con:
-    syms = pd.read_sql(
-        "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol",
-        con,
-    )["base_symbol"].tolist()
+    if USE_EOD_TABLE:
+        syms = pd.read_sql(
+            "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol",
+            con,
+        )["base_symbol"].tolist()
+    else:
+        syms = pd.read_sql(
+            """
+            SELECT DISTINCT Ticker AS base_symbol
+            FROM eod_prices_raw
+            WHERE Ticker NOT LIKE '%% FF'
+            ORDER BY base_symbol
+            """,
+            con,
+        )["base_symbol"].tolist()
 
 if not syms:
     st.warning("Belum ada data harga. Silakan import EOD/History terlebih dahulu.")
@@ -76,7 +104,7 @@ win = st.slider(
 
 # ── Cek keberadaan tabel ksei_daily
 with engine.connect() as con:
-    ksei_exists = bool(
+    USE_KSEI = bool(
         con.execute(
             text(
                 """
@@ -98,51 +126,124 @@ if period != "ALL":
         n = int(period[:-1])
         date_filter = f"AND p.trade_date >= CURDATE() - INTERVAL {n} YEAR"
 
-# ── SQL: pakai JOIN ke ksei_daily jika ada
-if ksei_exists:
-    sql = f"""
-    SELECT
-      p.trade_date,
-      p.base_symbol,
-      p.open, p.high, p.low, p.close,
-      p.volume AS volume_price,
-      COALESCE(f.foreign_net, 0) AS foreign_net,
-      k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
-    FROM eod p
-    LEFT JOIN eod f
-      ON f.trade_date = p.trade_date
-     AND f.base_symbol = p.base_symbol
-     AND f.is_foreign_flow = 1
-    LEFT JOIN ksei_daily k
-      ON k.trade_date  = p.trade_date
-     AND k.base_symbol = p.base_symbol
-    WHERE p.base_symbol = :sym
-      AND p.is_foreign_flow = 0
-    {date_filter}
-    ORDER BY p.trade_date
-    """
+# ── SQL: pakai `eod` jika ada; jika tidak, turunkan dari `eod_prices_raw`
+if USE_EOD_TABLE:
+    if USE_KSEI:
+        sql = f"""
+        SELECT
+          p.trade_date,
+          p.base_symbol,
+          p.open, p.high, p.low, p.close,
+          p.volume AS volume_price,
+          COALESCE(f.foreign_net, 0) AS foreign_net,
+          k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
+        FROM eod p
+        LEFT JOIN eod f
+          ON f.trade_date = p.trade_date
+         AND f.base_symbol = p.base_symbol
+         AND f.is_foreign_flow = 1
+        LEFT JOIN ksei_daily k
+          ON k.trade_date  = p.trade_date
+         AND k.base_symbol = p.base_symbol
+        WHERE p.base_symbol = :sym
+          AND p.is_foreign_flow = 0
+        {date_filter}
+        ORDER BY p.trade_date
+        """
+    else:
+        sql = f"""
+        SELECT
+          p.trade_date,
+          p.base_symbol,
+          p.open, p.high, p.low, p.close,
+          p.volume AS volume_price,
+          COALESCE(f.foreign_net, 0) AS foreign_net,
+          NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
+        FROM eod p
+        LEFT JOIN eod f
+          ON f.trade_date = p.trade_date
+         AND f.base_symbol = p.base_symbol
+         AND f.is_foreign_flow = 1
+        WHERE p.base_symbol = :sym
+          AND p.is_foreign_flow = 0
+        {date_filter}
+        ORDER BY p.trade_date
+        """
 else:
-    sql = f"""
-    SELECT
-      p.trade_date,
-      p.base_symbol,
-      p.open, p.high, p.low, p.close,
-      p.volume AS volume_price,
-      COALESCE(f.foreign_net, 0) AS foreign_net,
-      NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
-    FROM eod p
-    LEFT JOIN eod f
-      ON f.trade_date = p.trade_date
-     AND f.base_symbol = p.base_symbol
-     AND f.is_foreign_flow = 1
-    WHERE p.base_symbol = :sym
-      AND p.is_foreign_flow = 0
-    {date_filter}
-    ORDER BY p.trade_date
-    """
+    # Derive from eod_prices_raw
+    # Build date filter for Tanggal field
+    date_filter_raw = ""
+    if period != "ALL":
+        if period.endswith("M"):
+            n = int(period[:-1])
+            date_filter_raw = f"AND Tanggal >= CURDATE() - INTERVAL {n} MONTH"
+        else:
+            n = int(period[:-1])
+            date_filter_raw = f"AND Tanggal >= CURDATE() - INTERVAL {n} YEAR"
+
+    if USE_KSEI:
+        sql = f"""
+        SELECT
+            p.trade_date,
+            p.base_symbol,
+            p.open, p.high, p.low, p.close,
+            p.volume_price,
+            COALESCE(f.foreign_net, 0) AS foreign_net,
+            k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
+        FROM
+            (SELECT DATE(Tanggal) AS trade_date,
+                    Ticker AS base_symbol,
+                    `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
+                    Volume AS volume_price
+             FROM eod_prices_raw
+             WHERE Ticker = :sym
+               AND Ticker NOT LIKE '%% FF'
+               {date_filter_raw}) AS p
+        LEFT JOIN
+            (SELECT DATE(Tanggal) AS trade_date,
+                    TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
+                    Volume AS foreign_net
+             FROM eod_prices_raw
+             WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym
+               AND Ticker LIKE '%% FF'
+               {date_filter_raw}) AS f
+        ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
+        LEFT JOIN ksei_daily k
+          ON k.trade_date = p.trade_date AND k.base_symbol = p.base_symbol
+        ORDER BY p.trade_date
+        """
+    else:
+        sql = f"""
+        SELECT
+            p.trade_date,
+            p.base_symbol,
+            p.open, p.high, p.low, p.close,
+            p.volume_price,
+            COALESCE(f.foreign_net, 0) AS foreign_net,
+            NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
+        FROM
+            (SELECT DATE(Tanggal) AS trade_date,
+                    Ticker AS base_symbol,
+                    `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
+                    Volume AS volume_price
+             FROM eod_prices_raw
+             WHERE Ticker = :sym
+               AND Ticker NOT LIKE '%% FF'
+               {date_filter_raw}) AS p
+        LEFT JOIN
+            (SELECT DATE(Tanggal) AS trade_date,
+                    TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
+                    Volume AS foreign_net
+             FROM eod_prices_raw
+             WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym
+               AND Ticker LIKE '%% FF'
+               {date_filter_raw}) AS f
+        ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
+        ORDER BY p.trade_date
+        """
 
 with engine.connect() as con:
-    df = pd.read_sql(text(sql), con, params={"sym": symbol})
+    df = pd.read_sql(text(sql), con, params={"sym": symbol})(text(sql), con, params={"sym": symbol})
 
 if df.empty:
     st.warning("Data tidak tersedia untuk simbol ini pada periode terpilih.")
