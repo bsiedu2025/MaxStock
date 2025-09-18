@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # app/pages/6_Pergerakan_Asing_FF.py
-# Analisa Foreign Flow + KSEI bulanan (dari ksei_month) + DETAIL kategori Lokal/Asing di paling bawah.
+# Analisa Foreign Flow + KSEI bulanan (dari ksei_month) + DETAIL kategori Lokal/Asing di paling bawah
+# dengan legend yang memuat "KODE — Nama" serta expander keterangan kategori.
 
 import os
 import tempfile
@@ -285,7 +286,7 @@ if USE_KSEI:
                  .groupby("Month", as_index=False)
                  .agg({"total_volume": "sum", "foreign_pct": "mean"}))
 
-        # Estimasi volume foreign/local per bulan (lebih stabil & simpel)
+        # Estimasi volume foreign/local per bulan (stabil & simpel)
         tmp = kdf.copy()
         tmp["foreign_frac"] = pd.to_numeric(tmp["foreign_pct"], errors="coerce") / 100.0
         tmp["vol_foreign_est"] = pd.to_numeric(tmp["total_volume"], errors="coerce") * tmp["foreign_frac"]
@@ -344,10 +345,30 @@ with st.expander("Tabel (akhir 250 baris)"):
 st.markdown("---")
 st.subheader("📊 Detail Kategori KSEI (Semua Bulan)")
 
+# Mapping KODE → Nama (untuk legend & keterangan)
+CATEGORY_LABEL = {
+    "ID": "Individual (Perorangan)",
+    "CP": "Corporate (Perusahaan/Corporate)",
+    "MF": "Mutual Fund (Reksa Dana)",
+    "IB": "Financial Institution (Lembaga Keuangan Lainnya)",
+    "IS": "Insurance (Perusahaan Perasuransian)",
+    "SC": "Securities Company (Perusahaan Efek/Sekuritas)",
+    "PF": "Pension Fund (Dana Pensiun)",
+    "FD": "Foundation (Yayasan)",
+    "OT": "Others (Lainnya)",
+}
+
 if USE_KSEI:
     detail_side = st.radio("Sisi", ["Lokal", "Asing", "Keduanya"], index=2, horizontal=True)
     detail_chart = st.radio("Tipe grafik detail", ["Bar", "Line"], index=0, horizontal=True)
     use_all_detail = st.checkbox("Tampilkan semua bulan (abaikan filter Periode)", value=True)
+
+    # Keterangan kategori (dari dokumen KSEI)
+    with st.expander("ℹ️ Keterangan Kategori (sumber: Panduan KSEI)"):
+        k_rows = []
+        for code in ["ID","CP","MF","IB","IS","SC","PF","FD","OT"]:
+            k_rows.append(f"- **{code}** — {CATEGORY_LABEL[code]}")
+        st.markdown("\n".join(k_rows))
 
     params_d = {"sym": symbol}
     if use_all_detail:
@@ -379,7 +400,7 @@ if USE_KSEI:
         kcat["trade_date"] = pd.to_datetime(kcat["trade_date"])
         kcat["Month"] = kcat["trade_date"].dt.strftime("%Y-%m")
 
-        # Agregasi bulanan (jaga-jaga)
+        # Agregasi bulanan
         num_cols = [
             "local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot","local_total",
             "foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot","foreign_total"
@@ -387,24 +408,23 @@ if USE_KSEI:
         kcat[num_cols] = kcat[num_cols].apply(pd.to_numeric, errors="coerce")
         agg_cat = kcat.groupby("Month", as_index=False)[num_cols].sum()
 
-        # Helper plot
+        # Helper plot (legend: "KODE — Nama")
         def _plot_categories(df_month: pd.DataFrame, cols: list, title: str, side_label: str):
-            # long format
             long = df_month.melt(id_vars="Month", value_vars=cols, var_name="category", value_name="volume").fillna(0.0)
-            # Bersihkan label kategori: local_is -> IS; foreign_pf -> PF
-            long["category"] = (long["category"]
-                                .str.replace(r"^local_", "", regex=True)
-                                .str.replace(r"^foreign_", "", regex=True)
-                                .str.upper())
-            cats = sorted(long["category"].unique().tolist())
+            # local_is -> IS, foreign_pf -> PF
+            long["code"] = (long["category"]
+                            .str.replace(r"^local_", "", regex=True)
+                            .str.replace(r"^foreign_", "", regex=True)
+                            .str.upper())
 
             fig = go.Figure()
-            for c in cats:
-                y = long.loc[long["category"] == c, ["Month", "volume"]]
+            for code in sorted(long["code"].unique().tolist()):
+                pretty = f"{code} — {CATEGORY_LABEL.get(code, code)}"
+                y = long.loc[long["code"] == code, ["Month", "volume"]]
                 if detail_chart == "Bar":
-                    fig.add_bar(x=y["Month"], y=y["volume"], name=c)
+                    fig.add_bar(x=y["Month"], y=y["volume"], name=pretty)
                 else:
-                    fig.add_scatter(x=y["Month"], y=y["volume"], mode="lines+markers", name=c)
+                    fig.add_scatter(x=y["Month"], y=y["volume"], mode="lines+markers", name=pretty)
 
             fig.update_layout(
                 title=title,
