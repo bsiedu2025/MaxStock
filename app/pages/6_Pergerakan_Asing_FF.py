@@ -193,7 +193,7 @@ else:
             p.base_symbol,
             p.open, p.high, p.low, p.close,
             p.volume_price,
-            COALESCE(f.foreign_net, 0) AS foreign_net,
+            COALESCE(foreign_net, 0) AS foreign_net,
             NULL AS foreign_pct, NULL AS retail_pct, NULL AS total_volume, NULL AS total_value
         FROM
             (SELECT DATE(Tanggal) AS trade_date,
@@ -309,17 +309,12 @@ st.subheader("📅 Ringkasan Bulanan KSEI")
 if USE_KSEI:
     # Ambil langsung data KSEI bulanan untuk simbol terpilih
     params = {"sym": symbol}
-    # Filter periode di level bulan
     if period == "ALL":
         period_cond = ""
     elif period.endswith("M"):
-        n = int(period[:-1])
-        period_cond = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n MONTH)"
-        params["n"] = n
+        n = int(period[:-1]); period_cond = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n MONTH)"; params["n"] = n
     else:
-        n = int(period[:-1])
-        period_cond = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n YEAR)"
-        params["n"] = n
+        n = int(period[:-1]); period_cond = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n YEAR)";  params["n"] = n
 
     sql_k = f"""
         SELECT trade_date, base_symbol, foreign_pct, retail_pct, total_volume, total_value
@@ -340,21 +335,46 @@ if USE_KSEI:
         kdf["vol_est_retail"]  = pd.to_numeric(kdf["total_volume"], errors="coerce") * kdf["retail_frac"]
         kdf["net_est_foreign_vol"] = kdf["vol_est_foreign"] - kdf["vol_est_retail"]
 
-        # Viz bulanan: stacked bar & Pa(%) line
-        sub = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                            subplot_titles=("Volume Estimasi: Asing vs Ritel (Bulanan)", "Pa (%) Bulanan"))
-        sub.add_trace(go.Bar(x=kdf["Month"], y=kdf["vol_est_foreign"], name="Foreign (est.)",
-                             marker_color="rgba(0,160,0,0.85)"), row=1, col=1)
-        sub.add_trace(go.Bar(x=kdf["Month"], y=kdf["vol_est_retail"],  name="Retail (est.)",
-                             marker_color="rgba(200,60,60,0.85)"), row=1, col=1)
+        # === Toggle chart type ===
+        chart_type = st.radio("Tipe grafik bulanan", ["Line", "Bar"], index=0, horizontal=True)
+
+        # Agregasi supaya 1 titik/bar per bulan
+        agg = (kdf.sort_values("trade_date")
+                  .groupby("Month", as_index=False)
+                  .agg({
+                      "vol_est_foreign": "sum",
+                      "vol_est_retail":  "sum",
+                      "foreign_pct":     "mean",
+                  }))
+
+        sub = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+            subplot_titles=("Volume Estimasi: Asing vs Lokal (Bulanan)", "Pa (%) Bulanan")
+        )
+
+        if chart_type == "Line":
+            # Row 1: Lines
+            sub.add_trace(go.Scatter(x=agg["Month"], y=agg["vol_est_foreign"],
+                                     name="Foreign (est.)", mode="lines+markers"), row=1, col=1)
+            sub.add_trace(go.Scatter(x=agg["Month"], y=agg["vol_est_retail"],
+                                     name="Lokal/Ritel (est.)", mode="lines+markers"), row=1, col=1)
+        else:
+            # Row 1: Stacked bars
+            sub.add_trace(go.Bar(x=agg["Month"], y=agg["vol_est_foreign"],
+                                 name="Foreign (est.)"), row=1, col=1)
+            sub.add_trace(go.Bar(x=agg["Month"], y=agg["vol_est_retail"],
+                                 name="Lokal/Ritel (est.)"), row=1, col=1)
+            sub.update_layout(barmode="stack")
+
         sub.update_yaxes(title_text="Volume (est.)", row=1, col=1)
 
-        sub.add_trace(go.Scatter(x=kdf["Month"], y=kdf["foreign_pct"], mode="lines+markers",
-                                 name="Pa (%)", line=dict(width=2)), row=2, col=1)
-        sub.update_yaxes(title_text="Pa (%)", range=[0,100], row=2, col=1)
+        # Row 2: Pa% line
+        sub.add_trace(go.Scatter(x=agg["Month"], y=agg["foreign_pct"],
+                                 name="Pa (%)", mode="lines+markers"), row=2, col=1)
+        sub.update_yaxes(title_text="Pa (%)", range=[0, 100], row=2, col=1)
 
-        sub.update_layout(barmode="stack", height=650, hovermode="x unified",
-                          showlegend=True, margin=dict(l=40,r=40,t=60,b=40))
+        sub.update_layout(height=650, hovermode="x unified",
+                          showlegend=True, margin=dict(l=40, r=40, t=60, b=40))
         st.plotly_chart(sub, use_container_width=True)
     else:
         st.info("Belum ada baris `ksei_daily` untuk simbol & periode ini.")
