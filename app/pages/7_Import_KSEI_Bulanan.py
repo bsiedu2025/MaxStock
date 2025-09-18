@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 # app/pages/7_Import_KSEI_Bulanan.py
-# Upload KSEI bulanan (RAW) → ksei_month. Tidak mengubah halaman lain.
+# Upload BULK KSEI bulanan (multi-file) → ksei_month. Aman untuk duplikat (INSERT IGNORE).
 
 import io
 import os
+import math
 import tempfile
+from typing import List, Tuple
+
 import pandas as pd
 import streamlit as st
 import mysql.connector
 from mysql.connector import pooling
 
-st.set_page_config(page_title="📥 Import KSEI Bulanan", page_icon="📥", layout="wide")
-st.title("📥 Import KSEI Bulanan → `ksei_month`")
+st.set_page_config(page_title="📥 Import KSEI Bulanan (Bulk)", page_icon="📥", layout="wide")
+st.title("📥 Import KSEI Bulanan (Multi-file) → `ksei_month`")
 
 # ── DB helpers
 def _get_db_params():
@@ -72,25 +75,31 @@ def ensure_table_ksei_month(conn):
 
 # ── File parsing
 def detect_sep(sample_line: str) -> str:
+    sample_line = sample_line or ""
     if sample_line.count("|") >= 2: return "|"
-    if sample_line.count("\t") >= 2: return "\t"
+    # deteksi tab (baik escape sequence maupun karakter asli)
+    if "\t" in sample_line and sample_line.count("\t") >= 2: return "\t"
     if sample_line.count(";") >= 2: return ";"
     return ","
 
 def read_any(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.read()
     text = raw.decode("utf-8", errors="ignore")
-    first = text.splitlines()[0] if text else ""
+    # cari baris pertama non-empty
+    first = ""
+    for ln in text.splitlines():
+        if ln.strip():
+            first = ln
+            break
     sep = detect_sep(first)
     try:
         df = pd.read_csv(io.StringIO(text), sep=sep)
     except Exception:
-        df = pd.read_csv(io.StringIO(text))
+        df = pd.read_csv(io.StringIO(text), engine="python")
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-def coerce_to_ksei_month(df: pd.DataFrame) -> pd.DataFrame:
-    # Map kolom sesuai contoh KSEI monthly
+def coerce_to_ksei_month(df: pd.DataFrame, source_file: str = None) -> pd.DataFrame:
     df2 = pd.DataFrame()
     # Date
     if "Date" in df.columns:
@@ -101,39 +110,36 @@ def coerce_to_ksei_month(df: pd.DataFrame) -> pd.DataFrame:
     code_col = "Code" if "Code" in df.columns else df.columns[1]
     df2["base_symbol"] = df[code_col].astype(str).str.upper().str.strip().str.replace(r"\s+FF$", "", regex=True)
     # Price
-    if "Price" in df.columns:
-        df2["price"] = pd.to_numeric(df["Price"], errors="coerce")
-    else:
-        df2["price"] = None
+    df2["price"] = pd.to_numeric(df["Price"], errors="coerce") if "Price" in df.columns else None
 
     # Helper
     def num(col):
         return pd.to_numeric(df[col], errors="coerce") if col in df.columns else None
 
-    # Local categories
+    # Local
     df2["local_is"] = num("Local IS"); df2["local_cp"] = num("Local CP"); df2["local_pf"] = num("Local PF")
     df2["local_ib"] = num("Local IB"); df2["local_id"] = num("Local ID"); df2["local_mf"] = num("Local MF")
     df2["local_sc"] = num("Local SC"); df2["local_fd"] = num("Local FD"); df2["local_ot"] = num("Local OT")
-    # Foreign categories
+    # Foreign
     df2["foreign_is"] = num("Foreign IS"); df2["foreign_cp"] = num("Foreign CP"); df2["foreign_pf"] = num("Foreign PF")
     df2["foreign_ib"] = num("Foreign IB"); df2["foreign_id"] = num("Foreign ID"); df2["foreign_mf"] = num("Foreign MF")
     df2["foreign_sc"] = num("Foreign SC"); df2["foreign_fd"] = num("Foreign FD"); df2["foreign_ot"] = num("Foreign OT")
 
-    # Totals: "Total" (local) dan "Total.1" (foreign) pada file contoh
+    # Totals: "Total" (local) & "Total.1" (foreign) dari file contoh
     local_total = df["Total"] if "Total" in df.columns else None
     foreign_total = df["Total.1"] if "Total.1" in df.columns else None
     if local_total is None:
-        loc_cols = [c for c in df.columns if isinstance(c,str) and c.startswith("Local ")]
+        loc_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Local ")]
         local_total = pd.to_numeric(df[loc_cols], errors="coerce").fillna(0).sum(axis=1) if loc_cols else None
     if foreign_total is None:
-        for_cols = [c for c in df.columns if isinstance(c,str) and c.startswith("Foreign ")]
+        for_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Foreign ")]
         foreign_total = pd.to_numeric(df[for_cols], errors="coerce").fillna(0).sum(axis=1) if for_cols else None
 
     df2["local_total"] = pd.to_numeric(local_total, errors="coerce")
     df2["foreign_total"] = pd.to_numeric(foreign_total, errors="coerce")
 
-    # Source file (optional)
-    df2["source_file"] = None
+    # Source
+    df2["source_file"] = source_file
 
     # Clean
     df2 = df2.dropna(subset=["trade_date","base_symbol"])
@@ -141,51 +147,87 @@ def coerce_to_ksei_month(df: pd.DataFrame) -> pd.DataFrame:
     return df2
 
 # ── UI
-up = st.file_uploader("Pilih file KSEI bulanan (CSV/TXT). Format seperti contoh resmi KSEI.", type=["csv","txt"])
-if up is not None:
-    df_raw = read_any(up)
-    st.write("Preview file (atas 20 baris):")
-    st.dataframe(df_raw.head(20), use_container_width=True)
+files = st.file_uploader(
+    "Pilih 1 atau lebih file KSEI bulanan (CSV/TXT). Format resmi KSEI.",
+    type=["csv","txt"], accept_multiple_files=True
+)
+preview_max = st.number_input("Preview per file (baris)", min_value=5, max_value=50, value=20, step=5)
 
-    dfkm = coerce_to_ksei_month(df_raw)
-    st.write("Preview data yang akan disimpan (atas 20 baris):")
-    st.dataframe(dfkm.head(20), use_container_width=True)
+if files:
+    st.write(f"Total file terpilih: **{len(files)}**")
+    parsed = []
+    for i, up in enumerate(files, start=1):
+        with st.expander(f"📄 Preview: {up.name}"):
+            df_raw = read_any(up)
+            st.dataframe(df_raw.head(preview_max), use_container_width=True)
+            dfkm = coerce_to_ksei_month(df_raw, source_file=up.name)
+            st.caption(f"Baris siap simpan dari file ini: {len(dfkm):,}")
+            st.dataframe(dfkm.head(preview_max), use_container_width=True)
+            parsed.append(dfkm)
 
-    if st.button("🚀 INSERT ke `ksei_month` (INSERT IGNORE)"):
-        pool, ssl_ca_file = get_pool()
-        conn = pool.get_connection()
-        try:
-            ensure_table_ksei_month(conn)
-            cur = conn.cursor()
-            sql = """
-            INSERT IGNORE INTO ksei_month
-            (base_symbol, trade_date, price,
-             local_is, local_cp, local_pf, local_ib, local_id, local_mf, local_sc, local_fd, local_ot, local_total,
-             foreign_is, foreign_cp, foreign_pf, foreign_ib, foreign_id, foreign_mf, foreign_sc, foreign_fd, foreign_ot, foreign_total,
-             source_file)
-            VALUES
-            (%s,%s,%s,
-             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-             %s)
-            """
-            rows = [tuple(r) for r in dfkm[[
-                "base_symbol","trade_date","price",
-                "local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot","local_total",
-                "foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot","foreign_total",
-                "source_file"
-            ]].itertuples(index=False, name=None)]
-            cur.executemany(sql, rows)
-            conn.commit()
-            st.success(f"Berhasil insert (abaikan duplikat): {cur.rowcount} baris.")
-            cur.close()
-        finally:
+    if st.button("🚀 INSERT SEMUA ke `ksei_month` (INSERT IGNORE)"):
+        all_df = pd.concat(parsed, ignore_index=True) if parsed else pd.DataFrame()
+        if all_df.empty:
+            st.warning("Tidak ada baris valid untuk disimpan.")
+        else:
+            # Dedup in-batch
+            before = len(all_df)
+            all_df = all_df.drop_duplicates(subset=["base_symbol","trade_date"])
+            after = len(all_df)
+            if after < before:
+                st.info(f"Menghapus duplikat dalam batch: {before - after:,} baris. Sisa: {after:,}")
+
+            # Insert in chunks
+            pool, ssl_ca_file = get_pool()
+            conn = pool.get_connection()
             try:
-                conn.close()
-            except Exception:
-                pass
-            if ssl_ca_file and os.path.exists(ssl_ca_file):
-                try: os.unlink(ssl_ca_file)
-                except Exception: pass
+                ensure_table_ksei_month(conn)
+                cur = conn.cursor()
+                sql = """
+                INSERT IGNORE INTO ksei_month
+                (base_symbol, trade_date, price,
+                 local_is, local_cp, local_pf, local_ib, local_id, local_mf, local_sc, local_fd, local_ot, local_total,
+                 foreign_is, foreign_cp, foreign_pf, foreign_ib, foreign_id, foreign_mf, foreign_sc, foreign_fd, foreign_ot, foreign_total,
+                 source_file)
+                VALUES
+                (%s,%s,%s,
+                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                 %s)
+                """
+                order = [
+                    "base_symbol","trade_date","price",
+                    "local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot","local_total",
+                    "foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot","foreign_total",
+                    "source_file"
+                ]
+                all_df = all_df[order]
 
-st.info("Tips: Tambahkan file ini ke menu melalui app_main.py agar muncul sebagai halaman baru.")
+                batch_size = 5000
+                total_rows = len(all_df)
+                total_batches = math.ceil(total_rows / batch_size)
+                pbar = st.progress(0, text="Menyimpan ke database...")
+                inserted_total = 0
+
+                for b in range(total_batches):
+                    start = b * batch_size
+                    end = min(start + batch_size, total_rows)
+                    batch = [tuple(r) for r in all_df.iloc[start:end].itertuples(index=False, name=None)]
+                    cur.executemany(sql, batch)
+                    conn.commit()
+                    inserted_total += cur.rowcount or 0
+                    pbar.progress((b + 1) / total_batches, text=f"Menyimpan batch {b+1}/{total_batches}...")
+
+                cur.close()
+                pbar.empty()
+                st.success(f"Selesai. Baris (non-duplikat) ter-insert menurut DB: {inserted_total:,} / {total_rows:,}.")
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if ssl_ca_file and os.path.exists(ssl_ca_file):
+                    try: os.unlink(ssl_ca_file)
+                    except Exception: pass
+else:
+    st.info("Pilih satu atau beberapa file untuk mulai import.")
