@@ -1,11 +1,8 @@
-\
 import io
 import os
-import re
-import ssl
 import tempfile
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +15,7 @@ st.caption("Satu halaman untuk input EOD raw ke `eod_prices_raw` dan data partis
 
 # -------------------- DB UTILS --------------------
 def get_conn():
-    # Selalu kembalikan koneksi FRESH (jangan cache), supaya tidak reuse yang sudah ditutup saat rerun Streamlit
+    """Selalu kembalikan koneksi FRESH (no cache)."""
     host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
     port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
     database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
@@ -40,14 +37,12 @@ def get_conn():
         host=host, port=port, database=database,
         user=user, password=password, autocommit=True, **ssl_args
     )
-
     # Pastikan live
     try:
         if hasattr(conn, "is_connected") and not conn.is_connected():
             conn.reconnect(attempts=2, delay=1)
     except Exception:
         pass
-
     return conn, ssl_ca_file
 
 def close_conn(conn_tuple):
@@ -92,11 +87,11 @@ def ensure_table_ksei(conn):
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     """
     cur = conn.cursor(); cur.execute(ddl)
+    # Index (tahan MySQL < 8)
     try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ksei_trade_date ON ksei_daily (trade_date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ksei_base_symbol ON ksei_daily (base_symbol)")
     except mysql.connector.Error:
-        # MySQL <8 doesn't support IF NOT EXISTS on CREATE INDEX; try naive create
         try: cur.execute("CREATE INDEX idx_ksei_trade_date ON ksei_daily (trade_date)")
         except: pass
         try: cur.execute("CREATE INDEX idx_ksei_base_symbol ON ksei_daily (base_symbol)")
@@ -148,7 +143,7 @@ def parse_date_any(s):
 
 # -------------------- HELPERS (KSEI) --------------------
 KSEI_ALIASES = {
-    "base_symbol": {"base_symbol","symbol","ticker","kode","saham"},
+    "base_symbol": {"base_symbol","symbol","ticker","kode","saham","code"},
     "trade_date": {"trade_date","date","tanggal","tgl"},
     "foreign_pct": {"foreign_pct","pa_pct","asing_pct","foreignpercent","asingpercent"},
     "retail_pct": {"retail_pct","ri_pct","retailpercent"},
@@ -192,7 +187,6 @@ def coerce_ksei_df_local(df: pd.DataFrame) -> pd.DataFrame:
     out = out.drop_duplicates(subset=["base_symbol","trade_date"])
     return out
 
-
 def parse_balancepos_txt_local(uploaded_file) -> pd.DataFrame:
     """
     Parser lokal untuk file Balancepos (KSEI) *.txt / *.csv.
@@ -205,61 +199,48 @@ def parse_balancepos_txt_local(uploaded_file) -> pd.DataFrame:
 
     # Deteksi delimiter: prioritas ke yang paling sering muncul
     first = text.splitlines()[0] if text else ""
-    delims = {",": first.count(","), ";": first.count(";"), "\t": first.count("\t"), "|": first.count("|")}
+    delims = {",": first.count(","), ";": first.count(";"), "\\t": first.count("\\t"), "|": first.count("|")}
     delim = max(delims, key=delims.get) if delims else "|"
-    if delim == "\t":
-        delim = "	"
+    if delim == "\\t":
+        delim = "\t"
 
     df = pd.read_csv(io.StringIO(text), sep=delim)
 
-    # Normalisasi nama kolom biar konsisten
-    cols = [c.strip() for c in df.columns]
-    df.columns = cols
+    # Normalisasi nama kolom
+    df.columns = [c.strip() for c in df.columns]
 
-    # Khusus format Balancepos standar: 'Date' + 'Code' + ... + 'Total' (local) + ... + 'Total' (foreign)
-    # Pandas otomatis rename duplikat 'Total' menjadi 'Total' dan 'Total.1'
-    # Jika tidak, coba cari manual berdasarkan posisi.
+    # Total Local/Foreign
     if "Total" in df.columns and "Total.1" in df.columns:
         local_total_col = "Total"
         foreign_total_col = "Total.1"
     else:
-        # fallback: cari dua kolom 'Total' terdekat ke blok 'Foreign IS'
         local_total_col = None
         foreign_total_col = None
         if "Total" in df.columns:
             local_total_col = "Total"
-        # cari kolom setelah ada kolom dengan prefix 'Foreign '
         for i, c in enumerate(df.columns):
             if isinstance(c, str) and c.startswith("Foreign "):
-                # cari 'Total' di sisa kolom
                 for c2 in df.columns[i:]:
                     if c2.strip().lower() == "total":
                         foreign_total_col = c2
                         break
                 break
 
-    # Build output frame
     out = pd.DataFrame()
     # Tanggal
     if "Date" in df.columns:
         out["trade_date"] = pd.to_datetime(df["Date"], format="%d-%b-%Y", errors="coerce").dt.date
     else:
-        # fallback
         out["trade_date"] = pd.to_datetime(df.iloc[:,0], errors="coerce").dt.date
-
     # Simbol
-    code_col = "Code" if "Code" in df.columns else ( "base_symbol" if "base_symbol" in df.columns else df.columns[1] )
+    code_col = "Code" if "Code" in df.columns else ("base_symbol" if "base_symbol" in df.columns else df.columns[1])
     out["base_symbol"] = df[code_col].astype(str).str.strip().str.upper().str.replace(r"\s+FF$", "", regex=True)
 
     # Harga (opsional, untuk total_value)
-    price_col = "Price" if "Price" in df.columns else None
-    price = pd.to_numeric(df[price_col], errors="coerce") if price_col else None
-
+    price = pd.to_numeric(df["Price"], errors="coerce") if "Price" in df.columns else None
     # Totals
     local_total = pd.to_numeric(df.get(local_total_col, None), errors="coerce") if local_total_col else None
     foreign_total = pd.to_numeric(df.get(foreign_total_col, None), errors="coerce") if foreign_total_col else None
-
-    # Jika tidak ada, coba agregasi dari sub-kolom Local*/Foreign*
     if local_total is None:
         local_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Local ")]
         local_total = pd.to_numeric(df[local_cols], errors="coerce").fillna(0).sum(axis=1) if local_cols else None
@@ -275,28 +256,19 @@ def parse_balancepos_txt_local(uploaded_file) -> pd.DataFrame:
     out["retail_pct"] = None
     out["total_volume"] = None
     out["total_value"] = None
-
     if total_volume is not None:
         out["total_volume"] = total_volume
-        # Pct
         with pd.option_context('mode.use_inf_as_na', True):
             out["foreign_pct"] = (foreign_total / total_volume * 100).round(2)
             out["retail_pct"]  = (100 - out["foreign_pct"]).round(2)
-        # Value (opsional)
         if price is not None:
             out["total_value"] = (total_volume * price).astype("Int64")
 
-    # Cleanup
-    out = out.dropna(subset=["trade_date","base_symbol"])
-    out = out.drop_duplicates(subset=["base_symbol","trade_date"])
-
-    # Pastikan tipe numeric benar
+    out = out.dropna(subset=["trade_date","base_symbol"]).drop_duplicates(subset=["base_symbol","trade_date"])
     for col in ["foreign_pct","retail_pct","total_volume","total_value"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
-
     return out
-
 
 # -------------------- UI (Tabs) --------------------
 tab1, tab2 = st.tabs(["📤 Upload EOD (CSV)", "📥 Import KSEI (CSV/TXT)"])
@@ -327,7 +299,16 @@ with tab1:
         if not all(k in mapping for k in ["date","ticker","open","high","low","close","volume","oi"]):
             st.stop()
 
-        # Build canonical dataframe
+        # Build canonical dataframe (robust integer parsing for Volume/OI)
+        def _to_int_series(s):
+            # remove thousand separators / non-digits; keep leading minus
+            if getattr(s, "dtype", None) == object:
+                s = s.astype(str).str.replace(r"[^0-9\-]", "", regex=True)
+            return pd.to_numeric(s, errors="coerce")
+
+        vol_series = _to_int_series(df[mapping["volume"]])
+        oi_series  = _to_int_series(df[mapping["oi"]])
+
         tmp = pd.DataFrame({
             "Tanggal": df[mapping["date"]].apply(parse_date_any),
             "Ticker": df[mapping["ticker"]].astype(str).str.strip(),
@@ -335,8 +316,8 @@ with tab1:
             "High": pd.to_numeric(df[mapping["high"]], errors="coerce"),
             "Low": pd.to_numeric(df[mapping["low"]], errors="coerce"),
             "Close": pd.to_numeric(df[mapping["close"]], errors="coerce"),
-            "Volume": pd.to_numeric(df[mapping["volume"]], errors="coerce").astype("Int64"),
-            "OI": pd.to_numeric(df[mapping["oi"]], errors="coerce").astype("Int64"),
+            "Volume": vol_series,
+            "OI": oi_series,
         })
         tmp["SourceFile"] = source_hint.strip() or os.path.basename(uploaded.name)
         before = len(tmp)
@@ -377,7 +358,6 @@ with tab2:
     st.caption("Menerima CSV/TXT hasil Balancepos. Otomatis normalisasi kolom (base_symbol, trade_date, foreign_pct, retail_pct, total_volume, total_value).")
     up = st.file_uploader("Pilih file KSEI (CSV/TXT)", type=["csv","txt"], key="ksei_uploader")
 
-    # Toggle untuk memakai fungsi lokal atau fungsi utilitas eksternal (jika tersedia)
     use_utils = st.checkbox("Gunakan utils.coerce_ksei_df / parse_balancepos_txt jika tersedia", value=True)
 
     if up:
