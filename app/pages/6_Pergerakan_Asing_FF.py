@@ -297,3 +297,62 @@ with st.expander("Tabel (akhir 250 baris)"):
     cols = ["trade_date","open","high","low","close","MA20","foreign_net","volume_price","Pa_pct","Ri_pct",
             "foreign_pct","retail_pct","total_volume","total_value"]
     st.dataframe(df[[c for c in cols if c in df.columns]].tail(250), use_container_width=True)
+
+# ==== DETAIL KSEI PALING BAWAH (SEMUA BULAN) ====
+st.markdown("---")
+st.subheader("📊 Detail KSEI: Foreign vs Lokal (Semua Bulan)")
+
+detail_chart_type = st.radio(
+    "Tipe grafik detail", ["Bar", "Line"], index=0, horizontal=True,
+    help="Menampilkan seluruh bulan yang tersedia di ksei_daily untuk saham ini."
+)
+
+# Ambil semua data KSEI untuk simbol terpilih (abaikan filter periode)
+sql_k_all = """
+    SELECT trade_date, base_symbol, foreign_pct, total_volume
+    FROM ksei_daily
+    WHERE base_symbol = :sym
+    ORDER BY trade_date
+"""
+with engine.connect() as con:
+    kdf_all = pd.read_sql(text(sql_k_all), con, params={"sym": symbol})
+
+if kdf_all.empty:
+    st.info("Belum ada data KSEI untuk simbol ini.")
+else:
+    kdf_all["trade_date"] = pd.to_datetime(kdf_all["trade_date"])
+    kdf_all["Month"] = kdf_all["trade_date"].dt.strftime("%Y-%m")
+
+    # Estimasi volume asing vs lokal dari persentase KSEI
+    foreign_frac = pd.to_numeric(kdf_all["foreign_pct"], errors="coerce") / 100.0
+    total_vol    = pd.to_numeric(kdf_all["total_volume"], errors="coerce")
+    kdf_all["vol_est_foreign"] = (total_vol * foreign_frac).fillna(0)
+    kdf_all["vol_est_retail"]  = (total_vol * (1.0 - foreign_frac)).fillna(0)
+
+    # Agregasi per bulan (jaga-jaga jika ada duplikat bulan)
+    agg_all = (kdf_all.sort_values("trade_date")
+                        .groupby("Month", as_index=False)
+                        .agg({
+                            "vol_est_foreign": "sum",
+                            "vol_est_retail":  "sum"
+                        }))
+
+    # Plot
+    det = make_subplots(rows=1, cols=1, shared_xaxes=True,
+                        subplot_titles=("Detail Volume Estimasi — Foreign vs Lokal (Semua Bulan)",))
+
+    if detail_chart_type == "Bar":
+        det.add_trace(go.Bar(x=agg_all["Month"], y=agg_all["vol_est_foreign"], name="Foreign (est.)"))
+        det.add_trace(go.Bar(x=agg_all["Month"], y=agg_all["vol_est_retail"],  name="Lokal/Ritel (est.)"))
+        det.update_layout(barmode="stack")
+    else:
+        det.add_trace(go.Scatter(x=agg_all["Month"], y=agg_all["vol_est_foreign"],
+                                 name="Foreign (est.)", mode="lines+markers"))
+        det.add_trace(go.Scatter(x=agg_all["Month"], y=agg_all["vol_est_retail"],
+                                 name="Lokal/Ritel (est.)", mode="lines+markers"))
+
+    det.update_yaxes(title_text="Volume (est.)")
+    det.update_layout(height=420, hovermode="x unified",
+                      showlegend=True, margin=dict(l=40, r=40, t=60, b=40))
+    st.plotly_chart(det, use_container_width=True)
+# ==== /DETAIL KSEI PALING BAWAH ====
