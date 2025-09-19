@@ -1,10 +1,10 @@
+
 # -*- coding: utf-8 -*-
 # app/pages/6_Pergerakan_Asing_FF.py
-# Analisa Foreign Flow + KSEI bulanan (ksei_month) + DETAIL kategori Lokal/Asing (paling bawah)
-# Step #1:
-#  - FF Intensity = foreign_net / ADV20 (+ spike markers p95)
-#  - Anchored VWAP dari Top-N spike terbesar (overlay di chart harga)
-#  NOTE: Tidak ada operasi tulis file / membuat folder lokal.
+# Analisa Foreign Flow + KSEI bulanan (ksei_month)
+# Step #1: FF Intensity + Spike markers + AVWAP
+# Step #2: Heatmap kategori (bulanan) & Shift Map
+# NOTE: Tidak ada operasi tulis folder lokal.
 
 import os
 import tempfile
@@ -21,7 +21,7 @@ st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", lay
 st.title("📈 Analisa Foreign Flow")
 st.caption(
     "Harga + Foreign Flow + Partisipasi Asing/Ritel (KSEI bulanan `ksei_month`). "
-    "Detail kategori & fitur lanjutan ada di bagian bawah."
+    "Termasuk FF Intensity + AVWAP (Step 1) dan Heatmap/Shift Map kategori (Step 2)."
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -421,22 +421,6 @@ else:
     st.info("Tabel `ksei_month` belum tersedia.")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Metrik ringkas & tabel harga
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Last Close", f"{pd.to_numeric(df['close']).iloc[-1]:,.0f}")
-c2.metric(f"Sum FF ({win}D)", f"{pd.to_numeric(df['foreign_net']).tail(win).sum():,.0f}")
-c3.metric("Pa(%) terakhir", f"{pd.to_numeric(df['Pa_pct']).iloc[-1]:.2f}")
-c4.metric("Ri(%) terakhir", f"{pd.to_numeric(df['Ri_pct']).iloc[-1]:.2f}")
-
-with st.expander("Tabel (akhir 250 baris)"):
-    cols = [
-        "trade_date", "open", "high", "low", "close", "MA20",
-        "foreign_net", "volume_price", "ADV20", "FF_intensity",
-        "Pa_pct", "Ri_pct", "foreign_pct", "retail_pct", "total_volume", "total_value",
-    ]
-    st.dataframe(df[[c for c in cols if c in df.columns]].tail(250), use_container_width=True)
-
-# ────────────────────────────────────────────────────────────────────────────────
 # 📊 DETAIL KATEGORI (paling bawah) — sumber: ksei_month
 st.markdown("---")
 st.subheader("📊 Detail Kategori KSEI (Semua Bulan)")
@@ -499,6 +483,7 @@ if USE_KSEI:
         kcat[num_cols] = kcat[num_cols].apply(pd.to_numeric, errors="coerce")
         agg_cat = kcat.groupby("Month", as_index=False)[num_cols].sum()
 
+        # Plot helper
         def _plot_categories(df_month: pd.DataFrame, cols: list, title: str, side_label: str):
             long = df_month.melt(id_vars="Month", value_vars=cols, var_name="category", value_name="volume").fillna(0.0)
             long["code"] = (long["category"]
@@ -525,6 +510,7 @@ if USE_KSEI:
             fig.update_yaxes(title_text=f"Volume ({side_label})")
             st.plotly_chart(fig, use_container_width=True)
 
+        # Lokal
         if detail_side in ("Lokal", "Keduanya"):
             _plot_categories(
                 agg_cat,
@@ -532,6 +518,7 @@ if USE_KSEI:
                 "Detail Kategori — **Lokal** (IS, CP, PF, IB, ID, MF, SC, FD, OT)",
                 "Lokal",
             )
+        # Asing
         if detail_side in ("Asing", "Keduanya"):
             _plot_categories(
                 agg_cat,
@@ -545,6 +532,130 @@ if USE_KSEI:
                          "local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot","local_total",
                          "foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot","foreign_total"]
             st.dataframe(agg_cat[show_cols], use_container_width=True)
+
+        # ───────────────────────────────────────────────────────────────────
+        # STEP #2 — HEATMAP & SHIFT MAP
+        st.markdown("---")
+        st.subheader("🔥 Heatmap & Shift Map Kategori (Bulanan) — Step 2")
+
+        hcol1, hcol2, hcol3 = st.columns([1.2, 1, 1])
+        with hcol1:
+            hm_side = st.selectbox("Sisi data untuk Heatmap/Shift Map", ["Lokal", "Asing"], index=0)
+        with hcol2:
+            hm_mode = st.selectbox("Normalisasi", ["% kontribusi (share)", "Volume absolut"], index=0)
+        with hcol3:
+            topK = st.number_input("Top-K kategori (Shift Map)", min_value=3, max_value=9, value=5, step=1,
+                                   help="Kategori di luar Top-K akan digabung sebagai OTH.")
+
+        if hm_side == "Lokal":
+            cat_cols = ["local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot"]
+            total_col = "local_total"
+        else:
+            cat_cols = ["foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot"]
+            total_col = "foreign_total"
+
+        wide = agg_cat[["Month"] + cat_cols + [total_col]].copy()
+        wide = wide.sort_values("Month").reset_index(drop=True)
+
+        # Shares
+        share = wide.copy()
+        denom = share[total_col].replace(0, np.nan)
+        for c in cat_cols:
+            share[c] = share[c] / denom
+        share = share.drop(columns=[total_col])
+
+        # Data untuk heatmap
+        def _category_code(colname: str) -> str:
+            return colname.split("_", 1)[1].upper()
+
+        if hm_mode.startswith("%"):
+            zdf = share
+            ztitle = "Share (%)"
+            zmin, zmax = 0.0, 1.0
+        else:
+            zdf = wide.drop(columns=[total_col])
+            ztitle = "Volume"
+            zmin, zmax = None, None
+
+        # tidy → pivot untuk heatmap
+        zlong = zdf.melt(id_vars="Month", value_vars=cat_cols, var_name="cat", value_name="val")
+        zlong["code"] = zlong["cat"].map(_category_code)
+        pivot = zlong.pivot(index="Month", columns="code", values="val").fillna(0.0)
+        pivot = pivot[[c for c in ["IS","CP","PF","IB","ID","MF","SC","FD","OT"] if c in pivot.columns]]
+
+        hm = go.Figure(data=go.Heatmap(
+            z=pivot.values if hm_mode.startswith("%") else pivot.values,
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorbar=dict(title=ztitle),
+            zmin=zmin, zmax=zmax,
+            hovertemplate="Bulan=%{y}<br>Kategori=%{x}<br>Nilai=%{z}<extra></extra>"
+        ))
+        hm.update_layout(height=420, margin=dict(l=40, r=40, t=40, b=40), title="Heatmap Kategori per Bulan")
+        st.plotly_chart(hm, use_container_width=True)
+
+        # Shift Map (stacked area)
+        smode_share = hm_mode.startswith("%")
+        sm_df = (share if smode_share else wide.drop(columns=[total_col])).copy()
+
+        # Pilih Top-K kategori berdasar rata-rata share/volume
+        means = sm_df[cat_cols].mean(axis=0).sort_values(ascending=False)
+        keep = means.head(int(topK)).index.tolist()
+        other = [c for c in cat_cols if c not in keep]
+
+        stack = pd.DataFrame({"Month": sm_df["Month"]})
+        for c in keep:
+            stack[_category_code(c)] = sm_df[c].astype(float)
+
+        if other:
+            stack["OTH"] = sm_df[other].sum(axis=1).astype(float)
+            legend_order = [_category_code(c) for c in keep] + ["OTH"]
+        else:
+            legend_order = [_category_code(c) for c in keep]
+
+        # Plot stacked area
+        sm_fig = go.Figure()
+        for i, key in enumerate(legend_order):
+            ys = stack[key].values
+            sm_fig.add_trace(
+                go.Scatter(
+                    x=stack["Month"], y=ys, name=key,
+                    mode="lines",
+                    stackgroup="one",
+                    groupnorm="percent" if smode_share else None,
+                    hovertemplate="Bulan=%{x}<br>%s=%{y:.2f}%s<extra></extra>" % (
+                        key, "%" if smode_share else "", "" if smode_share else ""
+                    ),
+                )
+            )
+        sm_fig.update_layout(
+            title="Shift Map Kategori (Top-K + OTH)",
+            height=420, hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(l=40, r=40, t=40, b=40),
+        )
+        sm_fig.update_yaxes(title_text="Share (%)" if smode_share else "Volume", range=[0, 100] if smode_share else None)
+        st.plotly_chart(sm_fig, use_container_width=True)
+
+        # Top Movers MoM (berdasar share atau volume)
+        st.markdown("**Top Movers MoM (berdasar pilihan normalisasi di atas)**")
+        if len(stack) >= 2:
+            last, prev = stack.iloc[-1], stack.iloc[-2]
+            movers = []
+            for key in legend_order:
+                d = (last[key] - prev[key])
+                movers.append((key, d))
+            movers = sorted(movers, key=lambda x: abs(x[1]), reverse=True)
+            tbl = pd.DataFrame(movers, columns=["Kategori", "Δ (MoM)"])
+            if smode_share:
+                tbl["Δ (MoM)"] = tbl["Δ (MoM)"] * 100.0
+                tbl["Δ (MoM)"] = tbl["Δ (MoM)"].map(lambda v: f"{v:+.2f}%")
+            else:
+                tbl["Δ (MoM)"] = tbl["Δ (MoM)"].map(lambda v: f"{v:+,.0f}")
+            st.dataframe(tbl, use_container_width=True)
+        else:
+            st.info("Butuh ≥ 2 bulan data untuk menghitung MoM.")
+
 else:
     st.info("Tabel `ksei_month` belum tersedia untuk detail kategori.")
 
@@ -553,8 +664,8 @@ else:
 st.markdown("---")
 st.subheader("🗺️ Roadmap Fitur Analitik")
 st.markdown("""
-- [x] **1. FF Intensity + spike markers + AVWAP (Step 1)**
-- [ ] 2. Heatmap kategori (bulanan) & Shift Map
+- [x] **1. FF Intensity + spike markers + AVWAP**
+- [x] **2. Heatmap kategori (bulanan) & Shift Map**
 - [ ] 3. Event study pasca spike (median & win-rate)
 - [ ] 4. Agregasi sektor & Breadth pasar
 - [ ] 5. Signals harian (otomasi GitHub Actions)
