@@ -1,9 +1,8 @@
-
 import io
 import os
 import tempfile
 from datetime import datetime
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -14,9 +13,11 @@ st.set_page_config(page_title="Upload EOD & Import KSEI", page_icon="📤", layo
 st.title("📤 Upload EOD (CSV) & 📥 Import KSEI")
 st.caption("Satu halaman untuk input EOD raw ke `eod_prices_raw` (mendukung **multi-file/batch**) dan import KSEI.")
 
-# -------------------- DB UTILS --------------------
+# =========================================================
+# DB UTILS
+# =========================================================
 def get_conn():
-    """Selalu kembalikan koneksi FRESH (no cache)."""
+    """Kembalikan koneksi MySQL baru setiap kali (no cache)."""
     host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
     port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
     database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
@@ -45,9 +46,9 @@ def get_conn():
         pass
     return conn, ssl_ca_file
 
-def close_conn(conn_tuple):
+def close_conn(pair):
     try:
-        conn, ssl_ca_file = conn_tuple
+        conn, ssl_ca_file = pair
         conn.close()
         if ssl_ca_file and os.path.exists(ssl_ca_file):
             os.remove(ssl_ca_file)
@@ -73,20 +74,21 @@ def ensure_table_eod(conn):
     cur = conn.cursor()
     cur.execute(ddl); cur.close()
 
-def ensure_table_ksei(conn):
+def ensure_table_ksei_daily(conn):
     ddl = """
     CREATE TABLE IF NOT EXISTS ksei_daily (
       base_symbol  VARCHAR(32)  NOT NULL,
       trade_date   DATE         NOT NULL,
-      foreign_pct  DECIMAL(5,2)     NULL,
-      retail_pct   DECIMAL(5,2)     NULL,
+      foreign_pct  DECIMAL(7,3)     NULL,
+      retail_pct   DECIMAL(7,3)     NULL,
       total_volume BIGINT            NULL,
       total_value  BIGINT            NULL,
       created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (base_symbol, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     """
-    cur = conn.cursor(); cur.execute(ddl)
+    cur = conn.cursor()
+    cur.execute(ddl)
     try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ksei_trade_date ON ksei_daily (trade_date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ksei_base_symbol ON ksei_daily (base_symbol)")
@@ -97,9 +99,10 @@ def ensure_table_ksei(conn):
         except: pass
     cur.close()
 
-# -------------------- HELPERS (EOD) --------------------
+# =========================================================
+# Helpers – EOD
+# =========================================================
 CANON = ["date","ticker","open","high","low","close","volume","oi"]
-
 ALIASES = {
     "date": {"date","tanggal","tgl","<date>"},
     "ticker": {"ticker","symbol","kode","<ticker>","base_symbol"},
@@ -111,67 +114,60 @@ ALIASES = {
     "oi": {"oi","openinterest","open_interest","<oi>"},
 }
 
-def normalize_col(c: str) -> str:
+def _norm(c:str)->str:
     c = c.strip().lower()
     c = c.replace(" ", "").replace("-", "").replace(".", "")
     c = c.replace("[","").replace("]","")
     return c
 
-def auto_map_columns(df: pd.DataFrame) -> Dict[str, str]:
-    mapping = {}
-    cols = [normalize_col(c) for c in df.columns]
+def _auto_map(df: pd.DataFrame) -> Dict[str,str]:
+    res = {}
+    cols_norm = [_norm(c) for c in df.columns]
     for canon in CANON:
-        found = None
-        targets = ALIASES[canon]
-        for raw, norm in zip(df.columns, cols):
-            if norm in targets:
-                found = raw
-                break
-        if found:
-            mapping[canon] = found
-    return mapping
+        for raw, norm in zip(df.columns, cols_norm):
+            if norm in ALIASES[canon]:
+                res[canon] = raw; break
+    return res
 
-def parse_date_any(s):
+def _parse_date(s):
     if pd.isna(s): return None
     s = str(s).strip()
     for fmt in ("%Y-%m-%d","%d/%m/%Y","%m/%d/%Y","%d-%m-%Y","%m-%d-%Y"):
         try: return datetime.strptime(s, fmt).date()
-        except ValueError: continue
+        except ValueError: pass
     try: return pd.to_datetime(s, errors="coerce").date()
     except Exception: return None
 
-def _to_int_series(s):
-    # remove thousand separators / non-digits; keep leading minus
+def _to_int_series(s: pd.Series)->pd.Series:
     if getattr(s, "dtype", None) == object:
         s = s.astype(str).str.replace(r"[^0-9\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
 
-def load_eod_file(uploaded, fallback_source: str) -> Tuple[pd.DataFrame, Dict[str,str], str]:
-    """Parse single CSV EOD into canonical schema; returns (df, mapping, src_name)."""
+def load_eod_file(uploaded, override_source: str) -> Tuple[pd.DataFrame, Dict[str,str], str]:
     raw = uploaded.read()
     try:
         df = pd.read_csv(io.BytesIO(raw))
     except Exception:
         df = pd.read_csv(io.BytesIO(raw), encoding="latin-1")
-    mapping = auto_map_columns(df)
-    # canonical df
-    tmp = pd.DataFrame({
-        "Tanggal": df[mapping["date"]].apply(parse_date_any) if "date" in mapping else None,
-        "Ticker": df[mapping["ticker"]].astype(str).str.strip() if "ticker" in mapping else None,
-        "Open": pd.to_numeric(df[mapping.get("open")], errors="coerce") if "open" in mapping else None,
-        "High": pd.to_numeric(df[mapping.get("high")], errors="coerce") if "high" in mapping else None,
-        "Low":  pd.to_numeric(df[mapping.get("low")],  errors="coerce") if "low"  in mapping else None,
-        "Close":pd.to_numeric(df[mapping.get("close")],errors="coerce") if "close" in mapping else None,
-        "Volume": _to_int_series(df[mapping.get("volume")]) if "volume" in mapping else None,
-        "OI":     _to_int_series(df[mapping.get("oi")])     if "oi" in mapping else None,
+    mapping = _auto_map(df)
+    out = pd.DataFrame({
+        "Tanggal": df[mapping["date"]].apply(_parse_date) if "date" in mapping else None,
+        "Ticker":  df[mapping["ticker"]].astype(str).str.strip() if "ticker" in mapping else None,
+        "Open":    pd.to_numeric(df[mapping.get("open")], errors="coerce") if "open" in mapping else None,
+        "High":    pd.to_numeric(df[mapping.get("high")], errors="coerce") if "high" in mapping else None,
+        "Low":     pd.to_numeric(df[mapping.get("low")],  errors="coerce") if "low"  in mapping else None,
+        "Close":   pd.to_numeric(df[mapping.get("close")],errors="coerce") if "close" in mapping else None,
+        "Volume":  _to_int_series(df[mapping.get("volume")]) if "volume" in mapping else None,
+        "OI":      _to_int_series(df[mapping.get("oi")])     if "oi" in mapping else None,
     })
-    src_name = fallback_source.strip() or os.path.basename(uploaded.name)
-    tmp["SourceFile"] = src_name
-    before = len(tmp)
-    tmp = tmp.dropna(subset=["Tanggal","Ticker"])
-    return tmp, mapping, src_name
+    src = override_source.strip() or os.path.basename(uploaded.name)
+    out["SourceFile"] = src
+    out = out.dropna(subset=["Tanggal","Ticker"])
+    return out, mapping, src
 
-# -------------------- HELPERS (KSEI) --------------------
+# =========================================================
+# Helpers – KSEI (ringkas)
+# =========================================================
 KSEI_ALIASES = {
     "base_symbol": {"base_symbol","symbol","ticker","kode","saham","code"},
     "trade_date": {"trade_date","date","tanggal","tgl"},
@@ -181,142 +177,61 @@ KSEI_ALIASES = {
     "total_value": {"total_value","nilai","value","val_total"},
 }
 
-def _norm_map(df: pd.DataFrame, aliases: Dict[str, set]) -> Dict[str,str]:
-    mapping = {}
-    cols = [normalize_col(c) for c in df.columns]
-    for canon, names in aliases.items():
-        for raw, norm in zip(df.columns, cols):
-            if norm in names:
-                mapping[canon] = raw
-                break
-    return mapping
+def _map_ksei(df):
+    res={}
+    cols_norm=[_norm(c) for c in df.columns]
+    for k, names in KSEI_ALIASES.items():
+        for raw,n in zip(df.columns, cols_norm):
+            if n in names: res[k]=raw; break
+    return res
 
-def coerce_ksei_df_local(df: pd.DataFrame) -> pd.DataFrame:
-    mapping = _norm_map(df, KSEI_ALIASES)
-    out = pd.DataFrame()
-    if "trade_date" in mapping:
-        out["trade_date"] = pd.to_datetime(df[mapping["trade_date"]], errors="coerce").dt.date
-    else:
-        out["trade_date"] = pd.to_datetime(df.iloc[:,0], errors="coerce").dt.date
-    if "base_symbol" in mapping:
-        out["base_symbol"] = df[mapping["base_symbol"]].astype(str).str.strip().str.upper()
-    else:
-        out["base_symbol"] = df.iloc[:,1].astype(str).str.strip().str.upper() if df.shape[1] > 1 else ""
-
-    to_num = lambda s: pd.to_numeric(s, errors="coerce")
-    out["foreign_pct"]  = to_num(df[mapping["foreign_pct"]])  if "foreign_pct"  in mapping else None
-    out["retail_pct"]   = to_num(df[mapping["retail_pct"]])   if "retail_pct"   in mapping else None
-    out["total_volume"] = to_num(df[mapping["total_volume"]]) if "total_volume" in mapping else None
-    out["total_value"]  = to_num(df[mapping["total_value"]])  if "total_value"  in mapping else None
-
-    out = out.dropna(subset=["trade_date","base_symbol"])
-    out["base_symbol"] = out["base_symbol"].str.replace(r"\s+FF$", "", regex=True).str.strip()
-    out = out.drop_duplicates(subset=["base_symbol","trade_date"])
+def coerce_ksei_df_local(df: pd.DataFrame)->pd.DataFrame:
+    mp=_map_ksei(df)
+    out=pd.DataFrame()
+    out["trade_date"]=pd.to_datetime(df[mp.get("trade_date", df.columns[0])], errors="coerce").dt.date
+    out["base_symbol"]=df[mp.get("base_symbol", df.columns[1] if df.shape[1]>1 else df.columns[0])].astype(str).str.upper().str.strip().str.replace(r"\s+FF$","",regex=True)
+    to_num=lambda s: pd.to_numeric(s, errors="coerce")
+    out["foreign_pct"]=to_num(df[mp["foreign_pct"]]) if "foreign_pct" in mp else None
+    out["retail_pct"]=to_num(df[mp["retail_pct"]]) if "retail_pct" in mp else None
+    out["total_volume"]=to_num(df[mp["total_volume"]]) if "total_volume" in mp else None
+    out["total_value"]=to_num(df[mp["total_value"]]) if "total_value" in mp else None
+    out=out.dropna(subset=["trade_date","base_symbol"]).drop_duplicates(subset=["base_symbol","trade_date"])
     return out
 
-def parse_balancepos_txt_local(uploaded_file) -> pd.DataFrame:
-    raw = uploaded_file.read()
-    text = raw.decode("utf-8", errors="ignore")
-    first = text.splitlines()[0] if text else ""
-    delims = {",": first.count(","), ";": first.count(";"), "\\t": first.count("\\t"), "|": first.count("|")}
-    delim = max(delims, key=delims.get) if delims else "|"
-    if delim == "\\t":
-        delim = "\t"
-    df = pd.read_csv(io.StringIO(text), sep=delim)
-    df.columns = [c.strip() for c in df.columns]
-
-    # detect totals
-    if "Total" in df.columns and "Total.1" in df.columns:
-        local_total_col, foreign_total_col = "Total", "Total.1"
-    else:
-        local_total_col = "Total" if "Total" in df.columns else None
-        foreign_total_col = None
-        for i, c in enumerate(df.columns):
-            if isinstance(c, str) and c.startswith("Foreign "):
-                for c2 in df.columns[i:]:
-                    if isinstance(c2, str) and c2.strip().lower() == "total":
-                        foreign_total_col = c2; break
-                break
-
-    out = pd.DataFrame()
-    out["trade_date"] = pd.to_datetime(df["Date"] if "Date" in df.columns else df.iloc[:,0], errors="coerce", format="%d-%b-%Y").dt.date
-    code_col = "Code" if "Code" in df.columns else ("base_symbol" if "base_symbol" in df.columns else df.columns[1])
-    out["base_symbol"] = df[code_col].astype(str).str.strip().str.upper().str.replace(r"\s+FF$", "", regex=True)
-
-    price = pd.to_numeric(df["Price"], errors="coerce") if "Price" in df.columns else None
-    local_total = pd.to_numeric(df.get(local_total_col, None), errors="coerce") if local_total_col else None
-    foreign_total = pd.to_numeric(df.get(foreign_total_col, None), errors="coerce") if foreign_total_col else None
-    if local_total is None:
-        local_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Local ")]
-        local_total = pd.to_numeric(df[local_cols], errors="coerce").fillna(0).sum(axis=1) if local_cols else None
-    if foreign_total is None:
-        foreign_cols = [c for c in df.columns if isinstance(c, str) and c.startswith("Foreign ")]
-        foreign_total = pd.to_numeric(df[foreign_cols], errors="coerce").fillna(0).sum(axis=1) if foreign_cols else None
-
-    total_volume = None
-    if local_total is not None and foreign_total is not None:
-        total_volume = local_total.fillna(0) + foreign_total.fillna(0)
-
-    out["foreign_pct"] = None
-    out["retail_pct"] = None
-    out["total_volume"] = None
-    out["total_value"] = None
-    if total_volume is not None:
-        out["total_volume"] = total_volume
-        with pd.option_context('mode.use_inf_as_na', True):
-            out["foreign_pct"] = (foreign_total / total_volume * 100).round(2)
-            out["retail_pct"]  = (100 - out["foreign_pct"]).round(2)
-        if price is not None:
-            out["total_value"] = (total_volume * price).astype("Int64")
-
-    out = out.dropna(subset=["trade_date","base_symbol"]).drop_duplicates(subset=["base_symbol","trade_date"])
-    for col in ["foreign_pct","retail_pct","total_volume","total_value"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    return out
-
-# -------------------- UI (Tabs) --------------------
+# =========================================================
+# UI
+# =========================================================
 tab1, tab2 = st.tabs(["📤 Upload EOD (CSV) — Multi-file", "📥 Import KSEI (CSV/TXT)"])
 
 with tab1:
     st.subheader("Upload EOD RAW → `eod_prices_raw` (Batch)")
-    st.caption("Pilih **banyak file sekaligus**. Setiap file akan di-parse otomatis dan digabung sebelum insert.")
+    st.caption("Pilih **banyak file** sekaligus. Auto-map kolom, preview gabungan, lalu **INSERT IGNORE** ke DB.")
     source_hint = st.text_input("Nama sumber/SourceFile (opsional, override nama file)", value="")
-    files = st.file_uploader("Pilih satu/lebih file CSV EOD", type=["csv"], key="eod_uploader_multi", accept_multiple_files=True)
+    files = st.file_uploader(
+        "Pilih satu/lebih file CSV EOD",
+        type=["csv"],
+        key="eod_uploader_multi",
+        accept_multiple_files=True,
+    )
 
     if files:
-        # parse semua file
-        combined = []
-        maps = []
-        per_file_stats = []
+        combined=[]; per_file=[]
         for f in files:
-            df_tmp, mapping, src_name = load_eod_file(f, source_hint or f.name)
-            maps.append((f.name, mapping))
-            before = len(df_tmp)
-            df_tmp = df_tmp.dropna(subset=["Tanggal","Ticker"])
-            after = len(df_tmp)
-            per_file_stats.append((f.name, before, after))
+            df_tmp, mapping, src = load_eod_file(f, source_hint or f.name)
+            per_file.append((f.name, len(df_tmp)))
             combined.append(df_tmp)
 
         if combined:
             all_df = pd.concat(combined, ignore_index=True)
-            # tampilkan preview gabungan
-            st.write("**Preview gabungan (maks 50 baris):**")
+            st.success(f"{len(files)} file dipilih • total baris valid: {len(all_df):,}")
+            st.write("Preview gabungan (maks 50 baris):")
             st.dataframe(all_df.head(50), use_container_width=True)
 
-            # ringkasan mapping per file
-            with st.expander("🔎 Pemetaan kolom per file"):
-                for name, mp in maps:
-                    st.write(f"**{name}** → {mp}")
+            with st.expander("📊 Ringkasan per file"):
+                st.dataframe(pd.DataFrame(per_file, columns=["File","Baris Valid"]), use_container_width=True)
 
-            # ringkasan baris per file
-            with st.expander("📊 Ringkasan validitas per file"):
-                summ = pd.DataFrame(per_file_stats, columns=["File","Baris (awal)","Baris valid (Tanggal & Ticker)"])
-                st.dataframe(summ, use_container_width=True)
-
-            # siap insert
             if st.button("🚀 INSERT IGNORE semua ke `eod_prices_raw`", type="primary"):
-                conn, ssl_ca_file = get_conn()
+                conn, tmp = get_conn()
                 try:
                     ensure_table_eod(conn)
                     cur = conn.cursor()
@@ -339,61 +254,41 @@ with tab1:
                         )
                         for r in all_df.itertuples(index=False)
                     ]
-                    # chunked executemany untuk menghindari paket terlalu besar
-                    CHUNK = 5000
-                    total = 0
+                    CHUNK=5000; total=0
                     for i in range(0, len(data), CHUNK):
-                        cur.executemany(sql, data[i:i+CHUNK])
-                        total += cur.rowcount
+                        cur.executemany(sql, data[i:i+CHUNK]); total += cur.rowcount
                     conn.commit(); cur.close()
-                    st.success(f"Selesai. Row ditambahkan (non-duplikat/diabaikan oleh PK): {total}.")
+                    st.success(f"Selesai. Row ditambahkan (non-duplikat diabaikan oleh PK): {total}.")
                 finally:
-                    close_conn((conn, ssl_ca_file))
-        else:
-            st.warning("Tidak ada data valid dari file yang diunggah.")
+                    close_conn((conn, tmp))
+    else:
+        st.info("Belum ada file dipilih. Kamu bisa drag-and-drop **banyak file** sekaligus.")
 
 with tab2:
     st.subheader("Import KSEI → `ksei_daily`")
-    st.caption("Menerima CSV/TXT hasil Balancepos. Otomatis normalisasi kolom (base_symbol, trade_date, foreign_pct, retail_pct, total_volume, total_value).")
+    st.caption("Terima CSV/TXT KSEI (Balancepos). Dinormalisasi ke kolom: base_symbol, trade_date, foreign_pct, retail_pct, total_volume, total_value.")
     up = st.file_uploader("Pilih file KSEI (CSV/TXT)", type=["csv","txt"], key="ksei_uploader")
-
-    use_utils = st.checkbox("Gunakan utils.coerce_ksei_df / parse_balancepos_txt jika tersedia", value=True)
-
     if up:
-        filename = up.name.lower()
-        df_ksei = None
-
-        if use_utils:
-            try:
-                from utils import coerce_ksei_df as _coerce_ksei_df_ext
-                from utils import parse_balancepos_txt as _parse_balancepos_txt_ext
-                if filename.endswith(".csv"):
-                    df_ksei = pd.read_csv(up)
-                else:
-                    df_ksei = _parse_balancepos_txt_ext(up)
-                df_ksei = _coerce_ksei_df_ext(df_ksei)
-            except Exception as e:
-                st.warning(f"Gagal menggunakan utils eksternal: {e}. Pakai parser lokal.")
-                up.seek(0)
-                if filename.endswith(".csv"):
-                    df_ksei = pd.read_csv(up)
-                else:
-                    df_ksei = parse_balancepos_txt_local(up)
-                df_ksei = coerce_ksei_df_local(df_ksei)
+        if up.name.lower().endswith(".csv"):
+            df_raw = pd.read_csv(up)
+            df_ksei = coerce_ksei_df_local(df_raw)
         else:
-            if filename.endswith(".csv"):
-                df_ksei = pd.read_csv(up)
-            else:
-                df_ksei = parse_balancepos_txt_local(up)
-            df_ksei = coerce_ksei_df_local(df_ksei)
+            # parser TXT sederhana (gunakan CSV reader dengan deteksi delimiter)
+            raw = up.read().decode("utf-8", errors="ignore")
+            first = raw.splitlines()[0] if raw else ""
+            counts = {",": first.count(","), ";": first.count(";"), "\\t": first.count("\\t"), "|": first.count("|")}
+            delim = max(counts, key=counts.get)
+            if delim == "\\t": delim = "\t"
+            df_raw = pd.read_csv(io.StringIO(raw), sep=delim)
+            df_ksei = coerce_ksei_df_local(df_raw)
 
-        st.write("Preview Data (dinormalisasi):")
+        st.write("Preview (dinormalisasi):")
         st.dataframe(df_ksei.head(30), use_container_width=True)
 
         if st.button("🚀 Insert ke `ksei_daily` (INSERT IGNORE)"):
-            conn, ssl_ca_file = get_conn()
+            conn, tmp = get_conn()
             try:
-                ensure_table_ksei(conn)
+                ensure_table_ksei_daily(conn)
                 cur = conn.cursor()
                 sql = """
                 INSERT IGNORE INTO ksei_daily
@@ -411,12 +306,10 @@ with tab2:
                     )
                     for r in df_ksei.itertuples(index=False)
                 ]
-                CHUNK = 5000
-                total = 0
+                CHUNK=5000; total=0
                 for i in range(0, len(data), CHUNK):
-                    cur.executemany(sql, data[i:i+CHUNK])
-                    total += cur.rowcount
+                    cur.executemany(sql, data[i:i+CHUNK]); total += cur.rowcount
                 conn.commit(); cur.close()
                 st.success(f"Selesai. Row ksei_daily ditambahkan (non-duplikat): {total}.")
             finally:
-                close_conn((conn, ssl_ca_file))
+                close_conn((conn, tmp))
