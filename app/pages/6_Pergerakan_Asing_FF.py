@@ -4,6 +4,7 @@
 # Analisa Foreign Flow + KSEI bulanan (ksei_month)
 # Step #1: FF Intensity + Spike markers + AVWAP
 # Step #2: Heatmap kategori (bulanan) & Shift Map
+# Step #3: Event study pasca spike (median & win-rate) + CAR
 # NOTE: Tidak ada operasi tulis folder lokal.
 
 import os
@@ -21,7 +22,7 @@ st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", lay
 st.title("📈 Analisa Foreign Flow")
 st.caption(
     "Harga + Foreign Flow + Partisipasi Asing/Ritel (KSEI bulanan `ksei_month`). "
-    "Termasuk FF Intensity + AVWAP (Step 1) dan Heatmap/Shift Map kategori (Step 2)."
+    "Termasuk FF Intensity + AVWAP (Step 1), Heatmap/Shift Map (Step 2), dan Event Study (Step 3)."
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -623,7 +624,9 @@ if USE_KSEI:
                     mode="lines",
                     stackgroup="one",
                     groupnorm="percent" if smode_share else None,
-                    hovertemplate=(f"Bulan=%{{x}}<br>{key}=%{{y:.2f}}%<extra></extra>" if smode_share else f"Bulan=%{{x}}<br>{key}=%{{y:,.0f}}<extra></extra>"),
+                    hovertemplate=(f"Bulan=%{{x}}<br>{key}=%{{y:.2f}}%<extra></extra>"
+                                   if smode_share else
+                                   f"Bulan=%{{x}}<br>{key}=%{{y:,.0f}}<extra></extra>"),
                 )
             )
         sm_fig.update_layout(
@@ -658,13 +661,125 @@ else:
     st.info("Tabel `ksei_month` belum tersedia untuk detail kategori.")
 
 # ────────────────────────────────────────────────────────────────────────────────
+# STEP #3 — EVENT STUDY PASCA SPIKE
+st.markdown("---")
+st.subheader("🧪 Event Study Pasca Spike — Step 3")
+
+ev1, ev2, ev3 = st.columns([1.2, 1, 1])
+with ev1:
+    ev_side = st.selectbox("Jenis spike yang diuji", ["Spike + (FF>0)", "Spike − (FF<0)", "Keduanya"], index=0)
+with ev2:
+    horizons = st.multiselect("Horizon (hari)", [1, 3, 5, 10, 15, 20], default=[1, 3, 5, 10, 20])
+with ev3:
+    show_car = st.checkbox("Tampilkan CAR (cumulative avg. return)", value=True)
+
+# Compute forward returns matrix
+df = df.sort_values("trade_date").reset_index(drop=True)
+close = pd.to_numeric(df["close"], errors="coerce")
+max_h = max(horizons) if horizons else 0
+
+fwd = {}
+for h in horizons:
+    fwd[h] = 100.0 * (close.shift(-h) / close - 1.0)
+
+# event indices
+spikes_idx = df.index[df["is_spike"]].tolist()
+pos_idx = [i for i in spikes_idx if df.loc[i, "FF_intensity"] > 0]
+neg_idx = [i for i in spikes_idx if df.loc[i, "FF_intensity"] < 0]
+
+def _event_summary(event_idx: list, label: str):
+    if not event_idx:
+        st.info(f"Tidak ada event untuk **{label}**.")
+        return
+
+    rows = []
+    for h in horizons:
+        vals = fwd[h].iloc[event_idx].dropna().values
+        if len(vals) == 0:
+            rows.append((h, 0, np.nan, np.nan))
+        else:
+            med = np.nanmedian(vals)
+            win = float(np.mean(vals > 0.0)) * 100.0
+            rows.append((h, len(vals), med, win))
+
+    summ = pd.DataFrame(rows, columns=["Horizon", "N", "Median (%)", "Win-rate (%)"])
+
+    # Chart: bar (median) + line (win-rate)
+    fig_ev = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_ev.add_trace(go.Bar(x=summ["Horizon"], y=summ["Median (%)"], name="Median Return (%)"))
+    fig_ev.add_trace(go.Scatter(x=summ["Horizon"], y=summ["Win-rate (%)"], name="Win-rate (%)", mode="lines+markers"), secondary_y=True)
+    fig_ev.update_yaxes(title_text="Median Return (%)", secondary_y=False)
+    fig_ev.update_yaxes(title_text="Win-rate (%)", range=[0,100], secondary_y=True)
+    fig_ev.update_layout(title=f"Hasil Event Study — {label}", height=380, margin=dict(l=40,r=40,t=40,b=40), hovermode="x unified")
+    st.plotly_chart(fig_ev, use_container_width=True)
+
+    st.dataframe(summ, use_container_width=True)
+
+    # Optional CAR
+    if show_car and max_h > 0:
+        # Build CAR path 0..max_h for each event, then average
+        paths = []
+        for idx0 in event_idx:
+            base = close.iloc[idx0]
+            if pd.isna(base):
+                continue
+            seq = []
+            for h in range(0, max_h + 1):
+                j = idx0 + h
+                if j >= len(close) or pd.isna(close.iloc[j]):
+                    seq.append(np.nan)
+                else:
+                    seq.append(100.0 * (close.iloc[j] / base - 1.0))
+            paths.append(seq)
+        if paths:
+            arr = np.array(paths, dtype=float)
+            car = np.nanmean(arr, axis=0)
+            days = list(range(0, max_h + 1))
+            car_fig = go.Figure()
+            car_fig.add_trace(go.Scatter(x=days, y=car, mode="lines+markers", name="CAR Avg"))
+            car_fig.update_layout(title=f"CAR Rata-rata — {label} (0..{max_h} hari)", height=320, margin=dict(l=40,r=40,t=40,b=40))
+            car_fig.update_yaxes(title_text="CAR (%)")
+            car_fig.update_xaxes(title_text="Hari sejak event")
+            st.plotly_chart(car_fig, use_container_width=True)
+        else:
+            st.info("CAR: tidak cukup data setelah event untuk membentuk jalur.")
+
+if ev_side == "Spike + (FF>0)":
+    _event_summary(pos_idx, "Spike + (FF>0)")
+elif ev_side == "Spike − (FF<0)":
+    _event_summary(neg_idx, "Spike − (FF<0)")
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        _event_summary(pos_idx, "Spike + (FF>0)")
+    with c2:
+        _event_summary(neg_idx, "Spike − (FF<0)")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Metrik ringkas & tabel harga
+st.markdown("---")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Last Close", f"{pd.to_numeric(df['close']).iloc[-1]:,.0f}")
+c2.metric(f"Sum FF ({win}D)", f"{pd.to_numeric(df['foreign_net']).tail(win).sum():,.0f}")
+c3.metric("Pa(%) terakhir", f"{pd.to_numeric(df['Pa_pct']).iloc[-1]:.2f}")
+c4.metric("Ri(%) terakhir", f"{pd.to_numeric(df['Ri_pct']).iloc[-1]:.2f}")
+
+with st.expander("Tabel (akhir 250 baris)"):
+    cols = [
+        "trade_date", "open", "high", "low", "close", "MA20",
+        "foreign_net", "volume_price", "ADV20", "FF_intensity",
+        "Pa_pct", "Ri_pct", "foreign_pct", "retail_pct", "total_volume", "total_value",
+    ]
+    st.dataframe(df[[c for c in cols if c in df.columns]].tail(250), use_container_width=True)
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Roadmap progress (Step checklist)
 st.markdown("---")
 st.subheader("🗺️ Roadmap Fitur Analitik")
 st.markdown("""
 - [x] **1. FF Intensity + spike markers + AVWAP**
 - [x] **2. Heatmap kategori (bulanan) & Shift Map**
-- [ ] 3. Event study pasca spike (median & win-rate)
+- [x] **3. Event study pasca spike (median & win-rate) + CAR**
 - [ ] 4. Agregasi sektor & Breadth pasar
 - [ ] 5. Signals harian (otomasi GitHub Actions)
 """)
