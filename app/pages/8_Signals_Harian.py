@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 # app/pages/8_Signals_Harian.py
-# Viewer untuk tabel signals_daily
+# Viewer untuk tabel signals_daily (kolom `signal_code`)
 
 import os
-import io
 import tempfile
 from urllib.parse import quote_plus
 from datetime import date, timedelta
@@ -12,6 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="🔔 Sinyal Harian (FF)", page_icon="🔔", layout="wide")
 st.title("🔔 Sinyal Harian (Foreign Flow)")
@@ -49,7 +49,7 @@ def _table_exists(engine, name: str) -> bool:
 
 engine = _build_engine()
 
-# Load latest N days
+# Controls
 N_DAYS = st.slider("Ambil data (hari terbaru)", 1, 30, 5, 1)
 sig_types = st.multiselect("Filter Signal", ["FF_BUY","FF_SELL","NEUTRAL"], default=["FF_BUY","FF_SELL"])
 
@@ -69,14 +69,12 @@ if up is not None:
     except Exception as e:
         st.error(f"Gagal baca CSV: {e}")
 
-# Pastikan tabel ada
+# Load data
 if not _table_exists(engine, "signals_daily"):
     st.info("Belum ada data di `signals_daily`. Jalankan generator (GitHub Actions) lebih dulu.")
     st.stop()
 
-# Hindari parameter di dalam 'INTERVAL :n DAY' (MySQL tidak mendukung bind untuk INTERVAL).
 dmin = date.today() - timedelta(days=int(N_DAYS))
-
 sql = """
     SELECT *
     FROM signals_daily
@@ -91,9 +89,17 @@ if df.empty:
     st.stop()
 
 df["trade_date"] = pd.to_datetime(df["trade_date"])
-df = df.sort_values(["trade_date","base_symbol"])
 df["base_symbol"] = df["base_symbol"].astype(str).str.upper()
 
+# Kolom alias untuk UI
+if "signal_code" in df.columns:
+    df = df.rename(columns={"signal_code":"signal"})
+else:
+    # fallback kalau upgrade belum jalan
+    if "signal" not in df.columns:
+        df["signal"] = None
+
+# Merge sector (optional)
 if sector_map is not None:
     df = df.merge(sector_map, on="base_symbol", how="left")
 else:
@@ -113,8 +119,6 @@ c2.metric("Total FF_SELL", int((df["signal"]=="FF_SELL").sum()))
 c3.metric("Total NEUTRAL", int((df["signal"]=="NEUTRAL").sum()))
 
 # Distribusi per tanggal
-import plotly.graph_objects as go
-
 dist = (df.groupby(["trade_date","signal"])["base_symbol"]
           .nunique().reset_index(name="count"))
 pivot = dist.pivot(index="trade_date", columns="signal", values="count").fillna(0)
@@ -126,13 +130,14 @@ fig.update_layout(barmode="stack", height=380, margin=dict(l=40,r=40,t=40,b=40),
                   title="Distribusi Sinyal per Hari (n emiten)")
 st.plotly_chart(fig, use_container_width=True)
 
-# Tabel utama
+# Tabel
 show_cols = ["trade_date","base_symbol","signal","ff_intensity","threshold_p95","foreign_net","adv20","close","ma20","reason","sector"]
 for col in show_cols:
     if col not in df.columns:
         df[col] = None
-st.dataframe(df[show_cols], use_container_width=True)
 
-# Download CSV
+st.dataframe(df.sort_values(["trade_date","base_symbol"])[show_cols], use_container_width=True)
+
+# Download
 csv = df[show_cols].to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download CSV", data=csv, file_name="signals_daily_latest.csv", mime="text/csv")
