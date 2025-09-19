@@ -5,6 +5,7 @@
 # Step #1: FF Intensity + Spike markers + AVWAP
 # Step #2: Heatmap kategori (bulanan) & Shift Map
 # Step #3: Event study pasca spike (median & win-rate) + CAR
+# Step #4: Agregasi sektor & Breadth pasar
 # NOTE: Tidak ada operasi tulis folder lokal.
 
 import os
@@ -22,7 +23,7 @@ st.set_page_config(page_title="📈 Analisa Foreign Flow", page_icon="📈", lay
 st.title("📈 Analisa Foreign Flow")
 st.caption(
     "Harga + Foreign Flow + Partisipasi Asing/Ritel (KSEI bulanan `ksei_month`). "
-    "Termasuk FF Intensity + AVWAP (Step 1), Heatmap/Shift Map (Step 2), dan Event Study (Step 3)."
+    "Termasuk Step 1–4: FF Intensity/AVWAP, Heatmap/Shift Map, Event Study, serta Agregasi Sektor & Breadth."
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -189,7 +190,7 @@ if df.empty:
     st.stop()
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Feature engineering
+# Feature engineering (per-saham)
 df["trade_date"] = pd.to_datetime(df["trade_date"])
 for col in ["open","high","low","close","volume_price","foreign_net"]:
     if col in df.columns:
@@ -614,7 +615,6 @@ if USE_KSEI:
         else:
             legend_order = [_category_code(c) for c in keep]
 
-        # Plot stacked area
         sm_fig = go.Figure()
         for i, key in enumerate(legend_order):
             ys = stack[key].values
@@ -638,7 +638,7 @@ if USE_KSEI:
         sm_fig.update_yaxes(title_text="Share (%)" if smode_share else "Volume", range=[0, 100] if smode_share else None)
         st.plotly_chart(sm_fig, use_container_width=True)
 
-        # Top Movers MoM (berdasar share atau volume)
+        # Top Movers MoM
         st.markdown("**Top Movers MoM (berdasar pilihan normalisasi di atas)**")
         if len(stack) >= 2:
             last, prev = stack.iloc[-1], stack.iloc[-2]
@@ -673,7 +673,6 @@ with ev2:
 with ev3:
     show_car = st.checkbox("Tampilkan CAR (cumulative avg. return)", value=True)
 
-# Compute forward returns matrix
 df = df.sort_values("trade_date").reset_index(drop=True)
 close = pd.to_numeric(df["close"], errors="coerce")
 max_h = max(horizons) if horizons else 0
@@ -682,7 +681,6 @@ fwd = {}
 for h in horizons:
     fwd[h] = 100.0 * (close.shift(-h) / close - 1.0)
 
-# event indices
 spikes_idx = df.index[df["is_spike"]].tolist()
 pos_idx = [i for i in spikes_idx if df.loc[i, "FF_intensity"] > 0]
 neg_idx = [i for i in spikes_idx if df.loc[i, "FF_intensity"] < 0]
@@ -694,7 +692,7 @@ def _event_summary(event_idx: list, label: str):
 
     rows = []
     for h in horizons:
-        vals = fwd[h].iloc[event_idx].dropna().values
+        vals = pd.Series(fwd[h]).iloc[event_idx].dropna().values
         if len(vals) == 0:
             rows.append((h, 0, np.nan, np.nan))
         else:
@@ -704,7 +702,6 @@ def _event_summary(event_idx: list, label: str):
 
     summ = pd.DataFrame(rows, columns=["Horizon", "N", "Median (%)", "Win-rate (%)"])
 
-    # Chart: bar (median) + line (win-rate)
     fig_ev = make_subplots(specs=[[{"secondary_y": True}]])
     fig_ev.add_trace(go.Bar(x=summ["Horizon"], y=summ["Median (%)"], name="Median Return (%)"))
     fig_ev.add_trace(go.Scatter(x=summ["Horizon"], y=summ["Win-rate (%)"], name="Win-rate (%)", mode="lines+markers"), secondary_y=True)
@@ -715,9 +712,7 @@ def _event_summary(event_idx: list, label: str):
 
     st.dataframe(summ, use_container_width=True)
 
-    # Optional CAR
     if show_car and max_h > 0:
-        # Build CAR path 0..max_h for each event, then average
         paths = []
         for idx0 in event_idx:
             base = close.iloc[idx0]
@@ -756,7 +751,219 @@ else:
         _event_summary(neg_idx, "Spike − (FF<0)")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Metrik ringkas & tabel harga
+# STEP #4 — AGREGASI SEKTOR & BREADTH PASAR
+st.markdown("---")
+st.subheader("🏭 Agregasi Sektor & 🫶 Breadth Pasar — Step 4")
+
+u1, u2, u3 = st.columns([1.2, 1, 1])
+with u1:
+    uni_mode = st.selectbox("Universe", ["Semua saham (default)", "Custom list"], index=0)
+with u2:
+    breadth_basis = st.selectbox("Basis Breadth", ["Price return", "Foreign net"], index=0)
+with u3:
+    agg_mode = st.selectbox("Agregasi Sektor", ["Bulanan", "Harian"], index=0)
+
+custom_list = []
+if uni_mode == "Custom list":
+    txt = st.text_input("Masukkan daftar ticker (pisah koma), contoh: BBRI, BBCA, ASII", "")
+    if txt.strip():
+        custom_list = [s.strip().upper() for s in txt.split(",") if s.strip()]
+
+# Ambil data banyak simbol (periode sama)
+def _date_cond(field: str) -> str:
+    if period == "ALL":
+        return ""
+    if period.endswith("M"):
+        n = int(period[:-1]); return f"AND {field} >= CURDATE() - INTERVAL {n} MONTH"
+    n = int(period[:-1]); return f"AND {field} >= CURDATE() - INTERVAL {n} YEAR"
+
+if USE_EOD_TABLE:
+    sql_u = f"""
+        SELECT p.trade_date, p.base_symbol, p.close, p.volume AS volume_price,
+               COALESCE(f.foreign_net,0) AS foreign_net
+        FROM eod p
+        LEFT JOIN eod f
+          ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol AND f.is_foreign_flow = 1
+        WHERE p.is_foreign_flow = 0
+        {_date_cond("p.trade_date")}
+    """
+else:
+    sql_u = f"""
+        SELECT p.trade_date, p.base_symbol, p.close, p.volume_price,
+               COALESCE(f.foreign_net,0) AS foreign_net
+        FROM
+        ( SELECT DATE(Tanggal) AS trade_date, Ticker AS base_symbol, `Close` AS close, Volume AS volume_price
+          FROM eod_prices_raw
+          WHERE Ticker NOT LIKE '% FF' {_date_cond("Tanggal")}
+        ) p
+        LEFT JOIN
+        ( SELECT DATE(Tanggal) AS trade_date, TRIM(REPLACE(Ticker,' FF','')) AS base_symbol, Volume AS foreign_net
+          FROM eod_prices_raw
+          WHERE Ticker LIKE '% FF' {_date_cond("Tanggal")}
+        ) f
+        ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
+    """
+
+with engine.connect() as con:
+    dfu = pd.read_sql(text(sql_u), con)
+
+if dfu.empty:
+    st.info("Universe kosong untuk periode ini.")
+else:
+    dfu["trade_date"] = pd.to_datetime(dfu["trade_date"])
+    for c in ["close","volume_price","foreign_net"]:
+        dfu[c] = pd.to_numeric(dfu[c], errors="coerce")
+    dfu = dfu.dropna(subset=["close"])
+
+    if custom_list:
+        dfu = dfu[dfu["base_symbol"].isin(custom_list)].copy()
+        if dfu.empty:
+            st.warning("Ticker di custom list tidak ditemukan di periode ini.")
+    # Hitung return harian per simbol
+    dfu = dfu.sort_values(["base_symbol","trade_date"])
+    dfu["ret"] = dfu.groupby("base_symbol")["close"].pct_change() * 100.0
+
+    # Breadth Market
+    bdf = dfu.dropna(subset=["ret"]).copy()
+    if breadth_basis == "Price return":
+        bdf["adv"] = (bdf["ret"] > 0).astype(int)
+        bdf["dec"] = (bdf["ret"] < 0).astype(int)
+        daily = bdf.groupby("trade_date")[["adv","dec"]].sum().reset_index()
+        daily["unch"] = bdf.groupby("trade_date")["ret"].apply(lambda s: (s == 0).sum()).values
+        daily["net_ad"] = daily["adv"] - daily["dec"]
+    else:
+        bdf["buy"] = (bdf["foreign_net"] > 0).astype(int)
+        bdf["sell"] = (bdf["foreign_net"] < 0).astype(int)
+        daily = bdf.groupby("trade_date")[["buy","sell"]].sum().reset_index()
+        daily["unch"] = bdf.groupby("trade_date")["foreign_net"].apply(lambda s: (s == 0).sum()).values
+        daily["net_ad"] = daily["buy"] - daily["sell"]
+
+    # Plot breadth stacked & AD line
+    fig_b = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+                          row_heights=[0.6, 0.4])
+    if breadth_basis == "Price return":
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=daily["adv"], name="Advancers"), row=1,col=1)
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=-daily["dec"], name="Decliners"), row=1,col=1)
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=daily["unch"], name="Unchanged"), row=1,col=1)
+        fig_b.update_layout(barmode="relative")
+        fig_b.update_yaxes(title_text="# Saham", row=1, col=1)
+        fig_b.add_trace(go.Scatter(x=daily["trade_date"], y=daily["net_ad"].cumsum(),
+                                   name="AD Line (cum Adv-Decl)",
+                                   mode="lines"), row=2, col=1)
+    else:
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=daily["buy"], name="# FF Buyers"), row=1,col=1)
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=-daily["sell"], name="# FF Sellers"), row=1,col=1)
+        fig_b.add_trace(go.Bar(x=daily["trade_date"], y=daily["unch"], name="FF Flat"), row=1,col=1)
+        fig_b.update_layout(barmode="relative")
+        fig_b.update_yaxes(title_text="# Saham", row=1, col=1)
+        fig_b.add_trace(go.Scatter(x=daily["trade_date"], y=daily["net_ad"].cumsum(),
+                                   name="FF Breadth Line (cum Buyers-Sellers)",
+                                   mode="lines"), row=2, col=1)
+
+    fig_b.update_yaxes(title_text="Breadth (kumulatif)", row=2, col=1)
+    fig_b.update_layout(height=560, margin=dict(l=40,r=40,t=40,b=40), hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_b, use_container_width=True)
+
+    # ── Agregasi Sektor
+    st.markdown("### 🏭 Agregasi Sektor")
+    sector_df = None
+
+    # 1) Coba ambil dari tabel metadata yang umum
+    sector_tables = [
+        ("symbols_meta", "base_symbol", "sector"),
+        ("tickers_info", "base_symbol", "sector"),
+        ("symbols", "symbol", "sector"),
+        ("ref_symbols", "symbol", "sector"),
+    ]
+    for tname, sc_sym, sc_col in sector_tables:
+        if _table_exists(tname):
+            try:
+                with engine.connect() as con:
+                    sector_df = pd.read_sql(text(f"SELECT {sc_sym} AS base_symbol, {sc_col} AS sector FROM {tname}"), con)
+                if not sector_df.empty:
+                    break
+            except Exception:
+                sector_df = None
+
+    # 2) Jika belum ada, allow user upload mapping
+    if sector_df is None or sector_df.empty:
+        st.info("Mapping sektor tidak ditemukan di DB. Kamu bisa upload CSV sederhana: kolom **symbol, sector**.")
+        up = st.file_uploader("Upload mapping sektor (CSV)", type=["csv"])
+        if up is not None:
+            try:
+                tmp = pd.read_csv(up)
+                cols = [c.lower().strip() for c in tmp.columns]
+                tmp.columns = cols
+                if "symbol" in cols and "sector" in cols:
+                    sector_df = tmp.rename(columns={"symbol":"base_symbol"})
+                else:
+                    st.error("CSV harus memiliki kolom: symbol, sector.")
+            except Exception as e:
+                st.error(f"Gagal membaca CSV sektor: {e}")
+
+    if sector_df is not None and not sector_df.empty:
+        sector_df["base_symbol"] = sector_df["base_symbol"].astype(str).str.upper()
+        dfj = dfu.merge(sector_df, on="base_symbol", how="left")
+        dfj["sector"] = dfj["sector"].fillna("UNKNOWN")
+
+        if agg_mode == "Bulanan":
+            dfj["Month"] = dfj["trade_date"].dt.to_period("M").astype(str)
+            grp_keys = ["Month","sector"]
+            xlabel = "Month"
+        else:
+            grp_keys = ["trade_date","sector"]
+            xlabel = "Tanggal"
+
+        # metrics per sector
+        g = dfj.sort_values("trade_date").groupby(grp_keys)
+        met = pd.DataFrame({
+            "ff_net_sum": g["foreign_net"].sum(),
+            "ret_median_pct": g["close"].apply(lambda s: s.pct_change().median(skipna=True) * 100.0),
+            "n_symbols": g["base_symbol"].nunique(),
+        }).reset_index()
+
+        # Pivot untuk heatmap FF sector
+        idx_col = grp_keys[0]
+        piv = met.pivot(index=idx_col, columns="sector", values="ff_net_sum").fillna(0.0)
+        # Keep deterministic sector order
+        sec_order = sorted([c for c in piv.columns if c != "UNKNOWN"]) + (["UNKNOWN"] if "UNKNOWN" in piv.columns else [])
+        piv = piv[sec_order]
+
+        h2 = go.Figure(data=go.Heatmap(
+            z=piv.values,
+            x=piv.columns.tolist(),
+            y=piv.index.tolist(),
+            colorbar=dict(title="Σ Foreign Net"),
+            hovertemplate=f"{xlabel}=%"+"{y}<br>Sektor=%{x}<br>Foreign Net=%{z:,.0f}<extra></extra>"
+        ))
+        h2.update_layout(height=420, margin=dict(l=40,r=40,t=40,b=40), title="Heatmap Σ Foreign Net per Sektor")
+        st.plotly_chart(h2, use_container_width=True)
+
+        # Bar ranking sektor periode terakhir
+        last_key = piv.index.max()
+        last_cut = met[met[idx_col] == last_key].copy()
+        if not last_cut.empty:
+            rank_fig = go.Figure()
+            last_cut = last_cut.sort_values("ff_net_sum", ascending=True)
+            rank_fig.add_trace(go.Bar(
+                x=last_cut["ff_net_sum"],
+                y=last_cut["sector"],
+                orientation="h",
+                name="Σ Foreign Net"
+            ))
+            rank_fig.update_layout(height=420, margin=dict(l=40,r=40,t=40,b=40),
+                                   title=f"Ranking Sektor berdasar Σ Foreign Net — {xlabel} {last_key}")
+            st.plotly_chart(rank_fig, use_container_width=True)
+
+        # Tabel ringkas sektor
+        with st.expander("📄 Tabel Agregasi Sektor"):
+            st.dataframe(met.sort_values([idx_col,"ff_net_sum"], ascending=[True,False]), use_container_width=True)
+    else:
+        st.info("Belum ada mapping sektor, bagian ini menunggu CSV mapping atau tabel meta tersedia.")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Metrik ringkas & tabel harga (single symbol)
 st.markdown("---")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Last Close", f"{pd.to_numeric(df['close']).iloc[-1]:,.0f}")
@@ -780,6 +987,6 @@ st.markdown("""
 - [x] **1. FF Intensity + spike markers + AVWAP**
 - [x] **2. Heatmap kategori (bulanan) & Shift Map**
 - [x] **3. Event study pasca spike (median & win-rate) + CAR**
-- [ ] 4. Agregasi sektor & Breadth pasar
+- [x] **4. Agregasi sektor & Breadth pasar**
 - [ ] 5. Signals harian (otomasi GitHub Actions)
 """)
