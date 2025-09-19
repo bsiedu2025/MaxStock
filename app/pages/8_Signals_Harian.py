@@ -6,13 +6,12 @@ import os
 import io
 import tempfile
 from urllib.parse import quote_plus
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="🔔 Sinyal Harian (FF)", page_icon="🔔", layout="wide")
 st.title("🔔 Sinyal Harian (Foreign Flow)")
@@ -36,6 +35,18 @@ def _build_engine():
     url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
     return create_engine(url, connect_args=connect_args, pool_recycle=300, pool_pre_ping=True)
 
+def _table_exists(engine, name: str) -> bool:
+    try:
+        with engine.connect() as con:
+            q = text("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = :t
+            """)
+            return bool(con.execute(q, {"t": name}).scalar())
+    except Exception:
+        return False
+
 engine = _build_engine()
 
 # Load latest N days
@@ -58,16 +69,25 @@ if up is not None:
     except Exception as e:
         st.error(f"Gagal baca CSV: {e}")
 
-sql = f"""
+# Pastikan tabel ada
+if not _table_exists(engine, "signals_daily"):
+    st.info("Belum ada data di `signals_daily`. Jalankan generator (GitHub Actions) lebih dulu.")
+    st.stop()
+
+# Hindari parameter di dalam 'INTERVAL :n DAY' (MySQL tidak mendukung bind untuk INTERVAL).
+dmin = date.today() - timedelta(days=int(N_DAYS))
+
+sql = """
     SELECT *
     FROM signals_daily
-    WHERE trade_date >= CURDATE() - INTERVAL :n DAY
+    WHERE trade_date >= :dmin
+    ORDER BY trade_date, base_symbol
 """
 with engine.connect() as con:
-    df = pd.read_sql(text(sql), con, params={"n": int(N_DAYS)})
+    df = pd.read_sql(text(sql), con, params={"dmin": dmin})
 
 if df.empty:
-    st.info("Belum ada data di `signals_daily`. Jalankan generator (GitHub Actions) lebih dulu.")
+    st.warning("Tidak ada baris pada rentang tanggal terpilih.")
     st.stop()
 
 df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -93,6 +113,8 @@ c2.metric("Total FF_SELL", int((df["signal"]=="FF_SELL").sum()))
 c3.metric("Total NEUTRAL", int((df["signal"]=="NEUTRAL").sum()))
 
 # Distribusi per tanggal
+import plotly.graph_objects as go
+
 dist = (df.groupby(["trade_date","signal"])["base_symbol"]
           .nunique().reset_index(name="count"))
 pivot = dist.pivot(index="trade_date", columns="signal", values="count").fillna(0)
@@ -106,6 +128,9 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Tabel utama
 show_cols = ["trade_date","base_symbol","signal","ff_intensity","threshold_p95","foreign_net","adv20","close","ma20","reason","sector"]
+for col in show_cols:
+    if col not in df.columns:
+        df[col] = None
 st.dataframe(df[show_cols], use_container_width=True)
 
 # Download CSV
