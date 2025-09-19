@@ -3,7 +3,7 @@ name: Daily Stock Update
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 0 * * 1-5"     # 07:00 WIB (00:00 UTC) weekdays
+    - cron: "0 0 * * 1-5"   # 07:00 WIB (00:00 UTC) Senin–Jumat
 
 jobs:
   update:
@@ -15,28 +15,25 @@ jobs:
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
       DB_SSL_CA: ${{ secrets.DB_SSL_CA }}
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.10" }
 
-      # langkah diagnostik: cek ENV terisi (tanpa menampilkan nilai)
-      - name: Check DB env presence
+      - name: Print time
         run: |
-          python - <<'PY'
-          import os
-          keys = ["DB_HOST","DB_PORT","DB_NAME","DB_USER","DB_PASSWORD","DB_SSL_CA"]
-          for k in keys:
-            v = os.getenv(k)
-            print(f"{k}: {'SET' if v else 'MISSING'}  len={len(v) if v else 0}")
-          PY
+          echo "UTC:" && date -u
+          TZ=Asia/Jakarta date
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
 
-      - name: Run batch updater (5 hari terakhir)
+      - name: Run batch updater (5 hari perdagangan)
         run: |
           python app/batch_update.py --period 5d --suffix .JK --max-tickers 0
+
+      - name: Generate Daily Signals
+        run: |
+          python app/signals_daily.py --days 240 --max-tickers 0

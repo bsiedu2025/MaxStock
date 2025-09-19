@@ -70,13 +70,14 @@ if not db_ok:
     )
 
 # ====== Daftar halaman ======
-PAGE_FILES: Dict[str, Path] = {
-    "Pergerakan IHSG": APP_DIR / "1_Harga_Saham.py",
-    "Harga Saham": APP_DIR / "1_Harga_Saham.py",
-    "Update Data Harga Saham": APP_DIR / "2_Update_Data_Harga_Saham.py",
-    "Konsol Database": APP_DIR / "3_Konsol_Database.py",
-    "Sinyal MACD": APP_DIR / "4_Sinyal_MACD.py",      # diperbaiki
-    "Upload EOD (CSV)": APP_DIR / "5_Upload_EOD.py",   # halaman baru
+PAGE_FILES = {
+  "Harga Saham": APP_DIR / "1_Harga_Saham.py",
+  "Update Data Harga Saham": APP_DIR / "2_Update_Data_Harga_Saham.py",
+  "Konsol Database": APP_DIR / "3_Konsol_Database.py",
+  "Sinyal MACD": APP_DIR / "4_Sinyal_MACD.py",
+  "Upload EOD (CSV)": APP_DIR / "5_Upload_EOD.py",
+  "Import KSEI Bulanan": APP_DIR / "7_Import_KSEI_Bulanan.py",  # <— baru
+  "Sinyal Harian (FF)": APP_DIR / "8_Signals_Harian.py",
 }
 available_pages = {n: p for n, p in PAGE_FILES.items() if p.exists()}
 
