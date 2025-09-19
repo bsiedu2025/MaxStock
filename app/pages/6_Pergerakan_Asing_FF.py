@@ -1,17 +1,10 @@
-# Create updated 6_Pergerakan_Asing_FF.py with FF Intensity + spikes + AVWAP anchors (top-N) and full KSEI details.
-import os, textwrap, json, pathlib, io
-
-base_dir = "/mnt/data"
-os.makedirs(base_dir, exist_ok=True)
-
-code = textwrap.dedent('''
 # -*- coding: utf-8 -*-
 # app/pages/6_Pergerakan_Asing_FF.py
-# Analisa Foreign Flow + KSEI bulanan (dari ksei_month) + DETAIL kategori Lokal/Asing (paling bawah)
-# Tambahan (Step #1):
-#  - FF Intensity = foreign_net / ADV20 (secondary axis di panel FF)
-#  - Spike markers (|FF Intensity| >= p95)
+# Analisa Foreign Flow + KSEI bulanan (ksei_month) + DETAIL kategori Lokal/Asing (paling bawah)
+# Step #1:
+#  - FF Intensity = foreign_net / ADV20 (+ spike markers p95)
 #  - Anchored VWAP dari Top-N spike terbesar (overlay di chart harga)
+#  NOTE: Tidak ada operasi tulis file / membuat folder lokal.
 
 import os
 import tempfile
@@ -56,11 +49,11 @@ engine = _build_engine()
 def _table_exists(name: str) -> bool:
     try:
         with engine.connect() as con:
-            q = text(\"\"\"
+            q = text("""
                 SELECT COUNT(*)
                 FROM information_schema.tables
                 WHERE table_schema = DATABASE() AND table_name = :t
-            \"\"\")
+            """)
             return bool(con.execute(q, {"t": name}).scalar())
     except Exception:
         return False
@@ -77,12 +70,12 @@ with engine.connect() as con:
         )["base_symbol"].tolist()
     else:
         syms = pd.read_sql(
-            \"\"\"
+            """
             SELECT DISTINCT Ticker AS base_symbol
             FROM eod_prices_raw
             WHERE Ticker NOT LIKE '% FF'
             ORDER BY base_symbol
-            \"\"\",
+            """,
             con,
         )["base_symbol"].tolist()
 
@@ -123,7 +116,7 @@ def _date_filter(field: str) -> str:
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Query harga + FF + join KSEI from ksei_month (by YEAR-MONTH)
-ksei_join = \"\"\"
+ksei_join = """
 LEFT JOIN (
     SELECT
       base_symbol,
@@ -143,10 +136,10 @@ LEFT JOIN (
   ON k.base_symbol = p.base_symbol
  AND YEAR(k.trade_date) = YEAR(p.trade_date)
  AND MONTH(k.trade_date) = MONTH(p.trade_date)
-\"\"\"
+"""
 
 if USE_EOD_TABLE:
-    sql_df = f\"\"\"
+    sql_df = f"""
     SELECT
       p.trade_date, p.base_symbol,
       p.open, p.high, p.low, p.close,
@@ -160,9 +153,9 @@ if USE_EOD_TABLE:
     WHERE p.base_symbol = :sym AND p.is_foreign_flow = 0
     {_date_filter("p.trade_date")}
     ORDER BY p.trade_date
-    \"\"\"
+    """
 else:
-    sql_df = f\"\"\"
+    sql_df = f"""
     SELECT
         p.trade_date, p.base_symbol,
         p.open, p.high, p.low, p.close,
@@ -185,7 +178,7 @@ else:
       ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
     {ksei_join if USE_KSEI else ""}
     ORDER BY p.trade_date
-    \"\"\"
+    """
 
 with engine.connect() as con:
     df = pd.read_sql(text(sql_df), con, params={"sym": symbol})
@@ -231,7 +224,6 @@ spike_df = df.loc[df["is_spike"]].copy()
 spike_df["abs_ffi"] = np.abs(spike_df["FF_intensity"])
 spike_df = spike_df.sort_values(["abs_ffi","trade_date"], ascending=[False, True]).head(int(topN))
 anchor_indices = spike_df.index.tolist()
-anchor_dates = df.loc[anchor_indices, "trade_date"].dt.strftime("%Y-%m-%d").tolist()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Plots utama (Harga + FF + Pa/Ri)
@@ -273,7 +265,6 @@ if show_intensity:
         row=2, col=1, secondary_y=True,
     )
     if df["is_spike"].any():
-        # marker warna tergantung sign
         spike_pos = df["is_spike"] & (df["FF_intensity"] > 0)
         spike_neg = df["is_spike"] & (df["FF_intensity"] < 0)
         if spike_pos.any():
@@ -290,14 +281,12 @@ if show_intensity:
                            marker=dict(symbol="triangle-down", size=10)),
                 row=2, col=1, secondary_y=True,
             )
-        # garis threshold p95
         if not np.isnan(thr):
             fig.add_hline(y=thr, line_dash="dot", line_width=1, row=2, col=1, secondary_y=True)
             fig.add_hline(y=-thr, line_dash="dot", line_width=1, row=2, col=1, secondary_y=True)
 
 # AVWAP dari spike terbesar (overlay di harga)
 def _anchored_vwap(close: pd.Series, vol: pd.Series, anchor_idx: int) -> pd.Series:
-    # vwap(t) = (cum(p*v) - cum(p*v)[a-1]) / (cum(v) - cum(v)[a-1]) untuk t>=a
     pv = (close * vol).fillna(0).cumsum()
     cv = vol.fillna(0).cumsum()
     out = pd.Series(np.nan, index=close.index)
@@ -312,7 +301,6 @@ if show_avwap and len(anchor_indices) > 0:
         avwap = _anchored_vwap(df["close"], df["volume_price"], idx0)
         label = f"AVWAP spike#{i} ({pd.to_datetime(df.loc[idx0,'trade_date']).date()})"
         fig.add_trace(go.Scatter(x=df["trade_date"], y=avwap, name=label, mode="lines"), row=1, col=1)
-        # garis vertikal anchor
         fig.add_vline(x=df.loc[idx0, "trade_date"], line_width=1, line_dash="dot", row=1, col=1)
 
 # Pa/Ri
@@ -334,11 +322,12 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Ringkasan Spike
 with st.expander("🔎 Ringkasan Spike FF Intensity (Top-N)"):
-    if spike_df.empty:
+    spike_df2 = df.loc[df["is_spike"]].copy()
+    if spike_df2.empty:
         st.info("Tidak ada spike pada periode ini.")
     else:
         show_cols = ["trade_date","foreign_net","ADV20","FF_intensity"]
-        tmp = df.loc[spike_df.index, show_cols].copy()
+        tmp = spike_df2[show_cols].copy()
         tmp = tmp.sort_values("FF_intensity", key=lambda s: np.abs(s), ascending=False)
         tmp["trade_date"] = pd.to_datetime(tmp["trade_date"]).dt.date.astype(str)
         st.dataframe(tmp, use_container_width=True)
@@ -365,7 +354,7 @@ if USE_KSEI:
         else:
             n = int(period[:-1]); cond = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n YEAR)"; params["n"] = n
 
-    sql_k = f\"\"\"
+    sql_k = f"""
         SELECT
           trade_date, base_symbol,
           (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
@@ -382,7 +371,7 @@ if USE_KSEI:
         WHERE base_symbol = :sym
         {cond}
         ORDER BY trade_date
-    \"\"\"
+    """
     with engine.connect() as con:
         kdf = pd.read_sql(text(sql_k), con, params=params)
 
@@ -390,12 +379,10 @@ if USE_KSEI:
         kdf["trade_date"] = pd.to_datetime(kdf["trade_date"])
         kdf["Month"] = kdf["trade_date"].dt.strftime("%Y-%m")
 
-        # Agregasi bulanan ringkas
         agg = (kdf.sort_values("trade_date")
                  .groupby("Month", as_index=False)
                  .agg({"total_volume": "sum", "foreign_pct": "mean"}))
 
-        # Estimasi volume foreign/local per bulan
         tmp = kdf.copy()
         tmp["foreign_frac"] = pd.to_numeric(tmp["foreign_pct"], errors="coerce") / 100.0
         tmp["vol_foreign_est"] = pd.to_numeric(tmp["total_volume"], errors="coerce") * tmp["foreign_frac"]
@@ -454,7 +441,6 @@ with st.expander("Tabel (akhir 250 baris)"):
 st.markdown("---")
 st.subheader("📊 Detail Kategori KSEI (Semua Bulan)")
 
-# Mapping KODE → Nama (untuk legend & keterangan)
 CATEGORY_LABEL = {
     "ID": "Individual (Perorangan)",
     "CP": "Corporate (Perusahaan/Corporate)",
@@ -474,7 +460,7 @@ if USE_KSEI:
 
     with st.expander("ℹ️ Keterangan Kategori (sumber: Panduan KSEI)"):
         k_rows = [f"- **{code}** — {CATEGORY_LABEL[code]}" for code in ["ID","CP","MF","IB","IS","SC","PF","FD","OT"]]
-        st.markdown("\\n".join(k_rows))
+        st.markdown("\n".join(k_rows))
 
     params_d = {"sym": symbol}
     if use_all_detail:
@@ -487,7 +473,7 @@ if USE_KSEI:
         else:
             n = int(period[:-1]); cond_d = "AND trade_date >= DATE_SUB(CURDATE(), INTERVAL :n YEAR)"; params_d["n"] = n
 
-    sql_det = f\"\"\"
+    sql_det = f"""
         SELECT
           trade_date, base_symbol,
           local_is, local_cp, local_pf, local_ib, local_id, local_mf, local_sc, local_fd, local_ot, local_total,
@@ -496,7 +482,7 @@ if USE_KSEI:
         WHERE base_symbol = :sym
         {cond_d}
         ORDER BY trade_date
-    \"\"\"
+    """
     with engine.connect() as con:
         kcat = pd.read_sql(text(sql_det), con, params=params_d)
 
@@ -506,7 +492,6 @@ if USE_KSEI:
         kcat["trade_date"] = pd.to_datetime(kcat["trade_date"])
         kcat["Month"] = kcat["trade_date"].dt.strftime("%Y-%m")
 
-        # Agregasi bulanan
         num_cols = [
             "local_is","local_cp","local_pf","local_ib","local_id","local_mf","local_sc","local_fd","local_ot","local_total",
             "foreign_is","foreign_cp","foreign_pf","foreign_ib","foreign_id","foreign_mf","foreign_sc","foreign_fd","foreign_ot","foreign_total"
@@ -567,17 +552,10 @@ else:
 # Roadmap progress (Step checklist)
 st.markdown("---")
 st.subheader("🗺️ Roadmap Fitur Analitik")
-st.markdown(\"\"\"
+st.markdown("""
 - [x] **1. FF Intensity + spike markers + AVWAP (Step 1)**
 - [ ] 2. Heatmap kategori (bulanan) & Shift Map
 - [ ] 3. Event study pasca spike (median & win-rate)
 - [ ] 4. Agregasi sektor & Breadth pasar
 - [ ] 5. Signals harian (otomasi GitHub Actions)
-\"\"\")
-''')
-
-out_path = os.path.join(base_dir, "6_Pergerakan_Asing_FF.py")
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write(code)
-
-print(out_path)
+""")
