@@ -623,9 +623,7 @@ if USE_KSEI:
                     mode="lines",
                     stackgroup="one",
                     groupnorm="percent" if smode_share else None,
-                    hovertemplate="Bulan=%{x}<br>%s=%{y:.2f}%s<extra></extra>" % (
-                        key, "%" if smode_share else "", "" if smode_share else ""
-                    ),
+                    hovertemplate=(f"Bulan=%{{x}}<br>{key}=%{{y:.2f}}%<extra></extra>" if smode_share else f"Bulan=%{{x}}<br>{key}=%{{y:,.0f}}<extra></extra>"),
                 )
             )
         sm_fig.update_layout(
