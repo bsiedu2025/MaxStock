@@ -1,185 +1,31 @@
-import os
-import argparse
-import pandas as pd
-from sqlalchemy import create_engine, text
-from datetime import datetime, timedelta
-import logging
+name: Daily Stock Update
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 1-5'  # 07:00 WIB (00:00 UTC) Senin-Jumat
 
-def get_db_connection_string():
-    """
-    Reads database connection details from environment variables
-    and returns a SQLAlchemy connection string.
-    """
-    db_user = os.getenv('MARIADB_USER')
-    db_password = os.getenv('MARIADB_PASSWORD')
-    db_name = os.getenv('MARIADB_DATABASE')
-    db_host = os.getenv('MARIADB_HOST', 'mariadb')  # Default to 'mariadb' for Docker Compose service name
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      MARIADB_HOST: ${{ secrets.DB_HOST }}
+      MARIADB_USER: ${{ secrets.DB_USER }}
+      MARIADB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      MARIADB_DATABASE: ${{ secrets.DB_NAME }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    if not all([db_user, db_password, db_name]):
-        raise ValueError("Database environment variables MARIADB_USER, MARIADB_PASSWORD, and MARIADB_DATABASE must be set.")
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    return f"mysql+mysqlconnector://{db_user}:{db_password}@{db_host}/{db_name}"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-def get_engine():
-    """
-
-    Returns a SQLAlchemy engine.
-    """
-    conn_str = get_db_connection_string()
-    return create_engine(conn_str)
-
-def ensure_table(eng):
-    """
-    Ensure the signals table exists.
-    """
-    ddl = """
-    CREATE TABLE IF NOT EXISTS signals_daily (
-      base_symbol VARCHAR(32) NOT NULL,
-      trade_date DATE NOT NULL,
-      ff_intensity DECIMAL(18,6) NULL,
-      adv20 DECIMAL(18,2) NULL,
-      foreign_net BIGINT NULL,
-      close DECIMAL(19,4) NULL,
-      ma20 DECIMAL(19,4) NULL,
-      threshold_p95 DECIMAL(18,6) NULL,
-      `signal` VARCHAR(16) NOT NULL,
-      reason VARCHAR(255) NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (base_symbol, trade_date)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    """
-    with eng.connect() as con:
-        con.execute(text(ddl))
-        con.commit()
-    logging.info("Table 'signals_daily' is ready.")
-
-def get_tickers_from_db(eng, max_tickers):
-    """
-    Fetch tickers from the daily_prices table.
-    """
-    query = """
-    SELECT DISTINCT base_symbol
-    FROM daily_prices
-    ORDER BY base_symbol
-    """
-    if max_tickers > 0:
-        query += f" LIMIT {max_tickers}"
-
-    with eng.connect() as con:
-        df = pd.read_sql(text(query), con)
-    return df['base_symbol'].tolist()
-
-def process_ticker(ticker, eng, days):
-    """
-    Process a single ticker to generate signals.
-    """
-    end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=days)
-
-    query = f"""
-    SELECT trade_date, base_symbol, close, foreign_net, trade_val
-    FROM daily_prices
-    WHERE base_symbol = '{ticker}'
-      AND trade_date BETWEEN '{start_date}' AND '{end_date}'
-    ORDER BY trade_date;
-    """
-    with eng.connect() as con:
-        df = pd.read_sql(text(query), con)
-
-    if len(df) < 20:
-        logging.warning(f"Not enough data for {ticker} to calculate 20-day metrics. Found {len(df)} rows.")
-        return
-
-    # Calculate indicators
-    df['adv20'] = df['trade_val'].rolling(window=20).mean()
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['ff_intensity'] = df['foreign_net'] / df['adv20']
-    df['threshold_p95'] = df['ff_intensity'].rolling(window=240).quantile(0.95)
-
-    df.dropna(inplace=True)
-
-    if df.empty:
-        logging.info(f"No data left for {ticker} after dropping NA values.")
-        return
-
-    # Generate signals
-    df['signal'] = 'NEUTRAL'
-    df['reason'] = ''
-
-    # Buy signal condition
-    buy_condition = (df['ff_intensity'] > df['threshold_p95']) & (df['close'] > df['ma20'])
-    df.loc[buy_condition, 'signal'] = 'BUY'
-    df.loc[buy_condition, 'reason'] = 'Foreign flow intensity > 95th percentile and Close > MA20.'
-
-    # Prepare data for insertion
-    signals_df = df[df['signal'] != 'NEUTRAL']
-    signals_df = signals_df[[
-        'base_symbol', 'trade_date', 'ff_intensity', 'adv20',
-        'foreign_net', 'close', 'ma20', 'threshold_p95',
-        'signal', 'reason'
-    ]]
-
-    if not signals_df.empty:
-        # Using INSERT ... ON DUPLICATE KEY UPDATE
-        with eng.connect() as con:
-            for index, row in signals_df.iterrows():
-                upsert_query = text(f"""
-                INSERT INTO signals_daily (
-                    base_symbol, trade_date, ff_intensity, adv20, foreign_net,
-                    close, ma20, threshold_p95, `signal`, reason
-                ) VALUES (
-                    :base_symbol, :trade_date, :ff_intensity, :adv20, :foreign_net,
-                    :close, :ma20, :threshold_p95, :signal, :reason
-                ) ON DUPLICATE KEY UPDATE
-                    ff_intensity = VALUES(ff_intensity),
-                    adv20 = VALUES(adv20),
-                    foreign_net = VALUES(foreign_net),
-                    close = VALUES(close),
-                    ma20 = VALUES(ma20),
-                    threshold_p95 = VALUES(threshold_p95),
-                    `signal` = VALUES(`signal`),
-                    reason = VALUES(reason);
-                """)
-                con.execute(upsert_query, row.to_dict())
-            con.commit()
-        logging.info(f"Inserted/Updated {len(signals_df)} signals for {ticker}.")
-
-def main():
-    """
-    Main function.
-    """
-    parser = argparse.ArgumentParser(description='Generate trading signals based on foreign flow.')
-    parser.add_argument('--days', type=int, default=365, help='Number of days of historical data to process.')
-    parser.add_argument('--max-tickers', type=int, default=0, help='Maximum number of tickers to process (0 for all).')
-    args = parser.parse_args()
-
-    try:
-        eng = get_engine()
-        ensure_table(eng)
-
-        tickers = get_tickers_from_db(eng, args.max_tickers)
-        if not tickers:
-            logging.warning("No tickers found in the database.")
-            return
-
-        logging.info(f"Found {len(tickers)} tickers to process.")
-
-        for ticker in tickers:
-            try:
-                logging.info(f"Processing ticker: {ticker}")
-                process_ticker(ticker, eng, args.days)
-            except Exception as e:
-                logging.error(f"Failed to process ticker {ticker}: {e}")
-
-        logging.info("Signal generation process completed.")
-
-    except ValueError as ve:
-        logging.error(f"Configuration error: {ve}")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-
-if __name__ == '__main__':
-    main()
+      - name: Run daily signal generation
+        run: python app/signals_daily.py --days 240 --max-tickers 0
