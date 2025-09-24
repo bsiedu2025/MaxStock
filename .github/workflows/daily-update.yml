@@ -32,4 +32,4 @@ jobs:
           pip install -r app/requirements.txt
 
       - name: Run daily signal generation
-        run: python app/signals_daily.py --days 240 --max-tickers 0
+        run: python app/signals_daily.py --days 7 --max-tickers 0
