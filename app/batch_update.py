@@ -5,7 +5,7 @@
 # - Periode fleksibel: 5d, 1mo, 3mo, 6mo, 1y, dst (format yfinance)
 # - Log "Mengupdate i/total: SYMBOL (Periode: ...)" seperti di UI
 # - Upsert ke tabel prices(symbol, dt, open, high, low, close, volume)
-# - Hindari "truth value of a Series is ambiguous" (pakai .empty, len(), pd.notna())
+# - Hindari "truth value of a Series is ambiguous"
 # - Exit code != 0 jika ada gagal simpan (biar Actions merah)
 # -----------------------------------------------------------------------------------
 
@@ -110,9 +110,9 @@ def get_symbols_from_prices(conn) -> List[str]:
 
 def detect_symbols_from_any_table(conn) -> List[str]:
     """
-    Fallback kalau tabel prices masih kosong atau belum ada.
+    Fallback kalau tabel prices kosong/belum ada.
     Cari tabel publik yang punya kolom kandidat symbol/ticker/kode*,
-    ambil distinct  dan pilih yang paling banyak.
+    ambil DISTINCT dan pilih yang paling banyak.
     """
     candidates = ("symbol", "ticker", "tickers", "kode", "kode_saham", "code", "emiten")
     with conn.cursor() as cur:
@@ -159,7 +159,7 @@ def get_universe_from_db(conn, suffix: str, max_tickers: int) -> List[str]:
     """
     Meniru halaman UI: gunakan saham yang SUDAH ada di DB.
     1) Kalau tabel prices ada -> DISTINCT symbol from prices
-    2) Kalau kosong, cari di tabel publik lain yang punya kolom symbol/ticker/* (fallback)
+    2) Kalau kosong -> fallback cari di tabel publik lain yang punya kolom kandidat
     """
     symbols: List[str] = []
     if table_exists(conn, "prices"):
@@ -168,9 +168,7 @@ def get_universe_from_db(conn, suffix: str, max_tickers: int) -> List[str]:
     if not symbols:
         symbols = detect_symbols_from_any_table(conn)
 
-    # normalisasi + tambahkan suffix bila perlu
     symbols = [normalize_symbol(s, suffix) for s in symbols if s]
-    # unik + jaga urutan
     seen = set()
     uniq = []
     for s in symbols:
@@ -187,8 +185,7 @@ def get_universe_from_db(conn, suffix: str, max_tickers: int) -> List[str]:
 # ------------------------- fetch & upsert -------------------------
 def fetch_yf(symbol: str, period: str) -> pd.DataFrame:
     """
-    Ambil data via yfinance; kembalikan DF kolom:
-    [date, open, high, low, close, volume, symbol]
+    Ambil data via yfinance; hasil DF: [date, open, high, low, close, volume, symbol]
     """
     sleep_ms = int(os.environ.get("YF_SLEEP_MS", "150"))
     retries = int(os.environ.get("YF_RETRIES", "3"))
@@ -281,7 +278,6 @@ def main() -> int:
     with psycopg2.connect(dsn) as conn:
         ensure_schema_prices(conn)
 
-        # ambil universe dari DB (meniru UI)
         symbols = get_universe_from_db(conn, args.suffix, args.max_tickers)
         total = len(symbols)
         log.info("Total saham siap diupdate: %d", total)
