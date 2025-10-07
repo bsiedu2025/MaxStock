@@ -1,43 +1,59 @@
 name: Daily Stock Update
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 1-5"     # 07:00 WIB (00:00 UTC) weekdays
+    - cron: "0 0 * * 1-5"   # 07:00 WIB weekdays
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
-      DB_HOST: ${{ secrets.DB_HOST }}
-      DB_PORT: ${{ secrets.DB_PORT }}
-      DB_NAME: ${{ secrets.DB_NAME }}
-      DB_USER: ${{ secrets.DB_USER }}
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-      DB_SSL_CA: ${{ secrets.DB_SSL_CA }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}   # wajib di-setup di repo Secrets
+      YF_SLEEP_MS: "200"
+      YF_RETRIES: "3"
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.10" }
 
-      # langkah diagnostik: cek ENV terisi (tanpa menampilkan nilai)
-      - name: Check DB env presence
-        run: |
-          python - <<'PY'
-          import os
-          keys = ["DB_HOST","DB_PORT","DB_NAME","DB_USER","DB_PASSWORD","DB_SSL_CA"]
-          for k in keys:
-            v = os.getenv(k)
-            print(f"{k}: {'SET' if v else 'MISSING'}  len={len(v) if v else 0}")
-          PY
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
+          pip install -r requirements.txt
+
+      - name: Ensure tickers file
+        run: |
+          if [ ! -f app/tickers.csv ]; then
+            echo "symbol" > app/tickers.csv
+            echo "BBRI"  >> app/tickers.csv
+            echo "BMRI"  >> app/tickers.csv
+            echo "BRIS"  >> app/tickers.csv
+          fi
+
+      - name: Sanity check DB
+        run: |
+          python - <<'PY'
+          import os, psycopg2
+          dsn=os.environ['DATABASE_URL']
+          with psycopg2.connect(dsn) as c:
+              with c.cursor() as cur:
+                  cur.execute("select current_date")
+                  print("DB OK")
+          PY
 
       - name: Run batch updater (5 hari terakhir)
         run: |
           python app/batch_update.py --period 5d --suffix .JK --max-tickers 0 --tickers-csv app/tickers.csv
-
