@@ -3,7 +3,7 @@ name: Daily Stock Update
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 1-5"   # 07:00 WIB weekdays
+    - cron: "0 0 * * 1-5"   # 07:00 WIB (UTC+7), Senin–Jumat
 
 concurrency:
   group: daily-update
@@ -17,9 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}   # wajib di-setup di repo Secrets
-      YF_SLEEP_MS: "200"
+      # HARUS diset di repo Settings → Secrets and variables → Actions → New repository secret
+      # Contoh Supabase: postgresql://postgres:<PASS>@<HOST>.supabase.co:6543/postgres?sslmode=require
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      YF_SLEEP_MS: "150"
       YF_RETRIES: "3"
+      LOG_LEVEL: "INFO"
 
     steps:
       - uses: actions/checkout@v4
@@ -32,28 +35,23 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
+          pip install -r requirements.txt
+          # pastikan ada:
+          # pandas
+          # yfinance
+          # psycopg2-binary>=2.9.9
 
-      - name: Ensure tickers file
-        run: |
-          if [ ! -f app/tickers.csv ]; then
-            echo "symbol" > app/tickers.csv
-            echo "BBRI"  >> app/tickers.csv
-            echo "BMRI"  >> app/tickers.csv
-            echo "BRIS"  >> app/tickers.csv
-          fi
-
-      - name: Sanity check DB
+      - name: Sanity check DB (opsional)
         run: |
           python - <<'PY'
           import os, psycopg2
           dsn=os.environ['DATABASE_URL']
           with psycopg2.connect(dsn) as c:
               with c.cursor() as cur:
-                  cur.execute("select current_date")
-                  print("DB OK")
+                  cur.execute("select current_user, current_date")
+                  print("DB OK ->", cur.fetchone())
           PY
 
-      - name: Run batch updater (5 hari terakhir)
+      - name: Run batch updater (meniru halaman UI)
         run: |
-          python app/batch_update.py --period 5d --suffix .JK --max-tickers 0 --tickers-csv app/tickers.csv
+          python app/batch_update.py --period 1mo --suffix .JK --max-tickers 0
