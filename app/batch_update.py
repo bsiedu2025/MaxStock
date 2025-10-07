@@ -58,9 +58,17 @@ def normalize_symbol(sym: str, suffix: str) -> str:
 
 # ------------------------- DB helpers -------------------------
 def require_env_dsn() -> str:
-    dsn = os.environ.get("DATABASE_URL", "")
+    dsn = (os.environ.get("DATABASE_URL") or "").strip()
     if not dsn:
-        raise RuntimeError("Env DATABASE_URL tidak diset")
+        host = (os.environ.get("PGHOST") or "").strip()
+        port = (os.environ.get("PGPORT") or "6543").strip()
+        db   = (os.environ.get("PGDATABASE") or "postgres").strip()
+        user = (os.environ.get("PGUSER") or "postgres").strip()
+        pwd  = (os.environ.get("PGPASSWORD") or "").strip()
+        if host and pwd:
+            dsn = f"postgresql://{user}:{pwd}@{host}:{port}/{db}?sslmode=require"
+    if not dsn:
+        raise RuntimeError("Env DATABASE_URL tidak diset dan PGHOST/PGPASSWORD tidak tersedia")
     if "sslmode" not in dsn:
         dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
     return dsn
