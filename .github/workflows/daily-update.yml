@@ -17,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      # HARUS diset di repo Settings → Secrets and variables → Actions → New repository secret
-      # Contoh Supabase: postgresql://postgres:<PASS>@<HOST>.supabase.co:6543/postgres?sslmode=require
+      # Setup di: Repo Settings → Secrets → Actions
+      # Contoh Supabase (PgBouncer 6543):
+      # postgresql://postgres:<PASS>@<PROJECT>.supabase.co:6543/postgres?sslmode=require
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       YF_SLEEP_MS: "150"
       YF_RETRIES: "3"
@@ -36,7 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
-          # pastikan ada:
+          # pastikan requirements.txt minimal berisi:
           # pandas
           # yfinance
           # psycopg2-binary>=2.9.9
