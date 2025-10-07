@@ -17,13 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      # Setup di: Repo Settings → Secrets → Actions
-      # Contoh Supabase (PgBouncer 6543):
-      # postgresql://postgres:<PASS>@<PROJECT>.supabase.co:6543/postgres?sslmode=require
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PGHOST:     ${{ secrets.DB_HOST }}     # contoh: uvxcpafymowxdhhgzvru.supabase.co
+      PGPORT:     ${{ secrets.DB_PORT }}     # pastikan "6543" (PgBouncer)
+      PGDATABASE: ${{ secrets.DB_NAME }}     # contoh: postgres
+      PGUSER:     ${{ secrets.DB_USER }}     # contoh: postgres
+      PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+      LOG_LEVEL: "INFO"
       YF_SLEEP_MS: "150"
       YF_RETRIES: "3"
-      LOG_LEVEL: "INFO"
+
 
     steps:
       - uses: actions/checkout@v4
