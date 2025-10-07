@@ -39,4 +39,5 @@ jobs:
 
       - name: Run batch updater (5 hari terakhir)
         run: |
-          python app/batch_update.py --period 5d --suffix .JK --max-tickers 0
+          python app/batch_update.py --period 5d --suffix .JK --max-tickers 0 --tickers-csv app/tickers.csv
+
