@@ -111,78 +111,7 @@ win = st.slider(
     "Window Partisipasi (hari)", 5, 60, 20, 1,
     help="Jika KSEI tidak ada, Pa/Ri dihitung dari rolling |FF|/Volume."
 )
-# ────────────────────────────────────────────────────────────────────────────────
-# Query harga + FF + join KSEI from ksei_month (by YEAR-MONTH)
-ksei_join = """
-LEFT JOIN (
-    SELECT
-      base_symbol,
-      trade_date,
-      (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
-      CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
-           THEN 100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0))
-           ELSE NULL END AS foreign_pct,
-      CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
-           THEN 100.0 - (100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0)))
-           ELSE NULL END AS retail_pct,
-      CASE WHEN price IS NOT NULL
-           THEN price * (COALESCE(local_total,0) + COALESCE(foreign_total,0))
-           ELSE NULL END AS total_value
-    FROM ksei_month
-) k
-  ON k.base_symbol = p.base_symbol
- AND YEAR(k.trade_date) = YEAR(p.trade_date)
- AND MONTH(k.trade_date) = MONTH(p.trade_date)
-"""
 
-if USE_EOD_TABLE:
-    sql_df = f"""
-    SELECT
-      p.trade_date, p.base_symbol,
-      p.open, p.high, p.low, p.close,
-      p.volume AS volume_price,
-      COALESCE(f.foreign_net, 0) AS foreign_net,
-      k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
-    FROM eod p
-    LEFT JOIN eod f
-      ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol AND f.is_foreign_flow = 1
-    {ksei_join if USE_KSEI else ""}
-    WHERE p.base_symbol = :sym AND p.is_foreign_flow = 0
-    {_date_filter("p.trade_date")}
-    ORDER BY p.trade_date
-    """
-else:
-    sql_df = f"""
-    SELECT
-        p.trade_date, p.base_symbol,
-        p.open, p.high, p.low, p.close,
-        p.volume_price,
-        COALESCE(f.foreign_net, 0) AS foreign_net,
-        k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
-    FROM
-      (SELECT DATE(Tanggal) AS trade_date, Ticker AS base_symbol,
-              `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
-              Volume AS volume_price
-       FROM eod_prices_raw
-       WHERE Ticker = :sym AND Ticker NOT LIKE '% FF' {_date_filter("Tanggal")}
-      ) AS p
-    LEFT JOIN
-      (SELECT DATE(Tanggal) AS trade_date, TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
-              Volume AS foreign_net
-       FROM eod_prices_raw
-       WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym AND Ticker LIKE '% FF' {_date_filter("Tanggal")}
-      ) AS f
-      ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
-    {ksei_join if USE_KSEI else ""}
-    ORDER BY p.trade_date
-    """
-
-with engine.connect() as con:
-    df = pd.read_sql(text(sql_df), con, params={"sym": symbol})
-
-if df.empty:
-    st.warning("Data tidak tersedia untuk simbol/periode ini.")
-    st.stop()
 # ────────────────────────────────────────────────────────────────────────────────
 # Ringkasan Bulanan KSEI (dari ksei_month)
 st.markdown("---")
