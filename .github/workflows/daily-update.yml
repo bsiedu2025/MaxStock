@@ -28,7 +28,7 @@ jobs:
         # Asumsi dependencies lo ada di requirements.txt (e.g., pandas, mysql-connector-python)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r app/requirements.txt
           
       # --- Langkah Utama: Menjalankan Script Update ---
       # PENTING: Lo perlu database yang bisa diakses dari GitHub Actions, 
