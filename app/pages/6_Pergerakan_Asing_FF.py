@@ -77,9 +77,251 @@ USE_EOD_TABLE = _table_exists("eod")
 USE_KSEI = _table_exists("ksei_month")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Ringkasan Bulanan KSEI (dari ksei_month)
+# Controls
+with engine.connect() as con:
+    if USE_EOD_TABLE:
+        syms = pd.read_sql(
+            "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol", con
+        )["base_symbol"].tolist()
+    else:
+        syms = pd.read_sql(
+            """
+            SELECT DISTINCT Ticker AS base_symbol
+            FROM eod_prices_raw
+            WHERE Ticker NOT LIKE '% FF'
+            ORDER BY base_symbol
+            """,
+            con,
+        )["base_symbol"].tolist()
+
+if not syms:
+    st.warning("Belum ada data harga untuk dianalisis.")
+    st.stop()
+
+cA, cB, cC = st.columns([2, 1, 1])
+with cA:
+    idx = syms.index("BBRI") if "BBRI" in syms else 0
+    symbol = st.selectbox("Pilih Saham", syms, index=idx)
+with cB:
+    period = st.selectbox("Periode", ["1M", "3M", "6M", "1Y", "ALL"], index=1)
+with cC:
+    price_type = st.radio("Tipe Harga", ["Line", "Candle"], horizontal=True, index=1)
+
+win = st.slider(
+    "Window Partisipasi (hari)", 5, 60, 20, 1,
+    help="Jika KSEI tidak ada, Pa/Ri dihitung dari rolling |FF|/Volume."
+)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# PERBAIKAN: Hapus "Opsi Analitik" dan set nilai default
+# Variabel yang dibutuhkan:
+show_intensity = True 
+show_avwap = True     
+topN = 3              
+# ────────────────────────────────────────────────────────────────────────────────
+
+def _date_filter(field: str) -> str:
+    if period == "ALL":
+        return ""
+    if period.endswith("M"):
+        n = int(period[:-1]); return f"AND {field} >= CURDATE() - INTERVAL {n} MONTH"
+    n = int(period[:-1]); return f"AND {field} >= CURDATE() - INTERVAL {n} YEAR"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Query harga + FF + join KSEI from ksei_month (by YEAR-MONTH)
+ksei_join = """
+LEFT JOIN (
+    SELECT
+      base_symbol,
+      trade_date,
+      (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
+      CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
+           THEN 100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0))
+           ELSE NULL END AS foreign_pct,
+      CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
+           THEN 100.0 - (100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0)))
+           ELSE NULL END AS retail_pct,
+      CASE WHEN price IS NOT NULL
+           THEN price * (COALESCE(local_total,0) + COALESCE(foreign_total,0))
+           ELSE NULL END AS total_value
+    FROM ksei_month
+) k
+  ON k.base_symbol = p.base_symbol
+ AND YEAR(k.trade_date) = YEAR(p.trade_date)
+ AND MONTH(k.trade_date) = MONTH(p.trade_date)
+"""
+
+if USE_EOD_TABLE:
+    sql_df = f"""
+    SELECT
+      p.trade_date, p.base_symbol,
+      p.open, p.high, p.low, p.close,
+      p.volume AS volume_price,
+      COALESCE(f.foreign_net, 0) AS foreign_net,
+      k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
+    FROM eod p
+    LEFT JOIN eod f
+      ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol AND f.is_foreign_flow = 1
+    {ksei_join if USE_KSEI else ""}
+    WHERE p.base_symbol = :sym AND p.is_foreign_flow = 0
+    {_date_filter("p.trade_date")}
+    ORDER BY p.trade_date
+    """
+else:
+    sql_df = f"""
+    SELECT
+        p.trade_date, p.base_symbol,
+        p.open, p.high, p.low, p.close,
+        p.volume_price,
+        COALESCE(f.foreign_net, 0) AS foreign_net,
+        k.foreign_pct, k.retail_pct, k.total_volume, k.total_value
+    FROM
+      (SELECT DATE(Tanggal) AS trade_date, Ticker AS base_symbol,
+              `Open` AS open, `High` AS high, `Low` AS low, `Close` AS close,
+              Volume AS volume_price
+       FROM eod_prices_raw
+       WHERE Ticker = :sym AND Ticker NOT LIKE '% FF' {_date_filter("Tanggal")}
+      ) AS p
+    LEFT JOIN
+      (SELECT DATE(Tanggal) AS trade_date, TRIM(REPLACE(Ticker,' FF','')) AS base_symbol,
+              Volume AS foreign_net
+       FROM eod_prices_raw
+       WHERE TRIM(REPLACE(Ticker,' FF','')) = :sym AND Ticker LIKE '% FF' {_date_filter("Tanggal")}
+      ) AS f
+      ON f.trade_date = p.trade_date AND f.base_symbol = p.base_symbol
+    {ksei_join if USE_KSEI else ""}
+    ORDER BY p.trade_date
+    """
+
+with engine.connect() as con:
+    df = pd.read_sql(text(sql_df), con, params={"sym": symbol})
+
+if df.empty:
+    st.warning("Data tidak tersedia untuk simbol/periode ini.")
+    st.stop()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Feature engineering (per-saham)
+df["trade_date"] = pd.to_datetime(df["trade_date"])
+for col in ["open","high","low","close","volume_price","foreign_net"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df["MA20"] = df["close"].rolling(20, min_periods=1).mean()
+
+# Pa/Ri by KSEI (or fallback rolling)
+if USE_KSEI and df["foreign_pct"].notna().any():
+    df["Pa_pct"] = pd.to_numeric(df["foreign_pct"], errors="coerce").clip(0, 100)
+    df["Ri_pct"] = pd.to_numeric(
+        df["retail_pct"].where(df["retail_pct"].notna(), 100 - df["Pa_pct"]),
+        errors="coerce",
+    ).clip(0, 100)
+else:
+    vol_roll = df["volume_price"].abs().rolling(win, min_periods=1).sum()
+    ff_roll  = df["foreign_net"].abs().rolling(win, min_periods=1).sum()
+    df["Pa_pct"] = (100.0 * (ff_roll / vol_roll)).clip(0, 100).fillna(0.0)
+    df["Ri_pct"] = (100.0 - df["Pa_pct"]).clip(0, 100)
+
+# Step #1: FF Intensity & spikes
+df["ADV20"] = df["volume_price"].rolling(20, min_periods=5).mean()
+df["FF_intensity"] = df["foreign_net"] / df["ADV20"]
+if show_intensity and df["FF_intensity"].notna().any():
+    thr = np.nanpercentile(np.abs(df["FF_intensity"].dropna()), 95)
+    df["is_spike"] = np.abs(df["FF_intensity"]) >= thr
+else:
+    thr = np.nan
+    df["is_spike"] = False
+
+spike_df = df.loc[df["is_spike"]].copy()
+spike_df["abs_ffi"] = np.abs(spike_df["FF_intensity"])
+spike_df = spike_df.sort_values(["abs_ffi","trade_date"], ascending=[False, True]).head(int(topN))
+anchor_indices = spike_df.index.tolist()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Plots utama (Hanya FF Net Volume + FF Intensity)
+# Perbaikan: Mengubah subplots menjadi 1 row saja
+fig = make_subplots(
+    rows=1, cols=1, shared_xaxes=True,
+    specs=[[{"secondary_y": True}]],
+    subplot_titles=(f"Daily Foreign Flow (Net Volume) + FF Intensity — {symbol}"),
+)
+
+# FF bar
+colors = np.where(df["foreign_net"] > 0, "rgba(0,160,0,0.9)",
+         np.where(df["foreign_net"] < 0, "rgba(220,0,0,0.9)", "rgba(160,160,160,0.6)"))
+fig.add_trace(
+    go.Bar(x=df["trade_date"], y=df["foreign_net"], name="Foreign Net",
+           marker=dict(color=colors), marker_line_width=0, opacity=0.95),
+    row=1, col=1, secondary_y=False, # Row 1, Col 1
+)
+
+# FF Intensity line + spike markers
+if show_intensity:
+    fig.add_trace(
+        go.Scatter(x=df["trade_date"], y=df["FF_intensity"], name="FF Intensity (FF / ADV20)",
+                   mode="lines", opacity=0.9),
+        row=1, col=1, secondary_y=True, # Row 1, Col 1
+    )
+    if df["is_spike"].any():
+        spike_pos = df["is_spike"] & (df["FF_intensity"] > 0)
+        spike_neg = df["is_spike"] & (df["FF_intensity"] < 0)
+        if spike_pos.any():
+            fig.add_trace(
+                go.Scatter(x=df.loc[spike_pos, "trade_date"], y=df.loc[spike_pos, "FF_intensity"],
+                           mode="markers", name="Spike +",
+                           marker=dict(symbol="triangle-up", size=10)),
+                row=1, col=1, secondary_y=True,
+            )
+        if spike_neg.any():
+            fig.add_trace(
+                go.Scatter(x=df.loc[spike_neg, "trade_date"], y=df.loc[spike_neg, "FF_intensity"],
+                           mode="markers", name="Spike −",
+                           marker=dict(symbol="triangle-down", size=10)),
+                row=1, col=1, secondary_y=True,
+            )
+        if not np.isnan(thr):
+            fig.add_hline(y=thr, line_dash="dot", line_width=1, row=1, col=1, secondary_y=True)
+            fig.add_hline(y=-thr, line_dash="dot", line_width=1, row=1, col=1, secondary_y=True)
+
+
+# AVWAP dari spike terbesar (Dihapus dari sini karena AVWAP adalah indikator harga)
+# Untuk AVWAP, lo bisa cek lagi apakah benar-benar mau dihapus. Kalau mau, biarkan saja.
+# Karena chart harga dihapus, AVWAP juga tidak relevan lagi.
+
+fig.update_layout(
+    height=450, # Ketinggian chart disesuaikan
+    margin=dict(l=40, r=40, t=50, b=40),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    xaxis_rangeslider_visible=False, hovermode="x unified",
+)
+fig.update_yaxes(title_text="Foreign Net (Volume)", row=1, col=1, secondary_y=False)
+fig.update_yaxes(title_text="FF Intensity", row=1, col=1, secondary_y=True)
+
+# Rangebreaks untuk kompres weekend/libur
+rb_main = _rangebreaks_from_dates(df["trade_date"])
+fig.update_xaxes(rangebreaks=rb_main)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# Ringkasan Spike (Tidak berubah)
+with st.expander("🔎 Ringkasan Spike FF Intensity (Top-N)"):
+    spike_df2 = df.loc[df["is_spike"]].copy()
+    if spike_df2.empty:
+        st.info("Tidak ada spike pada periode ini.")
+    else:
+        show_cols = ["trade_date","foreign_net","ADV20","FF_intensity"]
+        tmp = spike_df2[show_cols].copy()
+        tmp = tmp.sort_values("FF_intensity", key=lambda s: np.abs(s), ascending=False)
+        tmp["trade_date"] = pd.to_datetime(tmp["trade_date"]).dt.date.astype(str)
+        st.dataframe(tmp, use_container_width=True)
+        if not np.isnan(thr):
+            st.caption(f"Ambang spike (|FF_intensity| p95): **{thr:.2f}**")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Ringkasan Bulanan KSEI (dari ksei_month) (Tidak berubah)
 st.markdown("---")
-st.subheader("📅 Ringkasan Bulanan KSEI.")
+st.subheader("📅 Ringkasan Bulanan KSEI")
+# ... (kode KSEI bulanan tidak berubah)
 
 if USE_KSEI:
     show_all_ksei = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=True)
@@ -163,7 +405,7 @@ else:
     st.info("Tabel `ksei_month` belum tersedia.")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# 📊 DETAIL KATEGORI (paling bawah) — sumber: ksei_month
+# 📊 DETAIL KATEGORI (paling bawah) — sumber: ksei_month (Tidak berubah)
 st.markdown("---")
 st.subheader("📊 Detail Kategori KSEI (Semua Bulan)")
 
@@ -276,10 +518,10 @@ if USE_KSEI:
             st.dataframe(agg_cat[show_cols], use_container_width=True)
 
         # ───────────────────────────────────────────────────────────────────
-        # STEP #2 — HEATMAP & SHIFT MAP
+        # STEP #2 — HEATMAP & SHIFT MAP (Tidak berubah)
         st.markdown("---")
         st.subheader("🔥 Heatmap & Shift Map Kategori (Bulanan) — Step 2")
-
+        
         hcol1, hcol2, hcol3 = st.columns([1.2, 1, 1])
         with hcol1:
             hm_side = st.selectbox("Sisi data untuk Heatmap/Shift Map", ["Lokal", "Asing"], index=0)
@@ -400,7 +642,7 @@ else:
     st.info("Tabel `ksei_month` belum tersedia untuk detail kategori.")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP #3 — EVENT STUDY PASCA SPIKE
+# STEP #3 — EVENT STUDY PASCA SPIKE (Tidak berubah)
 st.markdown("---")
 st.subheader("🧪 Event Study Pasca Spike — Step 3")
 
@@ -490,7 +732,7 @@ else:
         _event_summary(neg_idx, "Spike − (FF<0)")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# STEP #4 — AGREGASI SEKTOR & BREADTH PASAR
+# STEP #4 — AGREGASI SEKTOR & BREADTH PASAR (Tidak berubah)
 st.markdown("---")
 st.subheader("🏭 Agregasi Sektor & 🫶 Breadth Pasar — Step 4")
 
