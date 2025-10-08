@@ -77,42 +77,6 @@ USE_EOD_TABLE = _table_exists("eod")
 USE_KSEI = _table_exists("ksei_month")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Controls
-with engine.connect() as con:
-    if USE_EOD_TABLE:
-        syms = pd.read_sql(
-            "SELECT DISTINCT base_symbol FROM eod WHERE is_foreign_flow=0 ORDER BY base_symbol", con
-        )["base_symbol"].tolist()
-    else:
-        syms = pd.read_sql(
-            """
-            SELECT DISTINCT Ticker AS base_symbol
-            FROM eod_prices_raw
-            WHERE Ticker NOT LIKE '% FF'
-            ORDER BY base_symbol
-            """,
-            con,
-        )["base_symbol"].tolist()
-
-if not syms:
-    st.warning("Belum ada data harga untuk dianalisis.")
-    st.stop()
-
-cA, cB, cC = st.columns([2, 1, 1])
-with cA:
-    idx = syms.index("BBRI") if "BBRI" in syms else 0
-    symbol = st.selectbox("Pilih Saham", syms, index=idx)
-with cB:
-    period = st.selectbox("Periode", ["1M", "3M", "6M", "1Y", "ALL"], index=1)
-with cC:
-    price_type = st.radio("Tipe Harga", ["Line", "Candle"], horizontal=True, index=1)
-
-win = st.slider(
-    "Window Partisipasi (hari)", 5, 60, 20, 1,
-    help="Jika KSEI tidak ada, Pa/Ri dihitung dari rolling |FF|/Volume."
-)
-
-# ────────────────────────────────────────────────────────────────────────────────
 # Ringkasan Bulanan KSEI (dari ksei_month)
 st.markdown("---")
 st.subheader("📅 Ringkasan Bulanan KSEI")
