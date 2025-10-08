@@ -79,7 +79,7 @@ USE_KSEI = _table_exists("ksei_month")
 # ────────────────────────────────────────────────────────────────────────────────
 # Ringkasan Bulanan KSEI (dari ksei_month)
 st.markdown("---")
-st.subheader("📅 Ringkasan Bulanan KSEI")
+st.subheader("📅 Ringkasan Bulanan KSEI.")
 
 if USE_KSEI:
     show_all_ksei = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=True)
