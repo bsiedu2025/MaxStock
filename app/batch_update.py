@@ -1,21 +1,22 @@
 # batch_update.py
+
 import pandas as pd
 from datetime import datetime
 import time
-# PENTING: Import modul koneksi database lo
-from .db_utils import connect_db, execute_batch_query 
-# Asumsi db_utils.py ada di level folder yang sama atau bisa diakses
+# PERBAIKAN: Menggunakan absolute import agar dikenali saat dijalankan sebagai script
+# Pastikan db_utils.py ada di dalam folder yang sama dengan batch_update.py (e.g., app/)
+from db_utils import connect_db, execute_batch_query 
+# Asumsi fungsi-fungsi di atas sudah tersedia di db_utils.py
 
 # --- Fungsi Simulasi Pengambilan Data (Sama kayak sebelumnya) ---
 def fetch_daily_stock_data():
     """
     Simulasi fungsi untuk mengambil data harga saham harian.
-    Lo harus menyesuaikan fungsi ini dengan logika fetch data lo yang valid.
     """
     print("Mencoba mengambil data saham harian dari sumber...")
     time.sleep(2) # Simulasi delay API call
     
-    # Contoh data saham
+    # Contoh data saham (Lo sesuaikan dengan data fetch yang valid)
     today_date = datetime.now().strftime('%Y-%m-%d')
     data = [
         {'Kode': 'BBCA', 'Open': 9050, 'High': 9100, 'Low': 8980, 'Close': 9080, 'Volume': 1200000, 'Date': today_date},
@@ -67,7 +68,6 @@ def batch_update_stock_prices():
         ))
     
     # MENGGUNAKAN FUNGSI EKSEKUSI BATCH DARI db_utils.py
-    # Lo perlu pastiin fungsi execute_batch_query ini ada di db_utils.py
     success = execute_batch_query(conn, insert_query, records_to_insert)
 
     if success:
