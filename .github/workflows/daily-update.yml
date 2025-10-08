@@ -2,12 +2,8 @@
 name: Daily Stock Price Update
 
 on:
-  # Menjalankan workflow setiap hari pada pukul 06:00 UTC (atau 13:00 WIB)
-  # Untuk jam 6 pagi WIB (GMT+7), kita set jam 23:00 UTC di hari sebelumnya
-  # Tapi karena lo minta setiap pagi, kita coba set 00:00 UTC (jam 7 pagi WIB)
+  # Menjalankan workflow setiap hari pada pukul 00:00 UTC (sekitar jam 7 pagi WIB)
   schedule:
-    # '0 0 * * *' artinya pada menit 0, jam 0 (tengah malam UTC), setiap hari, setiap bulan, setiap hari dalam seminggu
-    # Ini akan dieksekusi sekitar jam 7 pagi WIB (GMT+7)
     - cron: '0 0 * * *' 
   # Bisa juga di-trigger manual
   workflow_dispatch:
@@ -25,24 +21,26 @@ jobs:
           python-version: '3.x' # Ganti dengan versi Python yang lo pakai
           
       - name: Install Dependencies
-        # Asumsi dependencies lo ada di requirements.txt (e.g., pandas, mysql-connector-python)
+        # Asumsi dependencies lo ada di requirements.txt 
+        # (termasuk streamlit, yfinance, mysql-connector-python, pandas)
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
+          pip install -r requirements.txt
           
       # --- Langkah Utama: Menjalankan Script Update ---
-      # PENTING: Lo perlu database yang bisa diakses dari GitHub Actions, 
-      # atau lo harus Mock/Simulasi akses DB-nya. 
-      # Kalau lo pakai DB di Docker Compose, lo harus setup runner di tempat DB itu ada.
-      # Untuk CI/CD simpel di Actions, lo bisa pakai Secrets.
       - name: Run Stock Price Batch Update
         env:
-          # Variabel Environment yang Dibutuhkan Script Python
-          DB_HOST: ${{ secrets.DB_HOST }} # Ganti dengan IP/Hostname DB eksternal lo
+          # WAJIB MENAMBAHKAN DB_PORT DAN DB_NAME SESUAI PERMINTAAN db_utils.py
+          DB_HOST: ${{ secrets.DB_HOST }} 
+          DB_PORT: ${{ secrets.DB_PORT }} # <-- HARUS DITAMBAHKAN (misalnya: 3306)
+          DB_NAME: ${{ secrets.DB_NAME }} # <-- HARUS DITAMBAHKAN (Nama Database lo)
           DB_USER: ${{ secrets.DB_USER }} 
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }} 
-          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          
         run: |
           echo "Memulai eksekusi batch_update.py..."
-          python app/batch_update.py # Ganti path ini kalau batch_update.py nggak ada di folder 'app'
+          # Menggunakan Solusi 2 yang lebih robust untuk Streamlit apps, 
+          # agar bisa import package dengan benar: python -m [package].[module]
+          export PYTHONPATH=$PYTHONPATH:./app
+          python -m app.batch_update 
           echo "Eksekusi selesai."
