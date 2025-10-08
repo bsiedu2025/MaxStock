@@ -3,116 +3,81 @@
 import pandas as pd
 from datetime import datetime
 import time
-import mysql.connector # Perlu di-import untuk handle error specific
-from typing import List, Tuple, Any
+import mysql.connector
+import yfinance as yf # WAJIB: untuk mengambil data saham
+from typing import List, Tuple, Any, Dict, Optional
 
-# MENGGUNAKAN FUNGSI KONEKSI YANG ADA DI db_utils.py
-# Fungsi yang tersedia: get_db_connection, get_connection
-from db_utils import get_db_connection 
+# MENGGUNAKAN FUNGSI KONEKSI DAN DML YANG ADA DI db_utils.py
+from db_utils import get_db_connection, execute_query, insert_stock_price_data 
 
+# Periode update yang aman untuk daily batch: ambil 1 bulan terakhir
+UPDATE_PERIOD = '1mo' 
 
-# --- Fungsi Simulasi Pengambilan Data (Diperbarui agar output sesuai DB) ---
-# Asumsi: lo akan mengambil list of tuples atau list of dicts yang siap di-insert
-def fetch_daily_stock_data_for_upsert() -> List[Tuple[Any, ...]]:
-    """
-    Mengambil data saham harian dan mengembalikan data dalam format siap UPSERT.
-    Format data: (Kode, Tanggal, Open, High, Low, Close, Volume)
-    """
-    print("Mencoba mengambil data saham harian dari sumber...")
-    time.sleep(2) # Simulasi delay API call
+# --- Fungsi Bantuan dari 2_Update_Data_Harga_Saham.py ---
+def get_distinct_tickers_from_db() -> List[str]:
+    """Mengambil daftar ticker unik dari tabel stock_prices_history."""
+    # Menggunakan execute_query dari db_utils.py
+    query = "SELECT DISTINCT Ticker FROM stock_prices_history ORDER BY Ticker ASC;"
+    # Asumsi execute_query dengan fetch_all=True mengembalikan List[Dict]
+    result, error = execute_query(query, fetch_all=True) 
     
-    today_date_str = datetime.now().strftime('%Y-%m-%d')
-    today_date_obj = datetime.now().date() # Menggunakan object date untuk database
-    
-    # Data dalam format DataFrame
-    data_df = pd.DataFrame([
-        {'Kode': 'BBCA', 'Open': 9050, 'High': 9100, 'Low': 8980, 'Close': 9080, 'Volume': 1200000, 'Date': today_date_obj},
-        {'Kode': 'TLKM', 'Open': 3990, 'High': 4020, 'Low': 3950, 'Close': 4010, 'Volume': 5500000, 'Date': today_date_obj},
-    ])
-    
-    # Konversi DataFrame ke List of Tuples yang sesuai dengan SQL query
-    records_to_insert = []
-    for index, row in data_df.iterrows():
-        records_to_insert.append((
-            row['Kode'], 
-            row['Date'], 
-            float(row['Open']), 
-            float(row['High']), 
-            float(row['Low']), 
-            float(row['Close']), 
-            int(row['Volume'])
-        ))
-    
-    print(f"Berhasil mengambil {len(records_to_insert)} data hari ini.")
-    return records_to_insert
-
-# --- Fungsi Eksekusi Batch (Manual di sini, karena db_utils tidak punya execute_batch_query) ---
-def execute_stock_upsert(conn, query, records: List[Tuple[Any, ...]]) -> int:
-    """
-    Menjalankan UPSERT batch ke database.
-    Harus dilakukan di sini karena db_utils lo tidak menyediakan helper batch.
-    """
-    if not records:
-        print("Tidak ada data untuk di-upsert.")
-        return 0
+    if error or not result:
+        print(f"ERROR mengambil list ticker dari DB: {error}")
+        return []
         
-    cur = conn.cursor()
-    total_rows_affected = 0
-    try:
-        # Menggunakan executemany untuk efisiensi
-        cur.executemany(query, records)
-        conn.commit()
-        # NOTE: Pada UPSERT, rowcount bisa lebih dari 1 per baris (1 insert, 1-2 update)
-        total_rows_affected = cur.rowcount 
-        return total_rows_affected
-    except mysql.connector.Error as err:
-        print(f"❌ ERROR saat menjalankan UPSERT batch: {err}")
-        conn.rollback() 
-        return -1
-    finally:
-        cur.close()
-
+    # Asumsi key adalah 'Ticker' atau key pertama dari dict
+    if result and isinstance(result[0], dict):
+        key = list(result[0].keys())[0]
+        return [row[key] for row in result if row[key]]
+        
+    print("ERROR: Format hasil query DISTINCT Ticker tidak dikenal.")
+    return []
 
 # --- Fungsi Utama untuk Update Database ---
 def batch_update_stock_prices():
-    """Mengambil data saham harian dan menyimpannya ke database."""
+    """Mengambil list saham dari DB, mengunduh data terbaru via yfinance, dan menyimpannya."""
     print("--- Memulai Proses Batch Update Harian ---")
     
-    records_to_insert = fetch_daily_stock_data_for_upsert()
+    # 1. Ambil list ticker dari Database (sesuai referensi lo)
+    tickers_in_db = get_distinct_tickers_from_db()
     
-    if not records_to_insert:
-        print("Data harian kosong. Proses dihentikan.")
+    if not tickers_in_db:
+        print("⚠️ Database kosong. Tidak ada saham untuk diupdate.")
         return
 
-    # Panggil fungsi koneksi dari db_utils.py
-    # GUE PAKE get_db_connection() SESUAI DENGAN ISI FILE LO
-    conn = get_db_connection() 
+    total_tickers = len(tickers_in_db)
+    print(f"Ditemukan {total_tickers} saham di database yang siap untuk diupdate (Periode: {UPDATE_PERIOD}).")
     
-    # Asumsi: Lo pakai tabel stock_prices_history (sesuai di db_utils.py lo)
-    # Primary Key di db_utils.py adalah (Ticker, Tanggal)
-    insert_query = """
-    INSERT INTO stock_prices_history (Ticker, Tanggal, Open, High, Low, Close, Volume)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE 
-        Open=VALUES(Open), 
-        High=VALUES(High), 
-        Low=VALUES(Low), 
-        Close=VALUES(Close), 
-        Volume=VALUES(Volume)
-    """
+    tickers_processed = 0
+    total_data_inserted = 0
     
-    rows_affected = execute_stock_upsert(conn, insert_query, records_to_insert)
-
-    if rows_affected > 0:
-        print(f"✅ Berhasil memproses {len(records_to_insert)} data. Total baris terpengaruh: {rows_affected}.")
-    elif rows_affected == 0:
-         print("⚠️ Tidak ada perubahan yang terjadi (kemungkinan data sudah ada).")
-    else:
-        print("❌ Terjadi kegagalan saat eksekusi batch query.")
-
-    if conn and conn.is_connected():
-        conn.close()
+    for i, ticker in enumerate(tickers_in_db):
+        print(f"[{i+1}/{total_tickers}] Mengupdate {ticker}...")
+        try:
+            # 2. Unduh data terbaru dari yfinance
+            stock_data = yf.Ticker(ticker).history(period=UPDATE_PERIOD, auto_adjust=True)
+            
+            if not stock_data.empty:
+                # 3. Filter kolom dan simpan
+                columns_to_keep = ['Open', 'High', 'Low', 'Close', 'Volume']
+                df_to_save = stock_data[[col for col in columns_to_keep if col in stock_data.columns]].copy()
+                
+                # MENGGUNAKAN FUNGSI insert_stock_price_data DARI db_utils.py
+                inserted_count = insert_stock_price_data(df_to_save, ticker)
+                total_data_inserted += inserted_count
+                print(f"    ✅ Berhasil menyimpan/mengupdate {inserted_count} baris data untuk {ticker}.")
+            else:
+                print(f"    🤷‍♂️ Tidak ada data baru ditemukan dari yfinance untuk {ticker} (Periode: {UPDATE_PERIOD}).")
+                
+        except Exception as e:
+            print(f"    ❌ Gagal mengupdate {ticker}: {e}")
+            
+        tickers_processed += 1
+        
+    print(f"🎉 SEMUA PROSES UPDATE SELESAI! Total {tickers_processed} ticker diproses.")
+    print(f"Total baris data yang disimpan/diupdate: {total_data_inserted}.")
     print("--- Proses Batch Update Selesai ---")
 
 if __name__ == "__main__":
+    # Karena ini bukan dijalankan di Streamlit, kita bisa memanggil fungsi langsung
     batch_update_stock_prices()
