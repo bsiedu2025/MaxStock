@@ -495,8 +495,8 @@ if selected_ticker:
                             showlegend=True, # Tampilkan legend
                             legend=dict(
                                 orientation="h",
-                                yanchor="bottom",
-                                y=1.02,
+                                yanchor="top", # Diubah ke 'top'
+                                y=0, # Posisi di bawah chart
                                 xanchor="center",
                                 x=0.5
                             )
