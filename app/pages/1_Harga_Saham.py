@@ -584,11 +584,17 @@ if selected_ticker:
             show_all_ksei_trend = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=False, key="ksei_show_all_trend") 
             chart_type_trend = st.radio("Tipe grafik bulanan", ["Line", "Bar"], index=0, horizontal=True, key="ksei_chart_type_trend")
 
-            # PERBAIKAN PENTING DI SINI: Query trend menggunakan filter periode
+            # PERBAIKAN PENTING DI SINI:
+            # 1. Pastikan params_trend selalu diinisialisasi dengan :sym
             params_trend = {"sym": symbol_ksei}
             cond_trend = ""
+            
             if not show_all_ksei_trend:
-                cond_trend, params_trend = _date_filter_ksei(period, "trade_date")
+                # 2. Jika ada filter periode, gabungkan ke params_trend
+                cond_filter, params_filter = _date_filter_ksei(period, "trade_date")
+                cond_trend = cond_filter
+                params_trend.update(params_filter)
+
 
             sql_k_trend = f"""
                 SELECT
@@ -712,7 +718,9 @@ if selected_ticker:
                 params_d = {"sym": symbol_ksei}
                 cond_d = ""
                 if not use_all_detail:
-                    cond_d, params_d = _date_filter_ksei(period, "trade_date")
+                    cond_filter, params_filter = _date_filter_ksei(period, "trade_date")
+                    cond_d = cond_filter
+                    params_d.update(params_filter)
 
                 sql_det = f"""
                     SELECT
