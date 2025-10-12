@@ -4,9 +4,16 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from db_utils import fetch_stock_prices_from_db, get_saved_tickers_summary, get_stock_info, _build_engine, _table_exists
-from sqlalchemy import text
+# Import tambahan yang diperlukan untuk fungsi DB Helper
+import os
+import tempfile
+from urllib.parse import quote_plus
+from sqlalchemy import create_engine, text
 import numpy as np
+
+# Asumsi fungsi dasar dari db_utils, karena _build_engine dan _table_exists didefinisikan di bawah.
+from db_utils import fetch_stock_prices_from_db, get_saved_tickers_summary, get_stock_info 
+
 
 # --- Konfigurasi Halaman ---
 st.set_page_config(page_title="Harga Saham (Database)", layout="wide")
@@ -14,13 +21,56 @@ st.title("💹 Pergerakan Harga & Analisis Asing")
 st.markdown("Menampilkan data historis harga saham dari MariaDB, analisis teknikal, serta ringkasan Foreign Flow Bulanan (KSEI).")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# DB Connection & Utility (Copied from 6_Pergerakan_Asing_FF (1).py)
-# NOTE: Harus disalin agar page ini bisa berdiri sendiri.
+# DB Connection & Utility (Didefinisikan ulang di sini karena ImportError)
+# ────────────────────────────────────────────────────────────────────────────────
 
-engine = _build_engine() # Asumsi _build_engine ada di db_utils, jika tidak, harus diimport/didefinisikan di sini.
+@st.cache_resource
+def _build_engine():
+    """Membangun koneksi SQLAlchemy ke database."""
+    host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
+    port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
+    database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
+    user = os.getenv("DB_USER", st.secrets.get("DB_USER", ""))
+    password = os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", ""))
+    ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
 
+    pwd = quote_plus(str(password))
+    connect_args = {}
+    
+    # Menghindari error jika tidak ada SSL CA
+    try:
+        if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+            tmp.write(ssl_ca.encode("utf-8")); tmp.flush()
+            connect_args["ssl_ca"] = tmp.name
+    except Exception as e:
+        st.warning(f"Error saat menyiapkan SSL CA: {e}")
+
+    url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
+    return create_engine(url, connect_args=connect_args, pool_recycle=300, pool_pre_ping=True)
+
+@st.cache_data(ttl=3600)
+def _table_exists(name: str) -> bool:
+    """Mengecek apakah tabel ada di database saat ini."""
+    try:
+        engine = _build_engine()
+        with engine.connect() as con:
+            q = text("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = :t
+            """)
+            return bool(con.execute(q, {"t": name}).scalar())
+    except Exception as e:
+        # Jika koneksi gagal, asumsikan tabel tidak bisa diakses
+        # st.error(f"Error checking table existence for {name}: {e}") # Nonaktifkan untuk menghindari spam error
+        return False
+
+# Inisialisasi Engine dan Cek Tabel KSEI
+engine = _build_engine() 
 USE_KSEI = _table_exists("ksei_month")
 
+# Helper KSEI
 def _date_filter_ksei(period: str, field: str) -> tuple[str, dict]:
     """Menghasilkan kondisi WHERE SQL dan params berdasarkan periode yang dipilih."""
     params = {}
@@ -38,7 +88,6 @@ def _date_filter_ksei(period: str, field: str) -> tuple[str, dict]:
     return cond, params
 
 # Helper: rangebreaks utk kompres weekend & tanggal libur/absent
-# NOTE: Tidak digunakan di page ini karena datanya bulanan/harian, tapi dipertahankan jika user ingin menambah grafik harian FF
 def _rangebreaks_from_dates(dates_series):
     try:
         s = pd.to_datetime(dates_series, errors="coerce").dropna()
