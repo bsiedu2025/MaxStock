@@ -118,8 +118,8 @@ def format_lot_delta(delta_lot):
     if delta_lot > 0:
         return f"↑ +{format_large_number(abs(delta_lot))} Lot"
     elif delta_lot < 0:
-        return f"↓ {format_large_number(delta_lot)} Lot"
-    return f"↔ {format_large_number(delta_lot)} Lot"
+        return f"↓ {format_large_number(abs(delta_lot))} Lot"
+    return f"↔ {format_large_number(abs(delta_lot))} Lot"
     
 # --- Fungsi untuk Indikator Teknikal ---
 def calculate_sma_pandas(data_series, window):
@@ -424,8 +424,6 @@ if selected_ticker:
             # Ambil data Ringkasan Bulanan KSEI
             params = {"sym": symbol_ksei}
             cond = ""
-            # Untuk bagian ringkasan atas, kita ambil semua data yang ada dulu.
-            # cond, params = _date_filter_ksei("ALL", "trade_date") 
             
             sql_k = f"""
                 SELECT
@@ -473,6 +471,7 @@ if selected_ticker:
                     latest_local = latest_month_data['total_local_vol']
                     latest_total = latest_foreign + latest_local
                     latest_foreign_pct = (latest_foreign / latest_total) * 100 if latest_total > 0 else 0
+                    latest_local_pct = (latest_local / latest_total) * 100 if latest_total > 0 else 0
                     
                     st.subheader(f"Ringkasan Bulan Terakhir: {latest_month_label}")
                     
@@ -499,41 +498,76 @@ if selected_ticker:
 
                     with col_metrics:
                         # Implementasi Metrik Perbandingan
+                        col_m1, col_m2 = st.columns(2)
+
+                        # Metrik 1: Total Volume Asing
                         if len(agg_ksei) >= 2:
                             prev_month_data = agg_ksei.iloc[1]
-                            prev_month_label = prev_month_data['Month']
                             prev_foreign = prev_month_data['total_foreign_vol']
-                            prev_total = prev_foreign + prev_month_data['total_local_vol']
-                            prev_foreign_pct = (prev_foreign / prev_total) * 100 if prev_total > 0 else 0
+                            prev_total_f = prev_foreign + prev_month_data['total_local_vol']
+                            prev_foreign_pct = (prev_foreign / prev_total_f) * 100 if prev_total_f > 0 else 0
                             
-                            # Perubahan (Lot)
                             change_foreign_lot = latest_foreign - prev_foreign
-                            
-                            # Perubahan (% point)
                             change_foreign_pct_point = latest_foreign_pct - prev_foreign_pct
                             
-                            st.markdown(f"**Perbandingan Volume Asing ({prev_month_label} ➡️ {latest_month_label})**")
-                            col_m1, col_m2 = st.columns(2)
+                            delta_foreign_lot_str = format_lot_delta(change_foreign_lot)
+                            delta_foreign_pct_str = f"{change_foreign_pct_point:+.2f} %-pt"
                             
-                            with col_m1:
-                                st.metric(
-                                    label=f"Total Volume Asing ({latest_month_label})",
-                                    value=f"{format_large_number(latest_foreign)} Lot",
-                                    delta=format_lot_delta(change_foreign_lot),
-                                    delta_color="normal",
-                                    help="Total volume Asing (Lot) bulan terakhir dan perubahannya dari bulan sebelumnya."
-                                )
-                            with col_m2:
-                                st.metric(
-                                    label=f"Persentase Asing ({latest_month_label})",
-                                    value=f"{latest_foreign_pct:.2f} %",
-                                    delta=f"{change_foreign_pct_point:+.2f} %-pt",
-                                    delta_color="normal",
-                                    help="Persentase volume Asing (Lot) bulan terakhir dan perubahannya dari bulan sebelumnya (dalam % point)."
-                                )
+                            
+                            # Metrik 2: Total Volume Lokal
+                            prev_local = prev_month_data['total_local_vol']
+                            change_local_lot = latest_local - prev_local
+                            prev_local_pct = (prev_local / prev_total_f) * 100 if prev_total_f > 0 else 0
+                            change_local_pct_point = latest_local_pct - prev_local_pct
+                            
+                            delta_local_lot_str = format_lot_delta(change_local_lot)
+                            delta_local_pct_str = f"{change_local_pct_point:+.2f} %-pt"
                             
                         else:
-                            st.warning(f"Hanya tersedia data {latest_month_label}. Perbandingan dengan bulan sebelumnya tidak dapat dilakukan.")
+                            # Jika hanya 1 bulan data, delta diisi "N/A" atau 0
+                            delta_foreign_lot_str = "N/A"
+                            delta_foreign_pct_str = "N/A"
+                            delta_local_lot_str = "N/A"
+                            delta_local_pct_str = "N/A"
+
+                        st.markdown(f"**Partisipasi Bulan Terakhir ({latest_month_label})**")
+                        
+                        # BARIS ASING
+                        with col_m1:
+                            st.metric(
+                                label=f"Total Volume Asing (Lot)",
+                                value=f"{format_large_number(latest_foreign)} Lot",
+                                delta=delta_foreign_lot_str,
+                                delta_color="normal",
+                                help="Total volume Asing (Lot) bulan terakhir dan perubahannya Lot dari bulan sebelumnya."
+                            )
+                        with col_m2:
+                            st.metric(
+                                label=f"Persentase Asing",
+                                value=f"{latest_foreign_pct:.2f} %",
+                                delta=delta_foreign_pct_str,
+                                delta_color="normal",
+                                help="Persentase volume Asing bulan terakhir dan perubahannya (dalam % point) dari bulan sebelumnya."
+                            )
+                        
+                        # BARIS LOKAL (BARU)
+                        col_m3, col_m4 = st.columns(2)
+                        with col_m3:
+                             st.metric(
+                                label=f"Total Volume Lokal (Lot)",
+                                value=f"{format_large_number(latest_local)} Lot",
+                                delta=delta_local_lot_str,
+                                delta_color="normal",
+                                help="Total volume Lokal (Lot) bulan terakhir dan perubahannya Lot dari bulan sebelumnya."
+                            )
+                        with col_m4:
+                             st.metric(
+                                label=f"Persentase Lokal",
+                                value=f"{latest_local_pct:.2f} %",
+                                delta=delta_local_pct_str,
+                                delta_color="normal",
+                                help="Persentase volume Lokal bulan terakhir dan perubahannya (dalam % point) dari bulan sebelumnya."
+                            )
 
                     st.markdown("---") # Separator setelah Pie Chart & Metrics
                 else:
@@ -544,15 +578,14 @@ if selected_ticker:
             # Ringkasan Bulanan KSEI (Grafik Waktu)
             st.subheader("📅 Pergerakan Volume Asing vs Lokal (Tren Bulanan)")
             
-            # Lanjut ke visualisasi tren historis (bagian yang sudah ada)
-            
             # --- Filter untuk Grafik Waktu ---
-            show_all_ksei = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=False, key="ksei_show_all")
-            chart_type = st.radio("Tipe grafik bulanan", ["Line", "Bar"], index=0, horizontal=True, key="ksei_chart_type")
+            # Menggunakan key berbeda untuk mencegah bentrok dengan kontrol di atas
+            show_all_ksei_trend = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=False, key="ksei_show_all_trend") 
+            chart_type_trend = st.radio("Tipe grafik bulanan", ["Line", "Bar"], index=0, horizontal=True, key="ksei_chart_type_trend")
 
             params = {"sym": symbol_ksei}
             cond = ""
-            if not show_all_ksei:
+            if not show_all_ksei_trend:
                 cond, params = _date_filter_ksei(period, "trade_date")
 
             sql_k_trend = f"""
@@ -607,7 +640,7 @@ if selected_ticker:
                     subplot_titles=("Volume Estimasi: Asing vs Lokal (Bulanan)", "Pa (%) Bulanan"),
                 )
 
-                if chart_type == "Line":
+                if chart_type_trend == "Line":
                     sub.add_trace(go.Scatter(x=agg_plot["Month"], y=agg_plot["vol_foreign_est"],
                                              name="Foreign (est.)", mode="lines+markers"), row=1, col=1)
                     sub.add_trace(go.Scatter(x=agg_plot["Month"], y=agg_plot["vol_local_est"],
