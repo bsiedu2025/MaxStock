@@ -478,10 +478,11 @@ if selected_ticker:
                     col_chart, col_metrics = st.columns([1, 1.5])
 
                     with col_chart:
+                        # Warha baru: Asing (#3AA6A0), Lokal (#FDB43C)
                         fig_pie = go.Figure(data=[go.Pie(
                             labels=['Asing', 'Lokal'],
                             values=[latest_foreign, latest_local],
-                            marker_colors=['#4299e1', '#f6ad55'], # Blue and Orange
+                            marker_colors=['#3AA6A0', '#FDB43C'], 
                             hole=.3,
                             name=f"Partisipasi {latest_month_label}"
                         )])
@@ -491,7 +492,14 @@ if selected_ticker:
                             title=f'Proporsi Volume Bulan Terakhir',
                             height=350,
                             margin=dict(l=20, r=20, t=40, b=20),
-                            showlegend=False
+                            showlegend=True, # Tampilkan legend
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=1.02,
+                                xanchor="center",
+                                x=0.5
+                            )
                         )
                         st.plotly_chart(fig_pie, use_container_width=True)
 
