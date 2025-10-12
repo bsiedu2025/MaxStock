@@ -427,6 +427,7 @@ if selected_ticker:
             sql_k = f"""
                 SELECT
                   trade_date, base_symbol, local_total, foreign_total, price,
+                  local_is, local_cp, local_pf, local_ib, local_id, local_mf, local_sc, local_fd, local_ot, -- Tambahkan kolom detail kategori lokal
                   (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
                   CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
                        THEN 100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0))
@@ -456,29 +457,72 @@ if selected_ticker:
                 kdf["Month"] = kdf["trade_date"].dt.strftime("%Y-%m")
                 
                 # Agregasi total volume Asing & Lokal per bulan
-                agg_ksei = kdf.groupby("Month", as_index=False).agg(
+                agg_ksei_total = kdf.groupby("Month", as_index=False).agg(
                     total_foreign_vol=('foreign_total', 'sum'),
                     total_local_vol=('local_total', 'sum')
                 ).sort_values("Month", ascending=False).reset_index(drop=True)
+
+                # Agregasi detail kategori lokal (diperlukan untuk pie chart Lokal vs Big Player)
+                agg_ksei_detail = kdf.groupby("Month", as_index=False).agg({
+                    'local_id': 'sum',
+                    'local_is': 'sum', 'local_cp': 'sum', 'local_pf': 'sum', 'local_ib': 'sum', 
+                    'local_mf': 'sum', 'local_sc': 'sum', 'local_fd': 'sum', 'local_ot': 'sum',
+                    'local_total': 'sum'
+                }).sort_values("Month", ascending=False).reset_index(drop=True)
                 
-                if len(agg_ksei) >= 1:
-                    latest_month_data = agg_ksei.iloc[0]
+                if len(agg_ksei_total) >= 1 and len(agg_ksei_detail) >= 1:
+                    latest_month_data = agg_ksei_total.iloc[0]
+                    latest_month_detail = agg_ksei_detail.iloc[0]
                     latest_month_label = latest_month_data['Month']
                     
-                    # Data Bulan Terakhir
+                    # Data Bulan Terakhir (Asing vs Lokal Total)
                     latest_foreign = latest_month_data['total_foreign_vol']
                     latest_local = latest_month_data['total_local_vol']
                     latest_total = latest_foreign + latest_local
                     latest_foreign_pct = (latest_foreign / latest_total) * 100 if latest_total > 0 else 0
                     latest_local_pct = (latest_local / latest_total) * 100 if latest_total > 0 else 0
                     
-                    st.subheader(f"Ringkasan Bulan Terakhir: {latest_month_label}")
+                    # Data Lokal (Individual vs Institusi/Big Player)
+                    latest_local_id = latest_month_detail['local_id']
                     
-                    # Implementasi Pie Chart
-                    col_chart, col_metrics = st.columns([1, 1.5])
+                    # Institusi/Big Player = Total Lokal - Individual
+                    local_big_player = latest_local - latest_local_id
+                    
+                    # Hitung delta (sama seperti sebelumnya, pakai agg_ksei_total)
+                    delta_foreign_lot_str = "N/A"
+                    delta_foreign_pct_str = "N/A"
+                    delta_local_lot_str = "N/A"
+                    delta_local_pct_str = "N/A"
 
-                    with col_chart:
-                        # Warha baru: Asing (#3AA6A0), Lokal (#FDB43C)
+                    if len(agg_ksei_total) >= 2:
+                        prev_month_data = agg_ksei_total.iloc[1]
+                        prev_total = prev_month_data['total_foreign_vol'] + prev_month_data['total_local_vol']
+                        prev_foreign_pct = (prev_month_data['total_foreign_vol'] / prev_total) * 100 if prev_total > 0 else 0
+                        prev_local_pct = (prev_month_data['total_local_vol'] / prev_total) * 100 if prev_total > 0 else 0
+                        
+                        change_foreign_lot = latest_foreign - prev_month_data['total_foreign_vol']
+                        change_foreign_pct_point = latest_foreign_pct - prev_foreign_pct
+                        delta_foreign_lot_str = format_lot_delta(change_foreign_lot)
+                        delta_foreign_pct_str = f"{change_foreign_pct_point:+.2f} %-pt"
+                        
+                        change_local_lot = latest_local - prev_month_data['total_local_vol']
+                        change_local_pct_point = latest_local_pct - prev_local_pct
+                        delta_local_lot_str = format_lot_delta(change_local_lot)
+                        delta_local_pct_str = f"{change_local_pct_point:+.2f} %-pt"
+                        
+                        st.subheader(f"Ringkasan Bulan Terakhir: {latest_month_label}")
+                        st.markdown(f"**Perbandingan Bulan ({agg_ksei_total.iloc[1]['Month']} ➡️ {latest_month_label})**")
+                    else:
+                        st.subheader(f"Ringkasan Bulan Terakhir: {latest_month_label}")
+                        st.markdown(f"**Partisipasi Bulan Terakhir ({latest_month_label})**")
+                    
+                    # ────────────────────────────────────────────────────────────────────────
+                    # Tiga Kolom: Pie Chart Total | Metrics Asing/Lokal | Pie Chart Lokal Detail
+                    col_chart_total, col_metrics, col_chart_local = st.columns([1, 1.5, 1])
+
+                    # 1. Pie Chart Total (Asing vs Lokal)
+                    with col_chart_total:
+                        st.markdown("##### Proporsi Volume Total")
                         fig_pie = go.Figure(data=[go.Pie(
                             labels=['Asing', 'Lokal'],
                             values=[latest_foreign, latest_local],
@@ -486,97 +530,64 @@ if selected_ticker:
                             hole=.3,
                             name=f"Partisipasi {latest_month_label}"
                         )])
-                        # Menampilkan nilai lot yang diformat + persentase di hover
                         fig_pie.update_traces(hovertemplate='<b>%{label}</b>: %{value:,.0f} Lot (%{percent})<extra></extra>')
                         fig_pie.update_layout(
-                            title=f'Proporsi Volume Bulan Terakhir',
                             height=350,
-                            margin=dict(l=20, r=20, t=40, b=20),
-                            showlegend=True, # Tampilkan legend
+                            margin=dict(l=20, r=20, t=20, b=20),
+                            showlegend=True, 
                             legend=dict(
                                 orientation="h",
-                                yanchor="top", # Diubah ke 'top'
-                                y=0, # Posisi di bawah chart
+                                yanchor="top",
+                                y=0, 
                                 xanchor="center",
                                 x=0.5
                             )
                         )
                         st.plotly_chart(fig_pie, use_container_width=True)
 
+                    # 2. Metrik (Asing & Lokal)
                     with col_metrics:
-                        # Implementasi Metrik Perbandingan
                         col_m1, col_m2 = st.columns(2)
-
-                        # Inisialisasi Delta
-                        delta_foreign_lot_str = "N/A"
-                        delta_foreign_pct_str = "N/A"
-                        delta_local_lot_str = "N/A"
-                        delta_local_pct_str = "N/A"
-
-                        # Hitung Delta jika ada 2 bulan data atau lebih
-                        if len(agg_ksei) >= 2:
-                            prev_month_data = agg_ksei.iloc[1]
-                            prev_month_label = prev_month_data['Month']
-                            prev_foreign = prev_month_data['total_foreign_vol']
-                            prev_local = prev_month_data['total_local_vol']
-                            prev_total = prev_foreign + prev_local
-                            
-                            prev_foreign_pct = (prev_foreign / prev_total) * 100 if prev_total > 0 else 0
-                            prev_local_pct = (prev_local / prev_total) * 100 if prev_total > 0 else 0
-                            
-                            # Perubahan Asing
-                            change_foreign_lot = latest_foreign - prev_foreign
-                            change_foreign_pct_point = latest_foreign_pct - prev_foreign_pct
-                            delta_foreign_lot_str = format_lot_delta(change_foreign_lot)
-                            delta_foreign_pct_str = f"{change_foreign_pct_point:+.2f} %-pt"
-                            
-                            # Perubahan Lokal
-                            change_local_lot = latest_local - prev_local
-                            change_local_pct_point = latest_local_pct - prev_local_pct
-                            delta_local_lot_str = format_lot_delta(change_local_lot)
-                            delta_local_pct_str = f"{change_local_pct_point:+.2f} %-pt"
-                            
-                            st.markdown(f"**Perbandingan Bulan ({prev_month_label} ➡️ {latest_month_label})**")
-                        else:
-                            st.markdown(f"**Partisipasi Bulan Terakhir ({latest_month_label})**")
-
-                        
-                        # BARIS ASING
                         with col_m1:
-                            st.metric(
-                                label=f"Volume Asing (Lot)",
-                                value=f"{format_large_number(latest_foreign)} Lot",
-                                delta=delta_foreign_lot_str,
-                                delta_color="normal",
-                                help="Total volume Asing (Lot) bulan terakhir dan perubahannya Lot dari bulan sebelumnya."
-                            )
+                            st.metric(label=f"Volume Asing (Lot)", value=f"{format_large_number(latest_foreign)} Lot", delta=delta_foreign_lot_str, delta_color="normal")
                         with col_m2:
-                            st.metric(
-                                label=f"Persentase Asing",
-                                value=f"{latest_foreign_pct:.2f} %",
-                                delta=delta_foreign_pct_str,
-                                delta_color="normal",
-                                help="Persentase volume Asing bulan terakhir dan perubahannya (dalam % point) dari bulan sebelumnya."
-                            )
+                            st.metric(label=f"Persentase Asing", value=f"{latest_foreign_pct:.2f} %", delta=delta_foreign_pct_str, delta_color="normal")
                         
-                        # BARIS LOKAL
                         col_m3, col_m4 = st.columns(2)
                         with col_m3:
-                             st.metric(
-                                label=f"Volume Lokal (Lot)",
-                                value=f"{format_large_number(latest_local)} Lot",
-                                delta=delta_local_lot_str,
-                                delta_color="normal",
-                                help="Total volume Lokal (Lot) bulan terakhir dan perubahannya Lot dari bulan sebelumnya."
-                            )
+                             st.metric(label=f"Volume Lokal (Lot)", value=f"{format_large_number(latest_local)} Lot", delta=delta_local_lot_str, delta_color="normal")
                         with col_m4:
-                             st.metric(
-                                label=f"Persentase Lokal",
-                                value=f"{latest_local_pct:.2f} %",
-                                delta=delta_local_pct_str,
-                                delta_color="normal",
-                                help="Persentase volume Lokal bulan terakhir dan perubahannya (dalam % point) dari bulan sebelumnya."
+                             st.metric(label=f"Persentase Lokal", value=f"{latest_local_pct:.2f} %", delta=delta_local_pct_str, delta_color="normal")
+
+                    # 3. Pie Chart Lokal Detail (Perorangan vs Big Player)
+                    with col_chart_local:
+                        st.markdown("##### Proporsi Lokal: Ritel vs Big Player")
+                        
+                        # Data untuk Pie Chart Lokal Detail
+                        labels_local = ['Perorangan (ID)', 'Institusi/Big Player']
+                        values_local = [latest_local_id, local_big_player]
+                        
+                        fig_local_pie = go.Figure(data=[go.Pie(
+                            labels=labels_local,
+                            values=values_local,
+                            marker_colors=['#f6ad55', '#4299e1'], # Orange untuk Ritel, Biru untuk Institusi
+                            hole=.3,
+                            name="Detail Lokal"
+                        )])
+                        fig_local_pie.update_traces(hovertemplate='<b>%{label}</b>: %{value:,.0f} Lot (%{percent})<extra></extra>')
+                        fig_local_pie.update_layout(
+                            height=350,
+                            margin=dict(l=20, r=20, t=20, b=20),
+                            showlegend=True, 
+                            legend=dict(
+                                orientation="h",
+                                yanchor="top",
+                                y=0,
+                                xanchor="center",
+                                x=0.5
                             )
+                        )
+                        st.plotly_chart(fig_local_pie, use_container_width=True)
 
                     st.markdown("---") # Separator setelah Pie Chart & Metrics
                 else:
