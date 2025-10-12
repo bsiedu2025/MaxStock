@@ -111,6 +111,16 @@ def format_large_number(num_val):
     elif num_val >= 1_000_000: return f"{num_val / 1_000_000:.2f} Jt"
     else: return f"{num_val:,.0f}"
 
+# Fungsi untuk memformat delta lot dengan panah dan format besar
+def format_lot_delta(delta_lot):
+    if pd.isna(delta_lot): return "N/A"
+    delta_lot = float(delta_lot)
+    if delta_lot > 0:
+        return f"↑ +{format_large_number(abs(delta_lot))} Lot"
+    elif delta_lot < 0:
+        return f"↓ {format_large_number(delta_lot)} Lot"
+    return f"↔ {format_large_number(delta_lot)} Lot"
+    
 # --- Fungsi untuk Indikator Teknikal ---
 def calculate_sma_pandas(data_series, window):
     if data_series is None or data_series.empty or len(data_series) < window: return pd.Series(dtype='float64')
@@ -411,11 +421,133 @@ if selected_ticker:
                 return
 
             # ────────────────────────────────────────────────────────────────────────────────
-            # Ringkasan Bulanan KSEI (dari ksei_month)
-            st.markdown("---")
-            st.subheader("📅 Ringkasan Bulanan KSEI")
+            # Ambil data Ringkasan Bulanan KSEI
+            params = {"sym": symbol_ksei}
+            cond = ""
+            # Untuk bagian ringkasan atas, kita ambil semua data yang ada dulu.
+            # cond, params = _date_filter_ksei("ALL", "trade_date") 
             
-            show_all_ksei = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=True, key="ksei_show_all")
+            sql_k = f"""
+                SELECT
+                  trade_date, base_symbol, local_total, foreign_total, price,
+                  (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
+                  CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
+                       THEN 100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0))
+                       ELSE NULL END AS foreign_pct,
+                  CASE WHEN COALESCE(local_total,0) + COALESCE(foreign_total,0) > 0
+                       THEN 100.0 - (100.0 * COALESCE(foreign_total,0) / (COALESCE(local_total,0) + COALESCE(foreign_total,0)))
+                       ELSE NULL END AS retail_pct,
+                  CASE WHEN price IS NOT NULL
+                       THEN price * (COALESCE(local_total,0) + COALESCE(foreign_total,0))
+                       ELSE NULL END AS total_value
+                FROM ksei_month
+                WHERE base_symbol = :sym
+                ORDER BY trade_date
+            """
+            
+            try:
+                with engine.connect() as con:
+                    kdf = pd.read_sql(text(sql_k), con, params=params)
+            except Exception as e:
+                st.error(f"Gagal mengambil data KSEI: {e}")
+                kdf = pd.DataFrame()
+
+            # ────────────────────────────────────────────────────────────────────────────────
+            # Analisis Bulan Terakhir (Baru)
+            if not kdf.empty:
+                kdf["trade_date"] = pd.to_datetime(kdf["trade_date"])
+                kdf["Month"] = kdf["trade_date"].dt.strftime("%Y-%m")
+                
+                # Agregasi total volume Asing & Lokal per bulan
+                agg_ksei = kdf.groupby("Month", as_index=False).agg(
+                    total_foreign_vol=('foreign_total', 'sum'),
+                    total_local_vol=('local_total', 'sum')
+                ).sort_values("Month", ascending=False).reset_index(drop=True)
+                
+                if len(agg_ksei) >= 1:
+                    latest_month_data = agg_ksei.iloc[0]
+                    latest_month_label = latest_month_data['Month']
+                    
+                    # Data Bulan Terakhir
+                    latest_foreign = latest_month_data['total_foreign_vol']
+                    latest_local = latest_month_data['total_local_vol']
+                    latest_total = latest_foreign + latest_local
+                    latest_foreign_pct = (latest_foreign / latest_total) * 100 if latest_total > 0 else 0
+                    
+                    st.subheader(f"Ringkasan Bulan Terakhir: {latest_month_label}")
+                    
+                    # Implementasi Pie Chart
+                    col_chart, col_metrics = st.columns([1, 1.5])
+
+                    with col_chart:
+                        fig_pie = go.Figure(data=[go.Pie(
+                            labels=['Asing', 'Lokal'],
+                            values=[latest_foreign, latest_local],
+                            marker_colors=['#4299e1', '#f6ad55'], # Blue and Orange
+                            hole=.3,
+                            name=f"Partisipasi {latest_month_label}"
+                        )])
+                        # Menampilkan nilai lot yang diformat + persentase di hover
+                        fig_pie.update_traces(hovertemplate='<b>%{label}</b>: %{value:,.0f} Lot (%{percent})<extra></extra>')
+                        fig_pie.update_layout(
+                            title=f'Proporsi Volume Bulan Terakhir',
+                            height=350,
+                            margin=dict(l=20, r=20, t=40, b=20),
+                            showlegend=False
+                        )
+                        st.plotly_chart(fig_pie, use_container_width=True)
+
+                    with col_metrics:
+                        # Implementasi Metrik Perbandingan
+                        if len(agg_ksei) >= 2:
+                            prev_month_data = agg_ksei.iloc[1]
+                            prev_month_label = prev_month_data['Month']
+                            prev_foreign = prev_month_data['total_foreign_vol']
+                            prev_total = prev_foreign + prev_month_data['total_local_vol']
+                            prev_foreign_pct = (prev_foreign / prev_total) * 100 if prev_total > 0 else 0
+                            
+                            # Perubahan (Lot)
+                            change_foreign_lot = latest_foreign - prev_foreign
+                            
+                            # Perubahan (% point)
+                            change_foreign_pct_point = latest_foreign_pct - prev_foreign_pct
+                            
+                            st.markdown(f"**Perbandingan Volume Asing ({prev_month_label} ➡️ {latest_month_label})**")
+                            col_m1, col_m2 = st.columns(2)
+                            
+                            with col_m1:
+                                st.metric(
+                                    label=f"Total Volume Asing ({latest_month_label})",
+                                    value=f"{format_large_number(latest_foreign)} Lot",
+                                    delta=format_lot_delta(change_foreign_lot),
+                                    delta_color="normal",
+                                    help="Total volume Asing (Lot) bulan terakhir dan perubahannya dari bulan sebelumnya."
+                                )
+                            with col_m2:
+                                st.metric(
+                                    label=f"Persentase Asing ({latest_month_label})",
+                                    value=f"{latest_foreign_pct:.2f} %",
+                                    delta=f"{change_foreign_pct_point:+.2f} %-pt",
+                                    delta_color="normal",
+                                    help="Persentase volume Asing (Lot) bulan terakhir dan perubahannya dari bulan sebelumnya (dalam % point)."
+                                )
+                            
+                        else:
+                            st.warning(f"Hanya tersedia data {latest_month_label}. Perbandingan dengan bulan sebelumnya tidak dapat dilakukan.")
+
+                    st.markdown("---") # Separator setelah Pie Chart & Metrics
+                else:
+                    st.info("Data KSEI untuk simbol ini tidak memadai.")
+
+            
+            # ────────────────────────────────────────────────────────────────────────────────
+            # Ringkasan Bulanan KSEI (Grafik Waktu)
+            st.subheader("📅 Pergerakan Volume Asing vs Lokal (Tren Bulanan)")
+            
+            # Lanjut ke visualisasi tren historis (bagian yang sudah ada)
+            
+            # --- Filter untuk Grafik Waktu ---
+            show_all_ksei = st.checkbox("Tampilkan semua data KSEI (abaikan filter Periode)", value=False, key="ksei_show_all")
             chart_type = st.radio("Tipe grafik bulanan", ["Line", "Bar"], index=0, horizontal=True, key="ksei_chart_type")
 
             params = {"sym": symbol_ksei}
@@ -423,7 +555,7 @@ if selected_ticker:
             if not show_all_ksei:
                 cond, params = _date_filter_ksei(period, "trade_date")
 
-            sql_k = f"""
+            sql_k_trend = f"""
                 SELECT
                   trade_date, base_symbol,
                   (COALESCE(local_total,0) + COALESCE(foreign_total,0)) AS total_volume,
@@ -444,18 +576,18 @@ if selected_ticker:
             
             try:
                 with engine.connect() as con:
-                    kdf = pd.read_sql(text(sql_k), con, params=params)
+                    kdf_trend = pd.read_sql(text(sql_k_trend), con, params=params)
             except Exception as e:
-                st.error(f"Gagal mengambil data Ringkasan KSEI: {e}")
-                kdf = pd.DataFrame()
+                st.error(f"Gagal mengambil data Tren KSEI: {e}")
+                kdf_trend = pd.DataFrame()
 
 
-            if not kdf.empty:
-                kdf["trade_date"] = pd.to_datetime(kdf["trade_date"])
-                kdf["Month"] = kdf["trade_date"].dt.strftime("%Y-%m")
+            if not kdf_trend.empty:
+                kdf_trend["trade_date"] = pd.to_datetime(kdf_trend["trade_date"])
+                kdf_trend["Month"] = kdf_trend["trade_date"].dt.strftime("%Y-%m")
 
                 # Perhitungan estimasi volume
-                tmp = kdf.copy()
+                tmp = kdf_trend.copy()
                 tmp["foreign_frac"] = pd.to_numeric(tmp["foreign_pct"], errors="coerce") / 100.0
                 tmp["vol_foreign_est"] = pd.to_numeric(tmp["total_volume"], errors="coerce") * tmp["foreign_frac"]
                 tmp["vol_local_est"]   = pd.to_numeric(tmp["total_volume"], errors="coerce") * (1.0 - tmp["foreign_frac"])
@@ -463,7 +595,7 @@ if selected_ticker:
                 vol = (tmp.groupby("Month", as_index=False)
                           .agg({"vol_foreign_est": "sum", "vol_local_est": "sum"}))
                 
-                agg_pct = (kdf.sort_values("trade_date")
+                agg_pct = (kdf_trend.sort_values("trade_date")
                             .groupby("Month", as_index=False)
                             .agg({"foreign_pct": "mean"}))
 
@@ -493,12 +625,12 @@ if selected_ticker:
                 sub.update_layout(
                     height=650, hovermode="x unified",
                     showlegend=True, margin=dict(l=40, r=40, t=60, b=40),
-                    title=f"Ringkasan Partisipasi Asing ({symbol_ksei})"
+                    title=f"Tren Partisipasi Asing ({symbol_ksei})"
                 )
                 st.plotly_chart(sub, use_container_width=True)
                 
                 with st.expander("📄 Tabel Ringkas Partisipasi (per Bulan)"):
-                    tbl_ringkas = kdf.groupby("Month", as_index=False).agg({
+                    tbl_ringkas = kdf_trend.groupby("Month", as_index=False).agg({
                         "total_volume": "sum",
                         "total_value": "sum",
                         "foreign_pct": "mean",
@@ -511,7 +643,7 @@ if selected_ticker:
                         "retail_pct": '{:.2f}%'
                     }), use_container_width=True)
             else:
-                st.info(f"Belum ada baris `ksei_month` untuk simbol {symbol_ksei}.")
+                st.info(f"Belum ada baris `ksei_month` untuk simbol {symbol_ksei} pada periode terpilih.")
 
             # ────────────────────────────────────────────────────────────────────────────────
             # 📊 DETAIL KATEGORI (paling bawah) — sumber: ksei_month
