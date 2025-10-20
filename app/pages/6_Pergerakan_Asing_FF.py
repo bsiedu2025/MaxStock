@@ -13,6 +13,7 @@ from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text
 import time
 import requests 
+import math
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
 st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
@@ -75,24 +76,42 @@ engine = _build_engine()
 TABLE_NAME = "macro_data"
 
 # ────────────────────────────────────────────────────────────────────────────────
-# NEW: Direct Fetcher Stooq untuk Emas
+# Data Fetchers (Emas & Rupiah)
 # ────────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=600)
-def fetch_gold_from_stooq() -> pd.DataFrame:
-    """Mengambil data Emas historis langsung dari URL CSV Stooq."""
+@st.cache_data(ttl=60)
+def get_latest_trade_date() -> datetime.date:
+    """Mencari tanggal terakhir data di database."""
+    try:
+        with engine.connect() as con:
+            q = text(f"SELECT MAX(trade_date) FROM {TABLE_NAME}")
+            max_date = con.execute(q).scalar()
+            return max_date if max_date else datetime(1970, 1, 1).date()
+    except Exception:
+        return datetime(1970, 1, 1).date()
+
+@st.cache_data(ttl=60)
+def get_last_idr_rate() -> float:
+    """Mencari kurs Rupiah terakhir di database."""
+    try:
+        with engine.connect() as con:
+            q = text(f"SELECT IDR_USD FROM {TABLE_NAME} ORDER BY trade_date DESC LIMIT 1")
+            return con.execute(q).scalar()
+    except Exception:
+        return 15000.0
+
+
+def fetch_gold_from_stooq(full_history: bool = False) -> pd.DataFrame:
+    """Mengambil data Emas historis dari Stooq."""
     stooq_url = "https://stooq.com/q/d/l/?s=xauusd&i=d"
     
     try:
-        # Menggunakan pandas langsung untuk membaca CSV dari URL (lebih cepat)
         df_gold = pd.read_csv(stooq_url, index_col='Date', parse_dates=True)
         
-        # Kolom yang kita butuhkan adalah 'Close'
         df_gold = df_gold[['Close']].copy()
         df_gold.columns = ['Gold_USD']
         df_gold = df_gold.sort_index(ascending=True).reset_index()
         
-        # Rename dan konversi tanggal
         df_gold.rename(columns={'Date': 'trade_date'}, inplace=True)
         df_gold['trade_date'] = df_gold['trade_date'].dt.date
         df_gold.dropna(inplace=True)
@@ -106,19 +125,31 @@ def fetch_gold_from_stooq() -> pd.DataFrame:
         st.error(f"Terjadi kesalahan saat memproses data Emas Stooq: {e}")
         return pd.DataFrame()
 
-def generate_idr_rate(start_date, end_date) -> pd.DataFrame:
-    """Menghasilkan DataFrame simulasi untuk Kurs IDR/USD (karena sulit di-fetch)."""
-    # Menghasilkan tanggal hanya di hari kerja
+def generate_idr_rate_today(last_rate) -> float:
+    """Menghasilkan kurs Rupiah simulasi hari ini berdasarkan kurs terakhir."""
+    np.random.seed(int(time.time())) 
+    change = np.random.normal(0.05, 5)
+    new_rate = last_rate * (1 + change / 20000)
+    return float(new_rate)
+
+
+def generate_idr_rate_history(start_date: datetime.date, end_date: datetime.date, initial_rate: float) -> pd.DataFrame:
+    """Menghasilkan DataFrame Kurs Rupiah simulasi sepanjang periode yang dibutuhkan."""
     dates = pd.date_range(start=start_date, end=end_date, freq='B')
     df = pd.DataFrame(index=dates)
     
-    # Kurs Rupiah (IDR/USD) - Menggunakan simulasi terakhir untuk konsistensi
+    # Kurs Rupiah (IDR/USD) - Menggunakan simulasi
     np.random.seed(int(time.time())) 
-    idr_base = 15500 # Angka kurs yang lebih realistis untuk baseline saat ini
-    idr_rate = [idr_base]
+    idr_rate = [initial_rate]
     for _ in range(1, len(dates)):
-        change = np.random.normal(0.05, 5)
-        idr_rate.append(idr_rate[-1] * (1 + change / 100000)) # Perubahan yang sangat kecil
+        # Pastikan rate awal di tahun 1970 lebih rendah (sekitar 400an)
+        if start_date.year < 1980:
+             change = np.random.normal(0.5, 5) # Perubahan yang lebih besar untuk tren naik jangka panjang
+        else:
+             change = np.random.normal(0.05, 5)
+        
+        idr_rate.append(idr_rate[-1] * (1 + change / 10000)) 
+        
     df['IDR_USD'] = np.array(idr_rate)
     
     df = df.reset_index().rename(columns={'index': 'trade_date'})
@@ -126,7 +157,7 @@ def generate_idr_rate(start_date, end_date) -> pd.DataFrame:
     return df[['trade_date', 'IDR_USD']]
 
 
-def prepare_full_macro_data():
+def prepare_full_macro_data(start_date_gold: datetime.date):
     """Menggabungkan data Emas Stooq dan data Kurs IDR (simulasi)."""
     df_gold = fetch_gold_from_stooq()
     
@@ -134,11 +165,15 @@ def prepare_full_macro_data():
         st.warning("Gagal mendapatkan data Emas dari Stooq. Tidak bisa melanjutkan setup.")
         return pd.DataFrame()
         
+    # Pastikan start date untuk Gold dari data yang tersedia
     start_date = df_gold['trade_date'].min()
     end_date = datetime.now().date()
     
-    # Generate IDR Rate sepanjang periode data Emas yang tersedia
-    df_idr = generate_idr_rate(start_date, end_date)
+    # Generate IDR Rate sepanjang periode data Emas yang tersedia.
+    # Kurs awal IDR di tahun 1970 sekitar 415 IDR/USD.
+    initial_idr = 415.0 if start_date.year < 1980 else 15000.0
+    
+    df_idr = generate_idr_rate_history(start_date, end_date, initial_idr)
     
     # Merge kedua data berdasarkan trade_date (hanya ambil tanggal yang ada di kedua sisi)
     df_merged = pd.merge(df_gold, df_idr, on='trade_date', how='inner')
@@ -214,6 +249,41 @@ def delete_table():
     except Exception as e:
         st.error(f"Gagal menghapus tabel: {e}")
 
+def upload_gap_data(df_gap: pd.DataFrame):
+    """Menyimpan data gap ke database menggunakan mode upsert."""
+    st.session_state.is_loading = True
+    total_rows = len(df_gap)
+    
+    with st.status("Memproses data Gap Filler...", expanded=True) as status_bar:
+        try:
+            status_bar.update(label="1. Menyiapkan koneksi database...", state="running")
+            engine = _build_engine()
+            
+            # Upload data gap menggunakan mode 'append' (karena kita sudah memastikan tanggalnya baru)
+            status_bar.update(label=f"2. Mengunggah {total_rows} baris data gap ke DB...")
+            
+            df_temp = df_gap.set_index('trade_date')
+            df_temp.to_sql(
+                name=TABLE_NAME, 
+                con=engine, 
+                if_exists='append', 
+                index=True,
+                chunksize=500 
+            )
+            
+            status_bar.update(label=f"✅ Pengunggahan Data Gap Selesai! ({total_rows} baris)", state="complete", expanded=False)
+            
+            st.cache_data.clear()
+            st.success(f"Berhasil mengisi {total_rows} hari gap data makro.")
+
+            st.rerun() 
+            
+        except Exception as e:
+            status_bar.update(label="❌ Gagal mengunggah data gap!", state="error", expanded=True)
+            st.error(f"Terjadi kesalahan database saat mengisi gap: {e}")
+        finally:
+            st.session_state.is_loading = False # Reset loading state
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Data Fetcher & Aggregator (Sama seperti sebelumnya)
@@ -270,7 +340,6 @@ def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     
     return aggregated_df
 
-
 # ────────────────────────────────────────────────────────────────────────────────
 # Streamlit Interface
 # ────────────────────────────────────────────────────────────────────────────────
@@ -283,7 +352,7 @@ if not _table_exists(TABLE_NAME):
         st.info("Fitur ini akan mengambil data Emas dari Stooq, menggabungkannya dengan Kurs Rupiah simulasi, dan membuat tabel Anda.")
         
         if st.button("📥 Ambil Emas Stooq & Buat Tabel", disabled=st.session_state.is_loading, type="primary"):
-            df_full = prepare_full_macro_data()
+            df_full = prepare_full_macro_data(datetime(1970, 1, 1).date()) # Set start date ke 1970
             if not df_full.empty:
                  upload_full_data_to_db(df_full) 
             
@@ -302,7 +371,7 @@ else:
         
         with col_upd:
             if st.button("🔄 Ambil Ulang Emas Stooq & Timpa Semua Data", key="btn_replace_sheets", disabled=st.session_state.is_loading):
-                df_to_upload = prepare_full_macro_data()
+                df_to_upload = prepare_full_macro_data(datetime(1970, 1, 1).date())
                 if not df_to_upload.empty:
                     upload_full_data_to_db(df_to_upload) # Menggunakan fungsi upload_full_data_to_db untuk menimpa total
                 else:
@@ -318,30 +387,50 @@ if st.session_state.is_loading:
     pass
 
 
-# --- FORM UPDATE HARIAN DI SIDEBAR ---
+# --- FORM UPDATE HARIAN DI SIDEBAR (GAP FILLER) ---
 with st.sidebar:
-    st.header("🔄 Update Data Harian")
-    with st.form("macro_update_form", clear_on_submit=True):
-        st.caption("Emas akan di-simulasi di sini karena Stooq tidak menyediakan update real-time yang mudah.")
-        update_date = st.date_input("Tanggal Data", value=datetime.now().date(), max_value=datetime.now().date(), disabled=st.session_state.is_loading)
-        gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0, disabled=st.session_state.is_loading)
-        idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0, disabled=st.session_state.is_loading)
+    st.header("🔄 Isi Gap Data Otomatis")
+    
+    last_date = get_latest_trade_date()
+    today = datetime.now().date()
+    
+    if last_date >= today:
+        st.success("✅ Data Anda sudah terbaru hingga hari ini!")
+    else:
+        gap_start_date = last_date + timedelta(days=1)
+        st.warning(f"⚠️ Ditemukan gap data: {gap_start_date.strftime('%Y-%m-%d')} s/d {today.strftime('%Y-%m-%d')}")
         
-        submitted = st.form_submit_button("Simpan Data ke Database", disabled=st.session_state.is_loading)
-        
-        if submitted:
-            if gold_price > 0 and idr_rate > 0:
-                # Buat DataFrame dari input tunggal
-                new_data = pd.DataFrame([{
-                    'trade_date': update_date,
-                    'Gold_USD': gold_price,
-                    'IDR_USD': idr_rate
-                }])
-                
-                # Gunakan fungsi upload_single_data_to_db untuk update harian
-                upload_single_data_to_db(new_data)
+        if st.button("⚡ Lengkapi Gap Data (Stooq Emas & Simulasi Kurs)", disabled=st.session_state.is_loading, type="primary"):
+            
+            # Ambil data emas Stooq secara penuh
+            df_full_gold = fetch_gold_from_stooq()
+            if df_full_gold.empty:
+                 st.error("Gagal mengambil data Emas dari Stooq untuk mengisi gap.")
+                 st.rerun() # Refresh agar tidak stuck
+            
+            # Tentukan periode gap
+            df_gold_gap = df_full_gold[df_full_gold['trade_date'] >= gap_start_date].copy()
+            
+            if df_gold_gap.empty:
+                 st.info(f"Tidak ada data baru dari Stooq sejak {gap_start_date.strftime('%Y-%m-%d')}.")
             else:
-                st.error("Harga Emas dan Nilai Tukar harus diisi dengan nilai > 0.")
+                # 1. Ambil kurs terakhir di DB
+                last_idr_rate = get_last_idr_rate()
+                
+                # 2. Tentukan range gap di data emas
+                idr_gap_start = df_gold_gap['trade_date'].min()
+                idr_gap_end = df_gold_gap['trade_date'].max()
+                
+                # 3. Generate IDR Rate hanya untuk periode gap
+                df_idr_gap = generate_idr_rate_history(idr_gap_start, idr_gap_end, last_idr_rate)
+                
+                # 4. Gabungkan dan hapus kolom Rupiah yang lama
+                df_gap_merged = pd.merge(df_gold_gap, df_idr_gap, on='trade_date', how='inner')
+                
+                # 5. Upload gap data
+                upload_gap_data(df_gap_merged)
+
+st.sidebar.markdown("---")
 
 
 # Filter Sidebar (Tersedia setelah tabel ada)
@@ -363,7 +452,7 @@ except Exception:
 
 
 start_date_default = end_date - timedelta(days=365 * 3) # Default 3 tahun
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, min_value=min_date_db, max_value=end_date, key="filter_start")
+selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=min_date_db, min_value=min_date_db, max_value=end_date, key="filter_start")
 selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, max_value=end_date, key="filter_end")
 
 st.sidebar.markdown("---")
