@@ -28,7 +28,8 @@ if 'is_loading' not in st.session_state:
     
 # State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
 if 'sheet_id_input' not in st.session_state:
-    st.session_state.sheet_id_input = "" 
+    # [UPDATE] Mengganti default ID Sheets sesuai permintaan user
+    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
@@ -628,5 +629,5 @@ fig2.update_layout(
 
 st.plotly_chart(fig2, use_container_width=True)
 
-st.markdown("---")
+st.markdown("---") 
 st.caption("⚠️ **Penting:** Data Emas diambil dari Stooq. Data Rupiah diambil dari Google Sheets. Pastikan **Spreadsheet ID** di sidebar valid dan Sheets sudah diatur *sharing*-nya.")
