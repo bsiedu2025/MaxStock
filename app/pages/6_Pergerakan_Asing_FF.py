@@ -7,25 +7,26 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import numpy as np
-import json
-import random
 import os
 import tempfile
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text
 import time
+import requests 
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
 st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
-    "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
+    "Menampilkan data historis harga emas dunia (USD/oz) yang diambil **langsung dari Stooq** dan Nilai Tukar Rupiah (manual input) "
     "yang tersimpan di tabel `macro_data` database Anda."
 )
 
-# Inisialisasi session state untuk loading
-if 'is_loading' not in st.session_state: # <--- FIX: st.session_state (bukan st.session_session_state)
+# Inisialisasi session state
+if 'is_loading' not in st.session_state:
     st.session_state.is_loading = False
-
+if 'sheet_id' not in st.session_state: # Dibiarkan agar tidak error, tapi tidak dipakai
+    st.session_state.sheet_id = "" 
+    
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility (Didefinisikan ulang di sini)
 # ────────────────────────────────────────────────────────────────────────────────
@@ -74,44 +75,79 @@ engine = _build_engine()
 TABLE_NAME = "macro_data"
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Fungsi Uploader/Seeder Data (Simulasi untuk keperluan demo)
+# NEW: Direct Fetcher Stooq untuk Emas
 # ────────────────────────────────────────────────────────────────────────────────
 
-def generate_macro_data(start_date, end_date) -> pd.DataFrame:
-    """Menghasilkan DataFrame simulasi untuk harga emas dan kurs USD/IDR."""
+@st.cache_data(ttl=600)
+def fetch_gold_from_stooq() -> pd.DataFrame:
+    """Mengambil data Emas historis langsung dari URL CSV Stooq."""
+    stooq_url = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+    
+    try:
+        # Menggunakan pandas langsung untuk membaca CSV dari URL (lebih cepat)
+        df_gold = pd.read_csv(stooq_url, index_col='Date', parse_dates=True)
+        
+        # Kolom yang kita butuhkan adalah 'Close'
+        df_gold = df_gold[['Close']].copy()
+        df_gold.columns = ['Gold_USD']
+        df_gold = df_gold.sort_index(ascending=True).reset_index()
+        
+        # Rename dan konversi tanggal
+        df_gold.rename(columns={'Date': 'trade_date'}, inplace=True)
+        df_gold['trade_date'] = df_gold['trade_date'].dt.date
+        df_gold.dropna(inplace=True)
+        
+        return df_gold
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Gagal mengambil data dari Stooq. Error koneksi: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat memproses data Emas Stooq: {e}")
+        return pd.DataFrame()
+
+def generate_idr_rate(start_date, end_date) -> pd.DataFrame:
+    """Menghasilkan DataFrame simulasi untuk Kurs IDR/USD (karena sulit di-fetch)."""
     # Menghasilkan tanggal hanya di hari kerja
     dates = pd.date_range(start=start_date, end=end_date, freq='B')
     df = pd.DataFrame(index=dates)
     
-    # Emas (Gold)
-    # Gunakan seed yang berbeda dari sebelumnya agar data terlihat baru jika di-update
+    # Kurs Rupiah (IDR/USD) - Menggunakan simulasi terakhir untuk konsistensi
     np.random.seed(int(time.time())) 
-    gold_base = 35  # Harga emas di tahun 1970an
-    gold_price = [gold_base]
-    
-    # KENAISAN REVISI: Menggunakan pembagi 200 (sebelumnya 1000) untuk mencapai nilai ~2000 USD di tahun 2025
-    for _ in range(1, len(dates)):
-        # Perubahan yang lebih besar untuk rentang waktu yang panjang (Drift 0.08, Vol 15)
-        change = np.random.normal(0.08, 15)
-        gold_price.append(gold_price[-1] * (1 + change / 200)) # Revisi pembagi dari 1000 ke 200
-    df['Gold_USD'] = np.array(gold_price)
-    
-    # Rupiah (IDR/USD)
-    idr_base = 380 # Kurs Rupiah di tahun 1970an
+    idr_base = 15500 # Angka kurs yang lebih realistis untuk baseline saat ini
     idr_rate = [idr_base]
     for _ in range(1, len(dates)):
-        # Perubahan yang lebih kecil untuk kurs
         change = np.random.normal(0.05, 5)
-        idr_rate.append(idr_rate[-1] * (1 + change / 10000))
+        idr_rate.append(idr_rate[-1] * (1 + change / 100000)) # Perubahan yang sangat kecil
     df['IDR_USD'] = np.array(idr_rate)
     
     df = df.reset_index().rename(columns={'index': 'trade_date'})
-    df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date # Simpan sebagai date object
-    return df
+    df['trade_date'] = pd.to_datetime(df['trade_date']).dt.date
+    return df[['trade_date', 'IDR_USD']]
 
-def upload_simulated_data(df: pd.DataFrame, mode: str):
-    """Menyimpan DataFrame ke tabel macro_data menggunakan to_sql untuk efisiensi.
-       Mode: 'create' (buat baru), 'append' (tambah/update harian)."""
+
+def prepare_full_macro_data():
+    """Menggabungkan data Emas Stooq dan data Kurs IDR (simulasi)."""
+    df_gold = fetch_gold_from_stooq()
+    
+    if df_gold.empty:
+        st.warning("Gagal mendapatkan data Emas dari Stooq. Tidak bisa melanjutkan setup.")
+        return pd.DataFrame()
+        
+    start_date = df_gold['trade_date'].min()
+    end_date = datetime.now().date()
+    
+    # Generate IDR Rate sepanjang periode data Emas yang tersedia
+    df_idr = generate_idr_rate(start_date, end_date)
+    
+    # Merge kedua data berdasarkan trade_date (hanya ambil tanggal yang ada di kedua sisi)
+    df_merged = pd.merge(df_gold, df_idr, on='trade_date', how='inner')
+    
+    return df_merged[['trade_date', 'Gold_USD', 'IDR_USD']].sort_values('trade_date').reset_index(drop=True)
+
+
+def upload_full_data_to_db(df: pd.DataFrame):
+    """Menyimpan data penuh ke database."""
     
     st.session_state.is_loading = True
     total_rows = len(df)
@@ -119,57 +155,35 @@ def upload_simulated_data(df: pd.DataFrame, mode: str):
     with st.status("Memproses data makro...", expanded=True) as status_bar:
         try:
             status_bar.update(label="1. Menyiapkan koneksi database...", state="running")
-            
             engine = _build_engine()
             
-            if mode == 'create':
-                # Hapus tabel lama (jika ada) dan buat baru dengan data 1970
-                status_bar.update(label="2. Menghapus tabel lama dan membuat tabel baru...")
-                
-                # Menggunakan to_sql dengan if_exists='replace' akan menangani CREATE TABLE
-                # Kita perlu memastikan Primary Key terbuat, jadi kita buat manual DULU.
-                with engine.connect() as con:
-                     # Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
-                    create_table_sql = f"""
-                        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                            trade_date DATE NOT NULL,
-                            Gold_USD FLOAT,
-                            IDR_USD FLOAT,
-                            PRIMARY KEY (trade_date)
-                        ) ENGINE=InnoDB;
-                    """
-                    con.execute(text(f"DROP TABLE IF EXISTS {TABLE_NAME}")) # Hapus yang lama
-                    con.execute(text(create_table_sql))
-                    con.commit()
-                
-                status_bar.update(label=f"3. Mengunggah {total_rows} baris data (1970-sekarang)...")
-                
-                # Menggunakan to_sql (append) untuk mengisi data ke tabel yang baru dibuat
-                df_temp = df.set_index('trade_date') # to_sql akan menggunakan index sebagai kolom jika tidak ditentukan
-                df_temp.to_sql(
-                    name=TABLE_NAME, 
-                    con=engine, 
-                    if_exists='append', 
-                    index=True,
-                    chunksize=5000 # Tetapkan chunksize untuk transaksi yang besar
-                )
-                
-            elif mode == 'append':
-                status_bar.update(label=f"2. Mengunggah {total_rows} baris data harian...")
-                
-                with engine.connect() as con:
-                    # Hapus data yang ada (jika tanggal sama) dan insert data baru
-                    con.execute(text(f"DELETE FROM {TABLE_NAME} WHERE trade_date = :trade_date"), 
-                                {"trade_date": df['trade_date'].iloc[0]})
-                    con.commit()
-                    
-                    df.to_sql(
-                        name=TABLE_NAME, 
-                        con=con, 
-                        if_exists='append', 
-                        index=False
-                    )
-                
+            # 2. Menghapus tabel lama dan membuat tabel baru (Mode CREATE)
+            status_bar.update(label="2. Menghapus tabel lama dan membuat tabel baru...")
+            with engine.connect() as con:
+                 # Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
+                create_table_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                        trade_date DATE NOT NULL,
+                        Gold_USD FLOAT,
+                        IDR_USD FLOAT,
+                        PRIMARY KEY (trade_date)
+                    ) ENGINE=InnoDB;
+                """
+                con.execute(text(f"DROP TABLE IF EXISTS {TABLE_NAME}")) # Hapus yang lama
+                con.execute(text(create_table_sql))
+                con.commit()
+            
+            # 3. Mengunggah data menggunakan to_sql
+            status_bar.update(label=f"3. Mengunggah {total_rows} baris data Emas Stooq dan Kurs IDR ke DB...")
+            
+            df_temp = df.set_index('trade_date')
+            df_temp.to_sql(
+                name=TABLE_NAME, 
+                con=engine, 
+                if_exists='append', 
+                index=True,
+                chunksize=5000 
+            )
             
             status_bar.update(label=f"✅ Pengunggahan Data Makro Selesai! ({total_rows} baris)", state="complete", expanded=False)
             
@@ -186,6 +200,7 @@ def upload_simulated_data(df: pd.DataFrame, mode: str):
         finally:
             st.session_state.is_loading = False # Reset loading state
 
+
 # Fungsi untuk menghapus tabel
 def delete_table():
     try:
@@ -201,7 +216,7 @@ def delete_table():
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Data Fetcher & Aggregator
+# Data Fetcher & Aggregator (Sama seperti sebelumnya)
 # ────────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=600)
@@ -255,6 +270,7 @@ def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     
     return aggregated_df
 
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Streamlit Interface
 # ────────────────────────────────────────────────────────────────────────────────
@@ -263,24 +279,16 @@ def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
 if not _table_exists(TABLE_NAME):
     st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
     
-    with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Simulasi)") as exp:
-        st.info("Fitur ini akan membuat tabel `macro_data` dengan *Primary Key* dan mengisi data historis Emas dan Rupiah (simulasi dari **1970**) untuk keperluan demo.")
+    with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Setup Awal)") as exp:
+        st.info("Fitur ini akan mengambil data Emas dari Stooq, menggabungkannya dengan Kurs Rupiah simulasi, dan membuat tabel Anda.")
         
-        today = datetime.now().date()
-        # Mengubah tanggal mulai simulasi ke 1 Januari 1970
-        sim_start = datetime(1970, 1, 1).date()
-        
-        col_btn1, col_btn2 = st.columns(2)
-        
-        with col_btn1:
-            if st.button("Buat & Isi Data Makro Simulasi", disabled=st.session_state.is_loading):
-                st.session_state.is_loading = True
-                sim_df = generate_macro_data(sim_start, today)
-                upload_simulated_data(sim_df, 'create') 
-        
-        with col_btn2:
-            if st.button("🗑️ Hapus Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_initial_table"):
-                delete_table()
+        if st.button("📥 Ambil Emas Stooq & Buat Tabel", disabled=st.session_state.is_loading, type="primary"):
+            df_full = prepare_full_macro_data()
+            if not df_full.empty:
+                 upload_full_data_to_db(df_full) 
+            
+        if st.button("🗑️ Hapus Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_initial_table"):
+            delete_table()
             
     st.stop()
     
@@ -288,25 +296,25 @@ if not _table_exists(TABLE_NAME):
 else:
     # Tampilkan tombol untuk update data simulasi 1970 atau menghapus tabel
     with st.expander("🛠️ Opsi Perawatan Data Makro (Tabel sudah ada)") as exp:
-        st.info("Anda dapat menggunakan opsi ini untuk memperbarui simulasi ke rentang 1970 atau menghapus tabel secara total.")
+        st.info("Gunakan tombol ini untuk menghapus tabel atau memperbarui semua data (Emas dari Stooq).")
         
         col_upd, col_del = st.columns(2)
-        today = datetime.now().date()
-        sim_start = datetime(1970, 1, 1).date()
-
+        
         with col_upd:
-            if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970", disabled=st.session_state.is_loading):
-                st.session_state.is_loading = True
-                sim_df = generate_macro_data(sim_start, today)
-                upload_simulated_data(sim_df, 'create') # Menggunakan mode create untuk menimpa total
+            if st.button("🔄 Ambil Ulang Emas Stooq & Timpa Semua Data", key="btn_replace_sheets", disabled=st.session_state.is_loading):
+                df_to_upload = prepare_full_macro_data()
+                if not df_to_upload.empty:
+                    upload_full_data_to_db(df_to_upload) # Menggunakan fungsi upload_full_data_to_db untuk menimpa total
+                else:
+                    st.error("Gagal mengambil data dari Stooq. Tidak ada data yang ditimpa.")
 
         with col_del:
             if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
                 delete_table()
 
+
 # Tampilkan loading indicator global jika sedang proses
 if st.session_state.is_loading:
-    # Jangan tampilkan st.stop() di sini agar placeholder bisa di-render
     pass
 
 
@@ -314,6 +322,7 @@ if st.session_state.is_loading:
 with st.sidebar:
     st.header("🔄 Update Data Harian")
     with st.form("macro_update_form", clear_on_submit=True):
+        st.caption("Emas akan di-simulasi di sini karena Stooq tidak menyediakan update real-time yang mudah.")
         update_date = st.date_input("Tanggal Data", value=datetime.now().date(), max_value=datetime.now().date(), disabled=st.session_state.is_loading)
         gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0, disabled=st.session_state.is_loading)
         idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0, disabled=st.session_state.is_loading)
@@ -329,9 +338,8 @@ with st.sidebar:
                     'IDR_USD': idr_rate
                 }])
                 
-                # Gunakan fungsi upload_simulated_data dengan mode 'append'
-                upload_simulated_data(new_data, 'append')
-                # Fungsi upload_simulated_data akan otomatis melakukan st.rerun()
+                # Gunakan fungsi upload_single_data_to_db untuk update harian
+                upload_single_data_to_db(new_data)
             else:
                 st.error("Harga Emas dan Nilai Tukar harus diisi dengan nilai > 0.")
 
