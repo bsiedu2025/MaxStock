@@ -292,22 +292,22 @@ st.markdown("---")
 # Grafik Terpadu (Emas dan Rupiah)
 st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
 
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, 
-                    subplot_titles=("Harga Emas Dunia (USD/oz)", "Nilai Tukar Rupiah (IDR/USD)"))
+# Membangun subplot tanpa subplot titles, karena akan dihapus
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08)
 
 # Grafik Emas (Row 1)
 fig.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['Gold_USD'], mode='lines', name='Gold Price (USD)', line=dict(color='#FFD700')), 
+    go.Scatter(x=simulated_df.index, y=simulated_df['Gold_USD'], name='Gold (USD/oz)', line=dict(color='#FFD700', width=1.5)), 
     row=1, col=1
 )
-fig.update_yaxes(title_text="USD/oz", tickformat="$,.0f", row=1, col=1)
+fig.update_yaxes(title_text="Harga Emas (USD/oz)", tickformat="$,.0f", row=1, col=1)
 
 # Grafik Rupiah (Row 2)
 fig.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_USD'], mode='lines', name='IDR/USD Rate', line=dict(color='#008000')), 
+    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_USD'], name='IDR/USD Rate', line=dict(color='#008000', width=1.5)), 
     row=2, col=1
 )
-fig.update_yaxes(title_text="IDR/USD", tickprefix="Rp", tickformat=",0f", row=2, col=1)
+fig.update_yaxes(title_text="Nilai Tukar (IDR/USD)", tickprefix="Rp", tickformat=",0f", row=2, col=1)
 
 
 # Update Layout
@@ -316,10 +316,19 @@ fig.update_layout(
     title_text=f"Historis Harga Emas dan Nilai Tukar ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
     hovermode="x unified",
     margin=dict(l=40, r=40, t=60, b=40),
+    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1)
 )
 
 fig.update_xaxes(
     type='date',
+    # Range slider hanya ditampilkan di sumbu-x paling bawah (row=2)
+    rangeslider_visible=False,
+    row=1, col=1
+)
+
+fig.update_xaxes(
+    type='date',
+    # Range slider ditampilkan di sumbu-x paling bawah (row=2)
     rangeslider_visible=True, 
     rangeselector=dict(
         buttons=list([
@@ -328,8 +337,10 @@ fig.update_xaxes(
             dict(count=1, label="1T", step="year", stepmode="backward"),
             dict(step="all")
         ])
-    )
+    ),
+    row=2, col=1
 )
+
 
 st.plotly_chart(fig, use_container_width=True)
 
