@@ -141,6 +141,20 @@ def upload_simulated_data(df: pd.DataFrame):
     except Exception as e:
         st.error(f"Gagal mengunggah data ke database: {e}")
 
+# Fungsi untuk menghapus tabel
+def delete_table():
+    try:
+        with engine.connect() as con:
+            con.execute(text(f"DROP TABLE IF EXISTS {TABLE_NAME}"))
+            con.commit()
+        st.success(f"Tabel `{TABLE_NAME}` berhasil dihapus.")
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"Gagal menghapus tabel: {e}")
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Data Fetcher
 # ────────────────────────────────────────────────────────────────────────────────
@@ -198,6 +212,27 @@ if not _table_exists(TABLE_NAME):
             # st.rerun() sudah ada di dalam upload_simulated_data
     st.stop()
     
+# --- LOGIKA KETIKA TABEL SUDAH ADA ---
+else:
+    # Tampilkan tombol untuk update data simulasi 1970 atau menghapus tabel
+    with st.expander("🛠️ Opsi Perawatan Data Makro (Tabel sudah ada)") as exp:
+        st.info("Anda dapat menggunakan opsi ini untuk memperbarui simulasi ke rentang 1970 atau menghapus tabel secara total.")
+        
+        col_upd, col_del = st.columns(2)
+        today = datetime.now().date()
+        sim_start = datetime(1970, 1, 1).date()
+
+        with col_upd:
+            if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970"):
+                st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu.")
+                sim_df = generate_macro_data(sim_start, today)
+                upload_simulated_data(sim_df)
+
+        with col_del:
+            if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table"):
+                delete_table()
+
+
 # --- FORM UPDATE HARIAN DI SIDEBAR ---
 with st.sidebar:
     st.header("🔄 Update Data Harian")
