@@ -100,16 +100,40 @@ def generate_macro_data(start_date, end_date) -> pd.DataFrame:
     return df
 
 def upload_simulated_data(df: pd.DataFrame):
-    """Menyimpan DataFrame ke tabel macro_data."""
+    """Menyimpan DataFrame ke tabel macro_data dengan PRIMARY KEY."""
+    
     try:
-        df.to_sql(TABLE_NAME, con=engine, if_exists='replace', index=False)
+        with engine.connect() as con:
+            # 1. Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
+            create_table_sql = f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    trade_date DATE NOT NULL,
+                    Gold_USD FLOAT,
+                    IDR_USD FLOAT,
+                    PRIMARY KEY (trade_date)
+                ) ENGINE=InnoDB;
+            """
+            con.execute(text(create_table_sql))
+            con.commit()
+            
+            # 2. Gunakan REPLACE INTO untuk memasukkan/memperbarui data (Upsert)
+            data_to_insert = df[['trade_date', 'Gold_USD', 'IDR_USD']].to_dict(orient='records')
+            
+            # Buat query REPLACE INTO
+            replace_sql = f"""
+                REPLACE INTO {TABLE_NAME} (trade_date, Gold_USD, IDR_USD)
+                VALUES (:trade_date, :Gold_USD, :IDR_USD)
+            """
+            con.execute(text(replace_sql), data_to_insert)
+            con.commit()
+            
         st.success(f"Berhasil mengunggah {len(df)} baris data makro ke tabel `{TABLE_NAME}`.")
         
-        # PERBAIKAN PENTING: Membersihkan SEMUA cache
+        # Membersihkan SEMUA cache dan menjalankan ulang
         st.cache_data.clear()
         st.cache_resource.clear()
         
-        st.rerun() # Refresh untuk memuat dashboard utama
+        st.rerun() 
     except Exception as e:
         st.error(f"Gagal mengunggah data ke database: {e}")
 
@@ -156,7 +180,7 @@ if not _table_exists(TABLE_NAME):
     st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
     
     with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Simulasi)") as exp:
-        st.info("Fitur ini akan membuat dan mengisi tabel `macro_data` dengan data historis Emas dan Rupiah (simulasi 5 tahun) untuk keperluan demo.")
+        st.info("Fitur ini akan membuat tabel `macro_data` dengan *Primary Key* dan mengisi data historis Emas dan Rupiah (simulasi 5 tahun) untuk keperluan demo.")
         
         today = datetime.now().date()
         sim_start = today - timedelta(days=365 * 5)
@@ -253,7 +277,7 @@ fig.update_yaxes(title_text="IDR/USD", tickprefix="Rp", tickformat=",0f", row=2,
 # Update Layout
 fig.update_layout(
     height=700,
-    title_text=f"Historis Harga Emas dan Nilai Tukar ({selected_start_date} s/d {selected_end_date})",
+    title_text=f"Historis Harga Emas dan Nilai Tukar ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
     hovermode="x unified",
     margin=dict(l=40, r=40, t=60, b=40),
 )
