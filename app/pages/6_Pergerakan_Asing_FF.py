@@ -98,37 +98,46 @@ def get_latest_trade_date() -> datetime.date:
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
     Mengambil data Rupiah dari Google Sheets.
-    Asumsi: Sheets memiliki dua blok data (Emas, Rupiah). Rupiah adalah blok kedua.
+    Mencari kolom Date dan Price/Close kedua (Blok Rupiah).
     """
     if not sheet_id: return pd.DataFrame()
     
+    # Menggunakan gid=0 karena diasumsikan data ada di sheet pertama
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
     
     try:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # Baca CSV, header di row 1 (Python index 0)
+        # Baca CSV, baris 1 adalah header
         df_raw = pd.read_csv(StringIO(response.text), header=0)
+        # Hapus baris yang kosong atau berisi hanya NaN, ini umum di Sheets
+        df_raw.dropna(how='all', inplace=True) 
         df_raw.columns = [c.strip() for c in df_raw.columns]
         
-        # --- LOGIKA PENCARIAN BLOK DATA RUPEDIA (Blok Kedua) ---
-        
-        # Cari kolom Date dan Price
+        # 1. Identifikasi Kolom yang Relevan (Date dan Price/Close)
         date_cols = [c for c in df_raw.columns if 'Date' in c or 'date' in c]
-        price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c]
+        # GOOGLEFINANCE IDR biasanya menghasilkan kolom ber-label 'Price' (atau di Sheets 'Close' jika formula tidak di cell A1)
+        price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c or 'Close' in c]
         
         if len(date_cols) < 2 or len(price_cols) < 2:
-            st.error("Sheets harus memiliki minimal 2 kolom 'Date' dan 2 kolom 'Price' (untuk Emas dan Rupiah).")
+            st.error("Sheets harus memiliki minimal 2 kolom 'Date' dan 2 kolom 'Price/Close' (untuk Emas dan Rupiah).")
             return pd.DataFrame()
 
-        # Asumsi: Blok Rupiah menggunakan kolom Date dan Price kedua
-        df_idr = df_raw[[date_cols[1], price_cols[1]]].copy()
+        # 2. Ambil Blok Rupiah: Kolom Date kedua dan Kolom Price/Close kedua
+        # Pastikan kolom Rupiah (yang kedua) diidentifikasi dengan benar
+        idr_date_col = date_cols[1]
+        idr_price_col = price_cols[1] # Ambil elemen kedua (indeks 1)
+        
+        df_idr = df_raw[[idr_date_col, idr_price_col]].copy()
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
-        # Konversi dan bersihkan
+        # 3. Pembersihan Data
+        df_idr.replace('', np.nan, inplace=True)
+        
         df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date_raw'], errors='coerce')
-        # Hapus prefix teks yang mungkin ada dari GOOGLEFINANCE (e.g., "IDR")
+        
+        # Hapus karakter non-angka dan konversi ke numerik
         df_idr['IDR_USD'] = df_idr['IDR_USD'].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
         df_idr['IDR_USD'] = pd.to_numeric(df_idr['IDR_USD'], errors='coerce')
         
@@ -137,6 +146,10 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_idr = df_idr[['trade_date', 'IDR_USD']]
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
         
+        # [Debugging Helper]
+        # st.success(f"Berhasil parsing IDR: {len(df_idr)} baris.")
+        # st.dataframe(df_idr.tail())
+
         return df_idr
         
     except Exception as e:
