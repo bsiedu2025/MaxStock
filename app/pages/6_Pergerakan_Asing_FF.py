@@ -84,10 +84,12 @@ def generate_macro_data(start_date, end_date) -> pd.DataFrame:
     np.random.seed(int(time.time())) 
     gold_base = 35  # Harga emas di tahun 1970an
     gold_price = [gold_base]
+    
+    # KENAISAN REVISI: Menggunakan pembagi 200 (sebelumnya 1000) untuk mencapai nilai ~2000 USD di tahun 2025
     for _ in range(1, len(dates)):
-        # Perubahan yang lebih besar untuk rentang waktu yang panjang
+        # Perubahan yang lebih besar untuk rentang waktu yang panjang (Drift 0.08, Vol 15)
         change = np.random.normal(0.08, 15)
-        gold_price.append(gold_price[-1] * (1 + change / 1000))
+        gold_price.append(gold_price[-1] * (1 + change / 200)) # Revisi pembagi dari 1000 ke 200
     df['Gold_USD'] = np.array(gold_price)
     
     # Rupiah (IDR/USD)
@@ -245,7 +247,7 @@ else:
 
         with col_upd:
             if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970"):
-                st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu.")
+                st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu. Harap tunggu hingga muncul pesan sukses.")
                 sim_df = generate_macro_data(sim_start, today)
                 upload_simulated_data(sim_df)
 
