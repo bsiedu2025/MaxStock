@@ -23,7 +23,7 @@ st.caption(
 )
 
 # Inisialisasi session state untuk loading
-if 'is_loading' not in st.session_session_state:
+if 'is_loading' not in st.session_state: # <--- Perbaikan di sini
     st.session_state.is_loading = False
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -143,6 +143,7 @@ def upload_simulated_data(df: pd.DataFrame, mode: str):
                     con.commit()
                 
                 status_bar.update(label=f"3. Mengunggah {total_rows} baris data (1970-sekarang)...")
+                
                 # Menggunakan to_sql (append) untuk mengisi data ke tabel yang baru dibuat
                 df_temp = df.set_index('trade_date') # to_sql akan menggunakan index sebagai kolom jika tidak ditentukan
                 df_temp.to_sql(
@@ -155,9 +156,6 @@ def upload_simulated_data(df: pd.DataFrame, mode: str):
                 
             elif mode == 'append':
                 status_bar.update(label=f"2. Mengunggah {total_rows} baris data harian...")
-                # to_sql dengan method 'append' akan menambahkan data baru. 
-                # Karena kita sudah set PRIMARY KEY, data lama (jika tanggal sama) harus di-handle dengan REPLACE.
-                # Sayangnya, pandas to_sql tidak mendukung REPLACE INTO. Kita gunakan cara SQL:
                 
                 with engine.connect() as con:
                     # Hapus data yang ada (jika tanggal sama) dan insert data baru
