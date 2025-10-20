@@ -75,23 +75,27 @@ TABLE_NAME = "macro_data"
 
 def generate_macro_data(start_date, end_date) -> pd.DataFrame:
     """Menghasilkan DataFrame simulasi untuk harga emas dan kurs USD/IDR."""
+    # Menghasilkan tanggal hanya di hari kerja
     dates = pd.date_range(start=start_date, end=end_date, freq='B')
     df = pd.DataFrame(index=dates)
     
     # Emas (Gold)
-    np.random.seed(42)
-    gold_base = 1800
+    # Gunakan seed yang berbeda dari sebelumnya agar data terlihat baru jika di-update
+    np.random.seed(int(time.time())) 
+    gold_base = 35  # Harga emas di tahun 1970an
     gold_price = [gold_base]
     for _ in range(1, len(dates)):
-        change = np.random.normal(0.5, 8)
+        # Perubahan yang lebih besar untuk rentang waktu yang panjang
+        change = np.random.normal(0.08, 15)
         gold_price.append(gold_price[-1] * (1 + change / 1000))
     df['Gold_USD'] = np.array(gold_price)
     
     # Rupiah (IDR/USD)
-    idr_base = 15000
+    idr_base = 380 # Kurs Rupiah di tahun 1970an
     idr_rate = [idr_base]
     for _ in range(1, len(dates)):
-        change = np.random.normal(0.01, 3)
+        # Perubahan yang lebih kecil untuk kurs
+        change = np.random.normal(0.05, 5)
         idr_rate.append(idr_rate[-1] * (1 + change / 10000))
     df['IDR_USD'] = np.array(idr_rate)
     
@@ -180,12 +184,15 @@ if not _table_exists(TABLE_NAME):
     st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
     
     with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Simulasi)") as exp:
-        st.info("Fitur ini akan membuat tabel `macro_data` dengan *Primary Key* dan mengisi data historis Emas dan Rupiah (simulasi 5 tahun) untuk keperluan demo.")
+        st.info("Fitur ini akan membuat tabel `macro_data` dengan *Primary Key* dan mengisi data historis Emas dan Rupiah (simulasi dari **1970**) untuk keperluan demo.")
         
         today = datetime.now().date()
-        sim_start = today - timedelta(days=365 * 5)
+        # Mengubah tanggal mulai simulasi ke 1 Januari 1970
+        sim_start = datetime(1970, 1, 1).date()
         
         if st.button("Buat & Isi Data Makro Simulasi"):
+            # PERINGATAN: Proses ini mungkin memakan waktu lebih lama karena data > 50 tahun
+            st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu.")
             sim_df = generate_macro_data(sim_start, today)
             upload_simulated_data(sim_df)
             # st.rerun() sudah ada di dalam upload_simulated_data
