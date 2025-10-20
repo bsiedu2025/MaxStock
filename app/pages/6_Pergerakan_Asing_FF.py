@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 import time
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah")
 st.caption(
     "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
     "yang tersimpan di tabel `macro_data` database Anda."
