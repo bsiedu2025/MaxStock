@@ -156,12 +156,12 @@ def delete_table():
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Data Fetcher
+# Data Fetcher & Aggregator
 # ────────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=600)
 def fetch_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
-    """Mengambil data makro dari tabel MariaDB."""
+    """Mengambil data makro harian dari tabel MariaDB."""
     if not _table_exists(TABLE_NAME):
         return pd.DataFrame()
     
@@ -180,14 +180,35 @@ def fetch_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
         df['trade_date'] = pd.to_datetime(df['trade_date'])
         df = df.set_index('trade_date')
         
-        # Hitung perubahan
-        df['Gold_Change_Pct'] = df['Gold_USD'].pct_change() * 100
-        df['IDR_Change_Pct'] = df['IDR_USD'].pct_change() * 100
-        return df.dropna()
+        return df
 
     except Exception as e:
         st.error(f"Gagal mengambil data dari `{TABLE_NAME}`: {e}")
         return pd.DataFrame()
+
+def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Mengagregasi data harian ke frekuensi Mingguan, Bulanan, atau Tahunan."""
+    if freq == 'Harian':
+        return df
+    
+    # Menentukan resampling code (W: Weekly, M: Monthly, Y: Yearly)
+    if freq == 'Mingguan':
+        rule = 'W'
+    elif freq == 'Bulanan':
+        rule = 'M'
+    elif freq == 'Tahunan':
+        rule = 'Y'
+    else:
+        return df # Fallback
+    
+    # Resample: ambil data penutupan terakhir (end of period)
+    aggregated_df = df.resample(rule).last().dropna()
+    
+    # Hitung perubahan
+    aggregated_df['Gold_Change_Pct'] = aggregated_df['Gold_USD'].pct_change() * 100
+    aggregated_df['IDR_Change_Pct'] = aggregated_df['IDR_USD'].pct_change() * 100
+    
+    return aggregated_df
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Streamlit Interface
@@ -262,38 +283,64 @@ with st.sidebar:
 # Filter Sidebar (Tersedia setelah tabel ada)
 st.sidebar.header("Filter Periode Makro")
 end_date = datetime.now().date()
+
+# Cek tanggal terlama dari data di DB untuk min_value
+try:
+    with engine.connect() as con:
+        min_date_db = pd.read_sql(text(f"SELECT MIN(trade_date) FROM {TABLE_NAME}"), con).iloc[0, 0]
+        if min_date_db:
+             min_date_db = min_date_db
+        else:
+             min_date_db = datetime(2010, 1, 1).date()
+except Exception:
+    min_date_db = datetime(2010, 1, 1).date()
+
+
 start_date_default = end_date - timedelta(days=365 * 3) # Default 3 tahun
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, max_value=end_date, key="filter_start")
-selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, key="filter_end")
+selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, min_value=min_date_db, max_value=end_date, key="filter_start")
+selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, max_value=end_date, key="filter_end")
 
-# Fetch data dari DB
-simulated_df = fetch_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+st.sidebar.markdown("---")
+# Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
+aggregation_freq = st.sidebar.selectbox(
+    "Agregasi Data",
+    ['Harian', 'Mingguan', 'Bulanan', 'Tahunan'],
+    index=0
+)
 
-if simulated_df.empty:
+# Fetch data harian dari DB
+raw_df = fetch_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+
+if raw_df.empty:
     st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di tabel `{TABLE_NAME}`.")
     st.stop()
     
-# Data terakhir (Pastikan indeks ada)
+# Agregasi Data
+simulated_df = aggregate_data(raw_df, aggregation_freq)
+
+
+# Data terakhir (Pastikan indeks ada dan hitung perubahan untuk metrik)
 if len(simulated_df) >= 2:
     latest_gold = simulated_df['Gold_USD'].iloc[-1]
     latest_idr = simulated_df['IDR_USD'].iloc[-1]
     prev_gold = simulated_df['Gold_USD'].iloc[-2]
     prev_idr = simulated_df['IDR_USD'].iloc[-2]
+
+    # Hitung perubahan (diperlukan karena aggregate_data tidak mengembalikan Gold_Change_Pct secara default untuk Harian)
+    change_gold = latest_gold - prev_gold
+    change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
+    change_idr = latest_idr - prev_idr
+    change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
+
 elif len(simulated_df) == 1:
     latest_gold = simulated_df['Gold_USD'].iloc[-1]
     latest_idr = simulated_df['IDR_USD'].iloc[-1]
-    prev_gold = latest_gold # Sama jika hanya ada 1 hari data
-    prev_idr = latest_idr
+    change_gold = 0; change_gold_pct = 0
+    change_idr = 0; change_idr_pct = 0
 else:
-    st.warning("Data tidak cukup untuk menghitung perubahan harian.")
+    st.warning("Data tidak cukup untuk menghitung perubahan.")
     st.stop()
 
-
-# Perubahan
-change_gold = latest_gold - prev_gold
-change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
-change_idr = latest_idr - prev_idr
-change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Ringkasan Metrik
@@ -355,7 +402,7 @@ fig.update_yaxes(title_text="Nilai Tukar (IDR/USD)", tickprefix="Rp", tickformat
 # Update Layout
 fig.update_layout(
     height=700,
-    title_text=f"Historis Harga Emas dan Nilai Tukar ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
+    title_text=f"Historis Harga Emas dan Nilai Tukar Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
     hovermode="x unified",
     margin=dict(l=40, r=40, t=60, b=40),
     legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1)
@@ -387,19 +434,34 @@ fig.update_xaxes(
 st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---") 
-st.subheader("Analisis Pergerakan Harian (Persentase)")
+st.subheader(f"Analisis Pergerakan {aggregation_freq} (Persentase)")
+
+# Hitung ulang perubahan persentase untuk grafik di bawah (selain mode Harian)
+if aggregation_freq != 'Harian':
+    df_chart = simulated_df.copy()
+    df_chart['Gold_Change_Pct'] = df_chart['Gold_USD'].pct_change() * 100
+    df_chart['IDR_Change_Pct'] = df_chart['IDR_USD'].pct_change() * 100
+    df_chart = df_chart.dropna()
+else:
+    # Untuk harian, kita menggunakan raw_df untuk perubahan % (setelah fetch, sebelum agregasi)
+    # Karena raw_df tidak memiliki Gold_Change_Pct, kita hitung di sini
+    df_chart = raw_df.copy()
+    df_chart['Gold_Change_Pct'] = df_chart['Gold_USD'].pct_change() * 100
+    df_chart['IDR_Change_Pct'] = df_chart['IDR_USD'].pct_change() * 100
+    df_chart = df_chart.dropna()
+
 
 fig2 = make_subplots(specs=[[{"secondary_y": True}]])
 
-# Perubahan Emas Harian
+# Perubahan Emas Harian/Agregasi
 fig2.add_trace(
-    go.Bar(x=simulated_df.index, y=simulated_df['Gold_Change_Pct'], name='Emas (% Harian)', opacity=0.8, marker_color=np.where(simulated_df['Gold_Change_Pct'] > 0, 'green', 'red')),
+    go.Bar(x=df_chart.index, y=df_chart['Gold_Change_Pct'], name=f'Emas (% per {aggregation_freq})', opacity=0.8, marker_color=np.where(df_chart['Gold_Change_Pct'] > 0, 'green', 'red')),
     secondary_y=False
 )
 
-# Perubahan Rupiah Harian
+# Perubahan Rupiah Harian/Agregasi
 fig2.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_Change_Pct'], name='Rupiah (% Harian)', mode='lines', line=dict(color='orange', width=2)), 
+    go.Scatter(x=df_chart.index, y=df_chart['IDR_Change_Pct'], name=f'Rupiah (% per {aggregation_freq})', mode='lines', line=dict(color='orange', width=2)), 
     secondary_y=True
 )
 
@@ -407,7 +469,7 @@ fig2.update_yaxes(title_text="Emas (% Perubahan)", secondary_y=False)
 fig2.update_yaxes(title_text="Rupiah (% Perubahan)", secondary_y=True)
 
 fig2.update_layout(
-    title_text="Perbandingan Perubahan Harian Emas vs Rupiah",
+    title_text=f"Perbandingan Perubahan {aggregation_freq} Emas vs Rupiah",
     height=500,
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
