@@ -19,7 +19,7 @@ from io import StringIO # Diperlukan untuk parsing Sheets CSV
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
 st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
-    "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel `macro_data` database Anda."
+    "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
 
 # Inisialisasi session state
@@ -29,7 +29,7 @@ if 'is_loading' not in st.session_state:
 # State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
 if 'sheet_id_input' not in st.session_state:
     # [UPDATE] Mengganti default ID Sheets sesuai permintaan user
-    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
+    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl99FlaHWwjMY" 
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
@@ -70,24 +70,28 @@ def _table_exists(name: str) -> bool:
                 FROM information_schema.tables
                 WHERE table_schema = DATABASE() AND table_name = :t
             """)
-            return bool(con.execute(q).scalar())
+            return bool(con.execute(q, {"t": name}).scalar())
     except Exception:
         return False
 
 # Inisialisasi Engine
 engine = _build_engine() 
-TABLE_NAME = "macro_data"
+GOLD_TABLE = "gold_data"
+IDR_TABLE = "idr_data"
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Data Fetchers (Emas Stooq & Rupiah Sheets)
 # ────────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
-def get_latest_trade_date() -> datetime.date:
-    """Mencari tanggal terakhir data di database."""
+def get_latest_trade_date(table_name: str) -> datetime.date:
+    """Mencari tanggal terakhir data di database untuk tabel tertentu."""
+    if not _table_exists(table_name):
+         return datetime(1990, 1, 1).date()
+
     try:
         with engine.connect() as con:
-            q = text(f"SELECT MAX(trade_date) FROM {TABLE_NAME}")
+            q = text(f"SELECT MAX(trade_date) FROM {table_name}")
             max_date = con.execute(q).scalar()
             return max_date if max_date else datetime(1990, 1, 1).date()
     except Exception:
@@ -114,12 +118,14 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         # Cari baris yang mengandung 'Date' (Header yang sebenarnya dari GOOGLEFINANCE)
         data_start_row = 0
         for i, line in enumerate(raw_csv_content):
-            if 'Date' in line and 'Price' in line:
+            # Header Rupiah adalah blok data kedua, kita cari baris yang punya 3 koma atau lebih (4 kolom)
+            # dan mengandung kata 'Date' dan 'Close' (atau Price)
+            if line.count(',') >= 3 and ('Date' in line or 'Price' in line or 'Close' in line):
                  data_start_row = i # Baris ini dan berikutnya adalah data
                  break
 
         if data_start_row == 0:
-            st.error("Gagal menemukan header data di Sheets (mencari baris yang mengandung 'Date' dan 'Price').")
+            st.error("Gagal menemukan header data di Sheets. Pastikan format kolom C & D benar.")
             return pd.DataFrame()
 
         # Baca CSV, gunakan header yang benar (yang ada di baris data_start_row)
@@ -162,10 +168,6 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_idr = df_idr[['trade_date', 'IDR_USD']]
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
         
-        # [Debugging Helper]
-        # st.success(f"Berhasil parsing IDR menggunakan header yang ditemukan: {len(df_idr)} baris.")
-        # st.dataframe(df_idr.tail())
-
         return df_idr
         
     except Exception as e:
@@ -193,84 +195,94 @@ def fetch_gold_from_stooq() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def prepare_full_macro_data(sheet_id: str):
-    """Menggabungkan data Emas Stooq dan data Kurs IDR Sheets."""
-    df_gold = fetch_gold_from_stooq()
-    df_idr = fetch_idr_from_sheets(sheet_id)
-    
-    if df_gold.empty or df_idr.empty:
-        st.error("Data Emas atau Rupiah tidak lengkap. Tidak bisa melanjutkan.")
-        return pd.DataFrame()
-        
-    # Merge kedua data berdasarkan trade_date (hanya ambil tanggal yang ada di kedua sisi)
-    df_merged = pd.merge(df_gold, df_idr, on='trade_date', how='inner')
-    
-    return df_merged[['trade_date', 'Gold_USD', 'IDR_USD']].sort_values('trade_date').reset_index(drop=True)
-
-
 # ────────────────────────────────────────────────────────────────────────────────
-# Uploader/Seeder Data
+# Uploader/Seeder Data (Menangani Dua Tabel)
 # ────────────────────────────────────────────────────────────────────────────────
 
-def upload_full_data_to_db(df: pd.DataFrame):
-    """Menyimpan data penuh ke database."""
-    st.session_state.is_loading = True
-    total_rows = len(df)
+def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: str):
+    """Fungsi pembantu untuk membuat tabel dan mengunggah data."""
+    total_rows = len(df_data)
     
-    with st.status("Memproses data makro...", expanded=True) as status_bar:
+    with st.status(f"Memproses {table_name}...", expanded=True) as status_bar:
         try:
-            status_bar.update(label="1. Menyiapkan koneksi database...", state="running")
+            status_bar.update(label=f"1. Menyiapkan koneksi database untuk {table_name}...", state="running")
             engine = _build_engine()
             
             # 2. Menghapus tabel lama dan membuat tabel baru (Mode CREATE)
-            status_bar.update(label="2. Menghapus tabel lama dan membuat tabel baru...")
+            status_bar.update(label=f"2. Menghapus tabel lama dan membuat tabel {table_name}...")
             with engine.connect() as con:
                  # Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
                 create_table_sql = f"""
-                    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    CREATE TABLE IF NOT EXISTS {table_name} (
                         trade_date DATE NOT NULL,
-                        Gold_USD FLOAT,
-                        IDR_USD FLOAT,
+                        {value_col} FLOAT,
                         PRIMARY KEY (trade_date)
                     ) ENGINE=InnoDB;
                 """
-                con.execute(text(f"DROP TABLE IF EXISTS {TABLE_NAME}")) # Hapus yang lama
+                con.execute(text(f"DROP TABLE IF EXISTS {table_name}")) # Hapus yang lama
                 con.execute(text(create_table_sql))
                 con.commit()
             
             # 3. Mengunggah data menggunakan to_sql
-            status_bar.update(label=f"3. Mengunggah {total_rows} baris data Makro Riil ke DB...")
+            status_bar.update(label=f"3. Mengunggah {total_rows} baris ke {table_name}...", state="running")
             
-            df_temp = df.set_index('trade_date')
+            df_temp = df_data.set_index('trade_date')
             df_temp.to_sql(
-                name=TABLE_NAME, 
+                name=table_name, 
                 con=engine, 
                 if_exists='append', 
                 index=True,
                 chunksize=5000 
             )
             
-            status_bar.update(label=f"✅ Pengunggahan Data Makro Riil Selesai! ({total_rows} baris)", state="complete", expanded=False)
-            
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            st.success(f"Berhasil mengunggah {total_rows} baris data makro riil ke tabel `{TABLE_NAME}`.")
+            status_bar.update(label=f"✅ Pengunggahan {table_name} Selesai! ({total_rows} baris)", state="complete", expanded=False)
+            return True
 
-            st.rerun() 
-            
         except Exception as e:
-            status_bar.update(label="❌ Gagal mengunggah data!", state="error", expanded=True)
-            st.error(f"Terjadi kesalahan database: {e}")
-        finally:
-            st.session_state.is_loading = False # Reset loading state
+            status_bar.update(label=f"❌ Gagal mengunggah data {table_name}!", state="error", expanded=True)
+            st.error(f"Terjadi kesalahan database pada {table_name}: {e}")
+            return False
+
+def upload_full_data_to_db_two_tables(sheet_id: str):
+    """Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah."""
+    st.session_state.is_loading = True
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    
+    # 1. Fetch Data
+    df_gold = fetch_gold_from_stooq()
+    df_idr = fetch_idr_from_sheets(sheet_id)
+    
+    if df_gold.empty or df_idr.empty:
+        st.error("Data Emas atau Rupiah tidak lengkap. Tidak bisa melanjutkan.")
+        st.session_state.is_loading = False
+        return
+        
+    # 2. Upload Emas
+    df_gold_upload = df_gold[['trade_date', 'Gold_USD']]
+    success_gold = _create_and_upload_table(df_gold_upload, GOLD_TABLE, 'Gold_USD')
+    
+    # 3. Upload Rupiah
+    df_idr_upload = df_idr[['trade_date', 'IDR_USD']]
+    success_idr = _create_and_upload_table(df_idr_upload, IDR_TABLE, 'IDR_USD')
+
+    st.session_state.is_loading = False
+    
+    if success_gold and success_idr:
+        st.success("🎉 Kedua tabel (Emas & Rupiah) berhasil dibuat dan diisi!")
+        st.rerun()
+    else:
+        st.error("⚠️ Proses selesai dengan kegagalan pada satu atau kedua tabel.")
 
 
-def delete_table():
+def delete_all_tables():
+    """Menghapus kedua tabel."""
     try:
         with engine.connect() as con:
-            con.execute(text(f"DROP TABLE IF EXISTS {TABLE_NAME}"))
+            con.execute(text(f"DROP TABLE IF EXISTS {GOLD_TABLE}"))
+            con.execute(text(f"DROP TABLE IF EXISTS {IDR_TABLE}"))
             con.commit()
-        st.success(f"Tabel `{TABLE_NAME}` berhasil dihapus.")
+        st.success(f"Kedua tabel (`{GOLD_TABLE}` dan `{IDR_TABLE}`) berhasil dihapus.")
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
@@ -278,76 +290,97 @@ def delete_table():
         st.error(f"Gagal menghapus tabel: {e}")
 
 
-def upload_gap_data(df_gap: pd.DataFrame):
+def upload_gap_data_two_tables(sheet_id: str):
+    """Mengisi gap data Emas dan Rupiah."""
     st.session_state.is_loading = True
-    total_rows = len(df_gap)
     
-    with st.status("Memproses data Gap Filler...", expanded=True) as status_bar:
-        try:
-            status_bar.update(label="1. Menyiapkan koneksi database...", state="running")
-            engine = _build_engine()
-            
-            status_bar.update(label=f"2. Mengunggah {total_rows} baris data gap ke DB...")
-            
-            df_temp = df_gap.set_index('trade_date')
-            df_temp.to_sql(
-                name=TABLE_NAME, 
-                con=engine, 
-                if_exists='append', 
-                index=True,
-                chunksize=500 
-            )
-            
-            status_bar.update(label=f"✅ Pengunggahan Data Gap Selesai! ({total_rows} baris)", state="complete", expanded=False)
-            
-            st.cache_data.clear()
-            st.success(f"Berhasil mengisi {total_rows} hari gap data makro.")
+    # 1. Tentukan Gap Dates
+    last_date_gold = get_latest_trade_date(GOLD_TABLE)
+    last_date_idr = get_latest_trade_date(IDR_TABLE)
+    
+    # Ambil data sumber lengkap
+    df_full_gold = fetch_gold_from_stooq()
+    df_full_idr = fetch_idr_from_sheets(sheet_id)
+    
+    if df_full_gold.empty or df_full_idr.empty:
+        st.error("Gagal mengambil data Emas atau Rupiah dari sumber.")
+        st.session_state.is_loading = False
+        return
 
-            st.rerun() 
-            
-        except Exception as e:
-            status_bar.update(label="❌ Gagal mengunggah data gap!", state="error", expanded=True)
-            st.error(f"Terjadi kesalahan database saat mengisi gap: {e}")
-        finally:
-            st.session_state.is_loading = False # Reset loading state
+    # 2. Gap Emas
+    df_gold_gap = df_full_gold[df_full_gold['trade_date'] > last_date_gold].copy()
+    
+    # 3. Gap Rupiah
+    df_idr_gap = df_full_idr[df_full_idr['trade_date'] > last_date_idr].copy()
+    
+    
+    if df_gold_gap.empty and df_idr_gap.empty:
+        st.info("Tidak ada data baru yang ditemukan dari sumber. Data Anda sudah terbaru.")
+        st.session_state.is_loading = False
+        return
+
+    # Upload Emas Gap
+    if not df_gold_gap.empty:
+        total_rows = len(df_gold_gap)
+        with st.status(f"Mengisi gap {GOLD_TABLE} ({total_rows} baris)...", expanded=True) as status_bar:
+            df_gold_gap.set_index('trade_date').to_sql(name=GOLD_TABLE, con=engine, if_exists='append', index=True, chunksize=500)
+            status_bar.update(label=f"✅ Gap {GOLD_TABLE} selesai.", state="complete", expanded=False)
+
+    # Upload Rupiah Gap
+    if not df_idr_gap.empty:
+        total_rows = len(df_idr_gap)
+        with st.status(f"Mengisi gap {IDR_TABLE} ({total_rows} baris)...", expanded=True) as status_bar:
+            df_idr_gap.set_index('trade_date').to_sql(name=IDR_TABLE, con=engine, if_exists='append', index=True, chunksize=500)
+            status_bar.update(label=f"✅ Gap {IDR_TABLE} selesai.", state="complete", expanded=False)
+
+    st.cache_data.clear()
+    st.success("🎉 Kedua tabel berhasil di-update dengan data terbaru!")
+    st.session_state.is_loading = False
+    st.rerun() 
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Data Fetcher & Aggregator
+# Data Fetcher & Aggregator (Satu Fungsi Utama)
 # ────────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=600)
-def fetch_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
-    """Mengambil data makro harian dari tabel MariaDB."""
-    if not _table_exists(TABLE_NAME):
+def fetch_and_merge_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
+    """Mengambil data Emas dan Rupiah, lalu menggabungkannya."""
+    if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
         return pd.DataFrame()
     
-    sql = f"""
-        SELECT trade_date, Gold_USD, IDR_USD
-        FROM {TABLE_NAME}
-        WHERE trade_date BETWEEN :start_date AND :end_date
-        ORDER BY trade_date
-    """
+    sql_gold = f"SELECT trade_date, Gold_USD FROM {GOLD_TABLE} WHERE trade_date BETWEEN :start_date AND :end_date"
+    sql_idr = f"SELECT trade_date, IDR_USD FROM {IDR_TABLE} WHERE trade_date BETWEEN :start_date AND :end_date"
     params = {"start_date": start_date, "end_date": end_date}
     
     try:
         with engine.connect() as con:
-            df = pd.read_sql(text(sql), con, params=params)
+            df_gold = pd.read_sql(text(sql_gold), con, params=params)
+            df_idr = pd.read_sql(text(sql_idr), con, params=params)
         
-        df['trade_date'] = pd.to_datetime(df['trade_date'])
-        df = df.set_index('trade_date')
+        # Merge data
+        df_gold['trade_date'] = pd.to_datetime(df_gold['trade_date'])
+        df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date'])
         
-        return df
+        df_merged = pd.merge(df_gold, df_idr, on='trade_date', how='outer') # Outer join agar tidak ada data hilang
+        df_merged = df_merged.set_index('trade_date').sort_index()
+        
+        # Interpolasi untuk mengisi hari yang hilang (Opsional, tapi membuat grafik mulus)
+        df_merged = df_merged.ffill() 
+        
+        return df_merged
 
     except Exception as e:
-        st.error(f"Gagal mengambil data dari `{TABLE_NAME}`: {e}")
+        st.error(f"Gagal mengambil atau menggabungkan data makro: {e}")
         return pd.DataFrame()
+
 
 def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     """Mengagregasi data harian ke frekuensi Mingguan, Bulanan, atau Tahunan."""
     if freq == 'Harian':
         return df
     
+    # ... (Logika agregasi tidak berubah)
     if freq == 'Mingguan':
         rule = 'W'
     elif freq == 'Bulanan':
@@ -378,63 +411,44 @@ st.session_state.sheet_id_input = st.sidebar.text_input(
 )
 
 
-# Cek keberadaan tabel dan tampilkan uploader jika belum ada
-if not _table_exists(TABLE_NAME):
-    st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
+# Cek keberadaan tabel Emas dan Rupiah
+if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
+    st.warning(f"Tabel makro belum lengkap. Butuh tabel `{GOLD_TABLE}` dan `{IDR_TABLE}`.")
     
-    with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Setup Awal)") as exp:
+    with st.expander("🛠️ Klik di sini untuk membuat 2 tabel makro (Setup Awal)") as exp:
         st.info("Pastikan Anda sudah mengatur **Google Sheet** (Share: Anyone with the link) dan mengisi **Spreadsheet ID** di sidebar.")
         
         if st.button("📥 Ambil Emas & Rupiah Riil & Buat Tabel", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, type="primary"):
-            df_full = prepare_full_macro_data(st.session_state.sheet_id_input) 
-            if not df_full.empty:
-                 upload_full_data_to_db(df_full) 
+            upload_full_data_to_db_two_tables(st.session_state.sheet_id_input)
             
-        if st.button("🗑️ Hapus Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_initial_table"):
-            delete_table()
+        if st.button("🗑️ Hapus SEMUA Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_all_initial_table"):
+            delete_all_tables()
             
     st.stop()
     
-# --- LOGIKA KETIKA TABEL SUDAH ADA ---
+# --- LOGIKA KETIKA KEDUA TABEL SUDAH ADA ---
 else:
     # --- FORM UPDATE HARIAN DI SIDEBAR (GAP FILLER) ---
     with st.sidebar:
         st.header("🔄 Isi Gap Data Otomatis")
         
-        last_date = get_latest_trade_date()
+        last_date_gold = get_latest_trade_date(GOLD_TABLE)
+        last_date_idr = get_latest_trade_date(IDR_TABLE)
+        
+        last_update_date = min(last_date_gold, last_date_idr)
         today = datetime.now().date()
         
-        if last_date >= today:
+        if last_update_date >= today:
             st.success("✅ Data Anda sudah terbaru hingga hari ini!")
         else:
-            gap_start_date = last_date + timedelta(days=1)
-            st.warning(f"⚠️ Ditemukan gap data: {gap_start_date.strftime('%Y-%m-%d')} s/d {today.strftime('%Y-%m-%d')}")
+            st.info(f"Update terakhir: {last_update_date.strftime('%Y-%m-%d')}. Ada Gap.")
             
             if st.button("⚡ Lengkapi Gap Data (Stooq Emas & Sheets Kurs)", 
                          disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, 
                          type="primary"):
                 
-                # Ambil data emas Stooq secara penuh
-                df_full_gold = fetch_gold_from_stooq()
-                df_full_idr = fetch_idr_from_sheets(st.session_state.sheet_id_input)
-                
-                if df_full_gold.empty or df_full_idr.empty:
-                     st.error("Gagal mengambil data Emas atau Rupiah.")
-                     st.rerun() 
-                
-                # Filter data yang hanya masuk dalam gap
-                df_gold_gap = df_full_gold[df_full_gold['trade_date'] >= gap_start_date].copy()
-                df_idr_gap = df_full_idr[df_full_idr['trade_date'] >= gap_start_date].copy()
-                
-                if df_gold_gap.empty or df_idr_gap.empty:
-                     st.info(f"Tidak ada data baru yang ditemukan dari sumber sejak {gap_start_date.strftime('%Y-%m-%d')}.")
-                else:
-                    # Gabungkan gap data
-                    df_gap_merged = pd.merge(df_gold_gap, df_idr_gap, on='trade_date', how='inner')
-                    
-                    # Upload gap data
-                    upload_gap_data(df_gap_merged)
-    
+                upload_gap_data_two_tables(st.session_state.sheet_id_input)
+
     st.sidebar.markdown("---")
     
     # Tampilkan tombol untuk update data simulasi 1970 atau menghapus tabel
@@ -444,35 +458,28 @@ else:
         col_upd, col_del = st.columns(2)
         
         with col_upd:
-            if st.button("🔄 Ambil Ulang Emas & Rupiah Riil & Timpa Semua Data", key="btn_replace_sheets", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input):
-                df_to_upload = prepare_full_macro_data(st.session_state.sheet_id_input)
-                if not df_to_upload.empty:
-                    upload_full_data_to_db(df_to_upload) 
-                else:
-                    st.error("Gagal mengambil data dari sumber. Tidak ada data yang ditimpa.")
+            if st.button("🔄 Ambil Ulang & Timpa Kedua Tabel", key="btn_replace_sheets", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input):
+                upload_full_data_to_db_two_tables(st.session_state.sheet_id_input) 
 
         with col_del:
-            if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
-                delete_table()
+            if st.button("🗑️ Hapus SEMUA Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
+                delete_all_tables()
 
 # Tampilkan loading indicator global jika sedang proses
 if st.session_state.is_loading:
     pass
 
 # Filter Sidebar (Tersedia setelah tabel ada)
-if not _table_exists(TABLE_NAME): st.stop()
+if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)): st.stop()
 
 st.sidebar.header("Filter Periode Makro")
 end_date = datetime.now().date()
 
 # Cek tanggal terlama dari data di DB untuk min_value
 try:
-    with engine.connect() as con:
-        min_date_db = pd.read_sql(text(f"SELECT MIN(trade_date) FROM {TABLE_NAME}"), con).iloc[0, 0]
-        if min_date_db:
-             min_date_db = min_date_db
-        else:
-             min_date_db = datetime(1990, 1, 1).date()
+    min_date_gold = get_latest_trade_date(GOLD_TABLE)
+    min_date_idr = get_latest_trade_date(IDR_TABLE)
+    min_date_db = min(min_date_gold, min_date_idr)
 except Exception:
     min_date_db = datetime(1990, 1, 1).date()
 
@@ -490,10 +497,10 @@ aggregation_freq = st.sidebar.selectbox(
 )
 
 # Fetch data harian dari DB
-raw_df = fetch_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
 
 if raw_df.empty:
-    st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di tabel `{TABLE_NAME}`.")
+    st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di database.")
     st.stop()
     
 # Agregasi Data
