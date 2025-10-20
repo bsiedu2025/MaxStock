@@ -23,7 +23,7 @@ st.caption(
 )
 
 # Inisialisasi session state untuk loading
-if 'is_loading' not in st.session_state: # <--- Perbaikan di sini
+if 'is_loading' not in st.session_state: # <--- FIX: st.session_state (bukan st.session_session_state)
     st.session_state.is_loading = False
 
 # ────────────────────────────────────────────────────────────────────────────────
