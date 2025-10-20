@@ -108,22 +108,46 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # Baca CSV mentah tanpa header
-        df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=1) # Lewati 1 baris (header formula)
+        # Baca CSV mentah. Kita akan tentukan start row-nya nanti.
+        raw_csv_content = response.text.splitlines()
+        
+        # Cari baris yang mengandung 'Date' (Header yang sebenarnya dari GOOGLEFINANCE)
+        data_start_row = 0
+        for i, line in enumerate(raw_csv_content):
+            if 'Date' in line and 'Price' in line:
+                 data_start_row = i # Baris ini dan berikutnya adalah data
+                 break
+
+        if data_start_row == 0:
+            st.error("Gagal menemukan header data di Sheets (mencari baris yang mengandung 'Date' dan 'Price').")
+            return pd.DataFrame()
+
+        # Baca CSV, gunakan header yang benar (yang ada di baris data_start_row)
+        df_raw = pd.read_csv(StringIO("\n".join(raw_csv_content[data_start_row:])), header=0)
+        
+        # Membersihkan nama kolom dan menghapus baris kosong
+        df_raw.columns = [c.strip() for c in df_raw.columns]
         df_raw.dropna(how='all', inplace=True) 
         
-        # Kolom C (Index 2) adalah Date Rupiah, Kolom D (Index 3) adalah Price Rupiah
-        # Asumsi: Formula Emas di A1 (mengisi A, B); Formula Rupiah di C1 (mengisi C, D)
+        # 1. Identifikasi Kolom yang Relevan: Kita tahu data Rupiah adalah blok kedua
         
-        if df_raw.shape[1] < 4:
-            st.error("Sheets tidak memiliki 4 kolom yang diharapkan (Date/Price Emas & Date/Price Rupiah). Pastikan formula Rupiah ada di Kolom C.")
+        # Cari indeks Price/Close kedua (Blok Rupiah)
+        price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c or 'Close' in c]
+        if len(price_cols) < 2:
+            st.error(f"Ditemukan {len(price_cols)} kolom harga. Butuh 2 (Emas & Rupiah).")
             return pd.DataFrame()
-            
-        # Ambil Kolom C (Index 2) dan Kolom D (Index 3)
-        df_idr = df_raw.iloc[:, [2, 3]].copy()
+        
+        # Kolom Date (Kolom Price-1) dan Price kedua
+        idr_price_col_name = price_cols[1] # Nama kolom Price/Close kedua
+        
+        # Kolom Date Rupiah berada tepat sebelum kolom Price/Close Rupiah
+        idr_date_col_index = df_raw.columns.get_loc(idr_price_col_name) - 1 
+        idr_date_col_name = df_raw.columns[idr_date_col_index]
+
+        df_idr = df_raw[[idr_date_col_name, idr_price_col_name]].copy()
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
-        # Pembersihan Data
+        # 3. Pembersihan Data
         df_idr.replace('', np.nan, inplace=True)
         
         # Konversi Tanggal (Asumsi format mm/dd/yyyy atau yyyy-mm-dd)
@@ -139,7 +163,7 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
         
         # [Debugging Helper]
-        # st.success(f"Berhasil parsing IDR menggunakan raw C & D: {len(df_idr)} baris.")
+        # st.success(f"Berhasil parsing IDR menggunakan header yang ditemukan: {len(df_idr)} baris.")
         # st.dataframe(df_idr.tail())
 
         return df_idr
