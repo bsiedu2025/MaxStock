@@ -478,12 +478,21 @@ if len(simulated_df) >= 2:
     prev_gold = simulated_df['Gold_USD'].iloc[-2]
     prev_idr = simulated_df['IDR_USD'].iloc[-2]
 
-    # Hitung perubahan (diperlukan karena aggregate_data tidak mengembalikan Gold_Change_Pct secara default untuk Harian)
-    change_gold = latest_gold - prev_gold
-    change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
-    change_idr = latest_idr - prev_idr
-    change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
-
+    # --- [FIXED] Pengecekan NaN/None sebelum menghitung perubahan ---
+    # Cek Gold
+    if pd.isna(latest_gold) or pd.isna(prev_gold):
+        change_gold = 0; change_gold_pct = 0
+    else:
+        change_gold = latest_gold - prev_gold
+        change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
+    
+    # Cek IDR
+    if pd.isna(latest_idr) or pd.isna(prev_idr):
+        change_idr = 0; change_idr_pct = 0
+    else:
+        change_idr = latest_idr - prev_idr
+        change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
+        
 elif len(simulated_df) == 1:
     latest_gold = simulated_df['Gold_USD'].iloc[-1]
     latest_idr = simulated_df['IDR_USD'].iloc[-1]
