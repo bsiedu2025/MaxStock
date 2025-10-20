@@ -98,7 +98,7 @@ def get_latest_trade_date() -> datetime.date:
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
     Mengambil data Rupiah dari Google Sheets.
-    Mencari kolom Date dan Price/Close kedua (Blok Rupiah).
+    Mencari kolom Date dan Price/Close kedua (Blok Rupiah) secara adaptif.
     """
     if not sheet_id: return pd.DataFrame()
     
@@ -115,21 +115,33 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_raw.dropna(how='all', inplace=True) 
         df_raw.columns = [c.strip() for c in df_raw.columns]
         
-        # 1. Identifikasi Kolom yang Relevan (Date dan Price/Close)
+        # 1. Identifikasi Kolom yang Relevan
         date_cols = [c for c in df_raw.columns if 'Date' in c or 'date' in c]
-        # GOOGLEFINANCE IDR biasanya menghasilkan kolom ber-label 'Price' (atau di Sheets 'Close' jika formula tidak di cell A1)
         price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c or 'Close' in c]
         
         if len(date_cols) < 2 or len(price_cols) < 2:
             st.error("Sheets harus memiliki minimal 2 kolom 'Date' dan 2 kolom 'Price/Close' (untuk Emas dan Rupiah).")
+            # st.error(f"Kolom ditemukan: {df_raw.columns.tolist()}") # Debugging
             return pd.DataFrame()
 
         # 2. Ambil Blok Rupiah: Kolom Date kedua dan Kolom Price/Close kedua
-        # Pastikan kolom Rupiah (yang kedua) diidentifikasi dengan benar
-        idr_date_col = date_cols[1]
-        idr_price_col = price_cols[1] # Ambil elemen kedua (indeks 1)
+        # Mencari kolom Date yang tidak berpasangan dengan Price pertama (Asumsi Price pertama adalah Emas)
         
-        df_idr = df_raw[[idr_date_col, idr_price_col]].copy()
+        # Cari indeks Price/Close kedua
+        price_idx = [i for i, c in enumerate(df_raw.columns) if 'Price' in c or 'price' in c or 'Close' in c]
+        if len(price_idx) < 2: return pd.DataFrame() 
+        
+        idr_price_col_name = df_raw.columns[price_idx[1]] # Nama kolom Price/Close kedua
+        
+        # Kolom Date Rupiah berada tepat sebelum kolom Price/Close Rupiah di CSV mentah
+        idr_date_col_index = price_idx[1] - 1 
+        if idr_date_col_index < 0 or not ('Date' in df_raw.columns[idr_date_col_index] or 'date' in df_raw.columns[idr_date_col_index]):
+             # Fallback: gunakan kolom Date kedua dari daftar
+             idr_date_col_name = date_cols[1] 
+        else:
+             idr_date_col_name = df_raw.columns[idr_date_col_index]
+
+        df_idr = df_raw[[idr_date_col_name, idr_price_col_name]].copy()
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
         # 3. Pembersihan Data
