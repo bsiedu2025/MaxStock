@@ -11,10 +11,10 @@ import json
 import random
 
 # TINGKATKAN JUMLAH PARAMETER IMPOR KARENA FUNGSI LAMA TIDAK DIPAKAI
-# Impor dasar Streamlit, Pandas, Plotly (tidak butuh koneksi DB di sini)
 # Import yang dibutuhkan untuk simulasi/fetch data
 import time
-from tools import google_search
+# PERBAIKAN: Ganti 'from tools import google_search' menjadi 'import google_search'
+import google_search 
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
 st.title("💰 Historis Emas & Nilai Tukar Rupiah")
@@ -47,6 +47,7 @@ def fetch_historical_data(query: str, search_query: str) -> str:
         return st.session_state.history_cache[query]
 
     # Google Search Tool dipanggil di sini
+    # PERBAIKAN: Panggil google_search.search() secara langsung
     results = google_search.search(queries=[search_query])
     
     # Karena kita tidak dapat memprediksi format output search,
@@ -58,6 +59,7 @@ def fetch_historical_data(query: str, search_query: str) -> str:
     return st.session_state.history_cache[query]
 
 # Fungsi Simulasi Data Historis (karena tool tidak bisa mengembalikan DataFrame)
+@st.cache_data(ttl=3600)
 def generate_simulated_data(start_date: str, end_date: str) -> pd.DataFrame:
     """Menghasilkan DataFrame simulasi untuk harga emas dan kurs USD/IDR."""
     
