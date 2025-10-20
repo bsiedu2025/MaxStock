@@ -22,6 +22,10 @@ st.caption(
     "yang tersimpan di tabel `macro_data` database Anda."
 )
 
+# Inisialisasi session state untuk loading
+if 'is_loading' not in st.session_state:
+    st.session_state.is_loading = False
+
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility (Didefinisikan ulang di sini)
 # ────────────────────────────────────────────────────────────────────────────────
@@ -107,6 +111,8 @@ def generate_macro_data(start_date, end_date) -> pd.DataFrame:
 
 def upload_simulated_data(df: pd.DataFrame):
     """Menyimpan DataFrame ke tabel macro_data dengan PRIMARY KEY."""
+    # Set loading state
+    st.session_state.is_loading = True
     
     try:
         with engine.connect() as con:
@@ -123,17 +129,31 @@ def upload_simulated_data(df: pd.DataFrame):
             con.commit()
             
             # 2. Gunakan REPLACE INTO untuk memasukkan/memperbarui data (Upsert)
-            data_to_insert = df[['trade_date', 'Gold_USD', 'IDR_USD']].to_dict(orient='records')
             
-            # Buat query REPLACE INTO
-            replace_sql = f"""
-                REPLACE INTO {TABLE_NAME} (trade_date, Gold_USD, IDR_USD)
-                VALUES (:trade_date, :Gold_USD, :IDR_USD)
-            """
-            con.execute(text(replace_sql), data_to_insert)
-            con.commit()
+            # Streaming data per chunk 5000 baris untuk data yang sangat besar
+            chunk_size = 5000
+            total_rows = len(df)
             
-        st.success(f"Berhasil mengunggah {len(df)} baris data makro ke tabel `{TABLE_NAME}`.")
+            progress_bar = st.progress(0, text=f"Mengunggah 0 dari {total_rows} baris...")
+
+            for i in range(0, total_rows, chunk_size):
+                chunk = df.iloc[i:i + chunk_size]
+                data_to_insert = chunk[['trade_date', 'Gold_USD', 'IDR_USD']].to_dict(orient='records')
+                
+                replace_sql = f"""
+                    REPLACE INTO {TABLE_NAME} (trade_date, Gold_USD, IDR_USD)
+                    VALUES (:trade_date, :Gold_USD, :IDR_USD)
+                """
+                con.execute(text(replace_sql), data_to_insert)
+                con.commit()
+                
+                # Update progress bar
+                percent_complete = min((i + chunk_size) / total_rows, 1.0)
+                progress_bar.progress(percent_complete, text=f"Mengunggah {min(i + chunk_size, total_rows)} dari {total_rows} baris...")
+                
+            progress_bar.empty()
+            
+        st.success(f"Berhasil mengunggah {total_rows} baris data makro ke tabel `{TABLE_NAME}`.")
         
         # Membersihkan SEMUA cache dan menjalankan ulang
         st.cache_data.clear()
@@ -141,7 +161,10 @@ def upload_simulated_data(df: pd.DataFrame):
         
         st.rerun() 
     except Exception as e:
+        st.session_state.is_loading = False # Reset loading state jika gagal
         st.error(f"Gagal mengunggah data ke database: {e}")
+        # Tambahkan instruksi untuk mencoba lagi
+        st.warning("Gagal! Mungkin karena koneksi terputus. Coba klik tombol lagi, atau *refresh* halaman.")
 
 # Fungsi untuk menghapus tabel
 def delete_table():
@@ -227,12 +250,16 @@ if not _table_exists(TABLE_NAME):
         # Mengubah tanggal mulai simulasi ke 1 Januari 1970
         sim_start = datetime(1970, 1, 1).date()
         
-        if st.button("Buat & Isi Data Makro Simulasi"):
+        if st.button("Buat & Isi Data Makro Simulasi", disabled=st.session_state.is_loading):
+            # Cek di sini apakah tombol diklik
+            st.session_state.is_loading = True
+            
             # PERINGATAN: Proses ini mungkin memakan waktu lebih lama karena data > 50 tahun
-            st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu.")
+            st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Harap jangan tutup atau *refresh* halaman.")
             sim_df = generate_macro_data(sim_start, today)
-            upload_simulated_data(sim_df)
-            # st.rerun() sudah ada di dalam upload_simulated_data
+            # Logika upload dan rerun ada di dalam fungsi upload_simulated_data
+            upload_simulated_data(sim_df) 
+            
     st.stop()
     
 # --- LOGIKA KETIKA TABEL SUDAH ADA ---
@@ -246,25 +273,31 @@ else:
         sim_start = datetime(1970, 1, 1).date()
 
         with col_upd:
-            if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970"):
-                st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Proses ini mungkin butuh waktu. Harap tunggu hingga muncul pesan sukses.")
+            if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970", disabled=st.session_state.is_loading):
+                st.session_state.is_loading = True
+                st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Harap tunggu hingga muncul pesan sukses.")
                 sim_df = generate_macro_data(sim_start, today)
                 upload_simulated_data(sim_df)
 
         with col_del:
-            if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table"):
+            if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
                 delete_table()
+
+# Tampilkan loading indicator global jika sedang proses
+if st.session_state.is_loading:
+    st.info("⚠️ Proses *upload* data ke database sedang berjalan. Harap jangan tutup atau *refresh* halaman. Ini bisa memakan waktu beberapa menit.")
+    st.stop()
 
 
 # --- FORM UPDATE HARIAN DI SIDEBAR ---
 with st.sidebar:
     st.header("🔄 Update Data Harian")
     with st.form("macro_update_form", clear_on_submit=True):
-        update_date = st.date_input("Tanggal Data", value=datetime.now().date(), max_value=datetime.now().date())
-        gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0)
-        idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0)
+        update_date = st.date_input("Tanggal Data", value=datetime.now().date(), max_value=datetime.now().date(), disabled=st.session_state.is_loading)
+        gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0, disabled=st.session_state.is_loading)
+        idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0, disabled=st.session_state.is_loading)
         
-        submitted = st.form_submit_button("Simpan Data ke Database")
+        submitted = st.form_submit_button("Simpan Data ke Database", disabled=st.session_state.is_loading)
         
         if submitted:
             if gold_price > 0 and idr_rate > 0:
