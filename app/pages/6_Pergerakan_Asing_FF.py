@@ -104,7 +104,12 @@ def upload_simulated_data(df: pd.DataFrame):
     try:
         df.to_sql(TABLE_NAME, con=engine, if_exists='replace', index=False)
         st.success(f"Berhasil mengunggah {len(df)} baris data makro ke tabel `{TABLE_NAME}`.")
-        _table_exists.clear() # Clear cache
+        
+        # PERBAIKAN PENTING: Membersihkan SEMUA cache
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        
+        st.rerun() # Refresh untuk memuat dashboard utama
     except Exception as e:
         st.error(f"Gagal mengunggah data ke database: {e}")
 
@@ -159,7 +164,7 @@ if not _table_exists(TABLE_NAME):
         if st.button("Buat & Isi Data Makro Simulasi"):
             sim_df = generate_macro_data(sim_start, today)
             upload_simulated_data(sim_df)
-            st.rerun() # Refresh untuk memuat dashboard utama
+            # st.rerun() sudah ada di dalam upload_simulated_data
     st.stop()
     
 # Filter Sidebar
