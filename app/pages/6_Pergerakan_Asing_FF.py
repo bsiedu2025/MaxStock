@@ -482,22 +482,28 @@ if len(simulated_df) >= 2:
     # Cek Gold
     if pd.isna(latest_gold) or pd.isna(prev_gold):
         change_gold = 0; change_gold_pct = 0
+        latest_gold_val = np.nan
     else:
         change_gold = latest_gold - prev_gold
         change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
+        latest_gold_val = latest_gold
     
     # Cek IDR
     if pd.isna(latest_idr) or pd.isna(prev_idr):
         change_idr = 0; change_idr_pct = 0
+        latest_idr_val = np.nan
     else:
         change_idr = latest_idr - prev_idr
         change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
+        latest_idr_val = latest_idr
         
 elif len(simulated_df) == 1:
     latest_gold = simulated_df['Gold_USD'].iloc[-1]
     latest_idr = simulated_df['IDR_USD'].iloc[-1]
     change_gold = 0; change_gold_pct = 0
     change_idr = 0; change_idr_pct = 0
+    latest_gold_val = latest_gold if not pd.isna(latest_gold) else np.nan
+    latest_idr_val = latest_idr if not pd.isna(latest_idr) else np.nan
 else:
     st.warning("Data tidak cukup untuk menghitung perubahan.")
     st.stop()
@@ -509,29 +515,38 @@ st.subheader("Ringkasan Data Makro Terbaru")
 
 col_g1, col_g2, col_i1, col_i2 = st.columns(4)
 
+# --- Fungsi helper untuk format metrik yang tahan NaN/None ---
+def format_metric_value(value, prefix="", suffix=""):
+    if pd.isna(value):
+        return "N/A"
+    if prefix == "Rp":
+        return f"Rp{value:,.0f}"
+    return f"{prefix}{value:,.2f}{suffix}"
+
 with col_g1:
     st.metric(
         label="Harga Emas (USD/oz)",
-        value=f"${latest_gold:,.2f}",
-        delta=f"{change_gold:+.2f}"
+        value=format_metric_value(latest_gold_val, prefix="$"),
+        delta=f"{change_gold:+.2f}" if not pd.isna(change_gold) and change_gold != 0 else None
     )
 with col_g2:
     st.metric(
         label="Perubahan Emas (%)",
-        value=f"{change_gold_pct:+.2f}%",
+        value=format_metric_value(change_gold_pct, suffix="%"),
         delta=None,
     )
 
 with col_i1:
     st.metric(
         label="Nilai Tukar (IDR/USD)",
-        value=f"Rp{latest_idr:,.0f}",
-        delta=f"Rp{change_idr:+.0f}"
+        # [FIX] Menggunakan helper function
+        value=format_metric_value(latest_idr_val, prefix="Rp"),
+        delta=f"Rp{change_idr:+.0f}" if not pd.isna(change_idr) and change_idr != 0 else None
     )
 with col_i2:
     st.metric(
         label="Perubahan Rupiah (%)",
-        value=f"{change_idr_pct:+.2f}%",
+        value=format_metric_value(change_idr_pct, suffix="%"),
         delta=None,
         delta_color="inverse" # Warna delta terbalik, karena kenaikan kurs IDR buruk
     )
