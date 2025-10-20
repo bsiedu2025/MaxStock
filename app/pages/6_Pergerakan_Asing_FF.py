@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 import time
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah")
 st.caption(
     "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
     "yang tersimpan di tabel `macro_data` database Anda."
@@ -109,70 +109,70 @@ def generate_macro_data(start_date, end_date) -> pd.DataFrame:
     df['trade_date'] = df['trade_date'].dt.date
     return df
 
-def upload_simulated_data(df: pd.DataFrame, placeholder: st.empty):
+def upload_simulated_data(df: pd.DataFrame):
     """Menyimpan DataFrame ke tabel macro_data dengan PRIMARY KEY."""
     # Set loading state
     st.session_state.is_loading = True
     
-    try:
-        # Tampilkan spinner saat koneksi/persiapan
-        with placeholder.container():
-            st.spinner("Menyiapkan koneksi dan struktur tabel...")
+    total_rows = len(df)
+    
+    # Gunakan st.status untuk progress bar yang lebih stabil
+    with st.status("Memproses data makro...", expanded=True) as status_bar:
+        try:
+            st.write("1. Menyiapkan data dan koneksi database...")
             
-        with engine.connect() as con:
-            # 1. Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
-            create_table_sql = f"""
-                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                    trade_date DATE NOT NULL,
-                    Gold_USD FLOAT,
-                    IDR_USD FLOAT,
-                    PRIMARY KEY (trade_date)
-                ) ENGINE=InnoDB;
-            """
-            con.execute(text(create_table_sql))
-            con.commit()
-            
-            # 2. Gunakan REPLACE INTO untuk memasukkan/memperbarui data (Upsert)
-            
-            # Streaming data per chunk 5000 baris untuk data yang sangat besar
-            chunk_size = 5000
-            total_rows = len(df)
-            
-            # Update placeholder menjadi progress bar
-            with placeholder.container():
-                progress_bar = st.progress(0, text=f"Mengunggah 0 dari {total_rows} baris...")
-                
-            for i in range(0, total_rows, chunk_size):
-                chunk = df.iloc[i:i + chunk_size]
-                data_to_insert = chunk[['trade_date', 'Gold_USD', 'IDR_USD']].to_dict(orient='records')
-                
-                replace_sql = f"""
-                    REPLACE INTO {TABLE_NAME} (trade_date, Gold_USD, IDR_USD)
-                    VALUES (:trade_date, :Gold_USD, :IDR_USD)
+            with engine.connect() as con:
+                # 1. Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
+                create_table_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                        trade_date DATE NOT NULL,
+                        Gold_USD FLOAT,
+                        IDR_USD FLOAT,
+                        PRIMARY KEY (trade_date)
+                    ) ENGINE=InnoDB;
                 """
-                con.execute(text(replace_sql), data_to_insert)
+                con.execute(text(create_table_sql))
                 con.commit()
                 
-                # Update progress bar
-                percent_complete = min((i + chunk_size) / total_rows, 1.0)
-                progress_bar.progress(percent_complete, text=f"Mengunggah {min(i + chunk_size, total_rows)} dari {total_rows} baris...")
-            
-            # Bersihkan progress bar
-            placeholder.empty()
+                # 2. Gunakan REPLACE INTO untuk memasukkan/memperbarui data (Upsert)
+                
+                # Streaming data per chunk 5000 baris
+                chunk_size = 5000
+                
+                # Progress bar di dalam status
+                progress_bar = st.progress(0, text=f"Mengunggah 0 dari {total_rows} baris...")
+                    
+                for i in range(0, total_rows, chunk_size):
+                    chunk = df.iloc[i:i + chunk_size]
+                    data_to_insert = chunk[['trade_date', 'Gold_USD', 'IDR_USD']].to_dict(orient='records')
+                    
+                    replace_sql = f"""
+                        REPLACE INTO {TABLE_NAME} (trade_date, Gold_USD, IDR_USD)
+                        VALUES (:trade_date, :Gold_USD, :IDR_USD)
+                    """
+                    con.execute(text(replace_sql), data_to_insert)
+                    con.commit()
+                    
+                    # Update progress bar
+                    percent_complete = min((i + chunk_size) / total_rows, 1.0)
+                    progress_bar.progress(percent_complete, text=f"Mengunggah {min(i + chunk_size, total_rows)} dari {total_rows} baris...")
+                
+                # Final update
+                progress_bar.progress(1.0, text=f"Pengunggahan selesai: {total_rows} baris.")
 
-        st.success(f"Berhasil mengunggah {total_rows} baris data makro ke tabel `{TABLE_NAME}`.")
-        
-        # Membersihkan SEMUA cache dan menjalankan ulang
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        
-        st.rerun() 
-    except Exception as e:
-        st.session_state.is_loading = False # Reset loading state jika gagal
-        placeholder.empty() # Pastikan progress bar hilang
-        st.error(f"Gagal mengunggah data ke database: {e}")
-        # Tambahkan instruksi untuk mencoba lagi
-        st.warning("Gagal! Mungkin karena koneksi terputus. Coba klik tombol lagi, atau *refresh* halaman.")
+            status_bar.update(label=f"✅ Pengunggahan Data Makro Selesai!", state="complete", expanded=False)
+            
+            # Membersihkan SEMUA cache dan menjalankan ulang
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success(f"Berhasil mengunggah {total_rows} baris data makro ke tabel `{TABLE_NAME}`.")
+
+            st.rerun() 
+        except Exception as e:
+            status_bar.update(label="❌ Gagal mengunggah data!", state="error", expanded=True)
+            st.error(f"Terjadi kesalahan database: {e}")
+        finally:
+            st.session_state.is_loading = False # Reset loading state
 
 # Fungsi untuk menghapus tabel
 def delete_table():
@@ -251,9 +251,6 @@ def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
 if not _table_exists(TABLE_NAME):
     st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
     
-    # Placeholder untuk progress bar
-    progress_placeholder = st.empty()
-    
     with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Simulasi)") as exp:
         st.info("Fitur ini akan membuat tabel `macro_data` dengan *Primary Key* dan mengisi data historis Emas dan Rupiah (simulasi dari **1970**) untuk keperluan demo.")
         
@@ -261,17 +258,17 @@ if not _table_exists(TABLE_NAME):
         # Mengubah tanggal mulai simulasi ke 1 Januari 1970
         sim_start = datetime(1970, 1, 1).date()
         
-        if st.button("Buat & Isi Data Makro Simulasi", disabled=st.session_state.is_loading):
-            # Cek di sini apakah tombol diklik
-            st.session_state.is_loading = True
-            
-            # Tampilkan pesan statis sebelum progress bar muncul
-            with progress_placeholder.container():
-                 st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Harap jangan tutup atau *refresh* halaman.")
-
-            sim_df = generate_macro_data(sim_start, today)
-            # Kirim placeholder ke fungsi upload
-            upload_simulated_data(sim_df, progress_placeholder) 
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("Buat & Isi Data Makro Simulasi", disabled=st.session_state.is_loading):
+                st.session_state.is_loading = True
+                sim_df = generate_macro_data(sim_start, today)
+                upload_simulated_data(sim_df) 
+        
+        with col_btn2:
+            if st.button("🗑️ Hapus Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_initial_table"):
+                delete_table()
             
     st.stop()
     
@@ -285,17 +282,11 @@ else:
         today = datetime.now().date()
         sim_start = datetime(1970, 1, 1).date()
 
-        # Placeholder untuk progress bar di mode update
-        progress_placeholder_update = st.empty()
-
         with col_upd:
             if st.button("🔄 Ganti dengan Data 1970 (Semua data lama akan tertimpa)", key="btn_replace_1970", disabled=st.session_state.is_loading):
                 st.session_state.is_loading = True
-                with progress_placeholder_update.container():
-                     st.info("Sedang membuat dan mengisi data historis dari tahun 1970... Harap tunggu hingga muncul pesan sukses.")
-                     
                 sim_df = generate_macro_data(sim_start, today)
-                upload_simulated_data(sim_df, progress_placeholder_update)
+                upload_simulated_data(sim_df)
 
         with col_del:
             if st.button("🗑️ Hapus Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
@@ -315,17 +306,10 @@ with st.sidebar:
         gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0, disabled=st.session_state.is_loading)
         idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0, disabled=st.session_state.is_loading)
         
-        # Placeholder untuk progress bar di sidebar
-        progress_placeholder_sidebar = st.empty()
-
         submitted = st.form_submit_button("Simpan Data ke Database", disabled=st.session_state.is_loading)
         
         if submitted:
             if gold_price > 0 and idr_rate > 0:
-                # Tampilkan pesan statis sebelum progress bar muncul
-                with progress_placeholder_sidebar.container():
-                     st.info("Sedang menyimpan data harian...")
-                     
                 # Buat DataFrame dari input tunggal
                 new_data = pd.DataFrame([{
                     'trade_date': update_date,
@@ -334,7 +318,7 @@ with st.sidebar:
                 }])
                 
                 # Gunakan fungsi upload_simulated_data yang sudah menggunakan REPLACE INTO
-                upload_simulated_data(new_data, progress_placeholder_sidebar)
+                upload_simulated_data(new_data)
                 # Fungsi upload_simulated_data akan otomatis melakukan st.rerun()
             else:
                 st.error("Harga Emas dan Nilai Tukar harus diisi dengan nilai > 0.")
