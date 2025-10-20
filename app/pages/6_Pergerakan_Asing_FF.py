@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# app/pages/6_Pergerakan_Asing_FF.py (Dashboard Makro Baru: Emas & Rupiah)
+# app/pages/6_Pergerakan_Asing_FF.py (Dashboard Makro Baru: Emas & Rupiah dari MariaDB)
 
 import streamlit as st
 import pandas as pd
@@ -9,90 +9,159 @@ from datetime import datetime, timedelta
 import numpy as np
 import json
 import random
-
-# TINGKATKAN JUMLAH PARAMETER IMPOR KARENA FUNGSI LAMA TIDAK DIPAKAI
-# Import yang dibutuhkan untuk simulasi/fetch data
+import os
+import tempfile
+from urllib.parse import quote_plus
+from sqlalchemy import create_engine, text
 import time
-# PERBAIKAN: Ganti 'from tools import google_search' menjadi 'import google_search'
-import google_search 
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
     "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
-    "untuk analisis makroekonomi. Data diambil menggunakan Google Search (simulasi)."
+    "yang tersimpan di tabel `macro_data` database Anda."
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Configuration
+# DB Connection & Utility (Didefinisikan ulang di sini)
 # ────────────────────────────────────────────────────────────────────────────────
 
-# Simulasikan nama queries untuk Google Search (seolah-olah mencari data)
-GOLD_QUERY = "Historical gold price in USD per ounce last 5 years"
-IDR_USD_QUERY = "Historical IDR to USD exchange rate last 5 years"
+@st.cache_resource
+def _build_engine():
+    """Membangun koneksi SQLAlchemy ke database."""
+    host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
+    port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
+    database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
+    user = os.getenv("DB_USER", st.secrets.get("DB_USER", ""))
+    password = os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", ""))
+    ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Data Fetch Simulation (menggunakan Google Search Tool)
-# ────────────────────────────────────────────────────────────────────────────────
+    pwd = quote_plus(str(password))
+    connect_args = {}
+    
+    try:
+        if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+            tmp.write(ssl_ca.encode("utf-8")); tmp.flush()
+            connect_args["ssl_ca"] = tmp.name
+    except Exception as e:
+        st.warning(f"Error saat menyiapkan SSL CA: {e}")
 
-# Fungsi untuk memanggil Google Search Tool
-def fetch_historical_data(query: str, search_query: str) -> str:
-    """Simulasi fetching data historis menggunakan Google Search."""
-    
-    # Menghindari Google Search Tool dipanggil terus-menerus
-    if 'history_cache' not in st.session_state:
-        st.session_state.history_cache = {}
-    
-    if query in st.session_state.history_cache:
-        return st.session_state.history_cache[query]
+    url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
+    return create_engine(url, connect_args=connect_args, pool_recycle=300, pool_pre_ping=True)
 
-    # Google Search Tool dipanggil di sini
-    # PERBAIKAN: Panggil google_search.search() secara langsung
-    results = google_search.search(queries=[search_query])
-    
-    # Karena kita tidak dapat memprediksi format output search,
-    # kita akan melakukan simulasi data di bagian selanjutnya.
-    # Untuk tujuan demo, kita akan kembalikan string yang menandakan pencarian sukses.
-    
-    time.sleep(1) # Simulasikan latency
-    st.session_state.history_cache[query] = f"Search success for: {search_query}"
-    return st.session_state.history_cache[query]
-
-# Fungsi Simulasi Data Historis (karena tool tidak bisa mengembalikan DataFrame)
 @st.cache_data(ttl=3600)
-def generate_simulated_data(start_date: str, end_date: str) -> pd.DataFrame:
+def _table_exists(name: str) -> bool:
+    """Mengecek apakah tabel ada di database saat ini."""
+    try:
+        engine = _build_engine()
+        with engine.connect() as con:
+            q = text("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = :t
+            """)
+            return bool(con.execute(q, {"t": name}).scalar())
+    except Exception:
+        return False
+
+# Inisialisasi Engine
+engine = _build_engine() 
+TABLE_NAME = "macro_data"
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Fungsi Uploader/Seeder Data (Simulasi untuk keperluan demo)
+# ────────────────────────────────────────────────────────────────────────────────
+
+def generate_macro_data(start_date, end_date) -> pd.DataFrame:
     """Menghasilkan DataFrame simulasi untuk harga emas dan kurs USD/IDR."""
-    
     dates = pd.date_range(start=start_date, end=end_date, freq='B')
     df = pd.DataFrame(index=dates)
     
-    # Emas (Gold) - Mulai dari 1500 USD, fluktuasi
+    # Emas (Gold)
     np.random.seed(42)
-    gold_base = 1500
+    gold_base = 1800
     gold_price = [gold_base]
     for _ in range(1, len(dates)):
-        change = np.random.normal(0.5, 8) # Drift positif kecil
+        change = np.random.normal(0.5, 8)
         gold_price.append(gold_price[-1] * (1 + change / 1000))
-    df['Gold_USD'] = np.array(gold_price) + 200 # Agar mendekati harga saat ini
+    df['Gold_USD'] = np.array(gold_price)
     
-    # Rupiah (IDR/USD) - Mulai dari 14500, fluktuasi
-    idr_base = 14500
+    # Rupiah (IDR/USD)
+    idr_base = 15000
     idr_rate = [idr_base]
     for _ in range(1, len(dates)):
-        change = np.random.normal(0.01, 3) # Drift positif (pelebaran kurs)
+        change = np.random.normal(0.01, 3)
         idr_rate.append(idr_rate[-1] * (1 + change / 10000))
-    df['IDR_USD'] = np.array(idr_rate) + 1000 # Agar mendekati kurs saat ini
-
-    # Perhitungan perubahan (persen)
-    df['Gold_Change_Pct'] = df['Gold_USD'].pct_change() * 100
-    df['IDR_Change_Pct'] = df['IDR_USD'].pct_change() * 100
+    df['IDR_USD'] = np.array(idr_rate)
     
-    return df.dropna()
+    df = df.reset_index().rename(columns={'index': 'trade_date'})
+    df['trade_date'] = df['trade_date'].dt.date
+    return df
+
+def upload_simulated_data(df: pd.DataFrame):
+    """Menyimpan DataFrame ke tabel macro_data."""
+    try:
+        df.to_sql(TABLE_NAME, con=engine, if_exists='replace', index=False)
+        st.success(f"Berhasil mengunggah {len(df)} baris data makro ke tabel `{TABLE_NAME}`.")
+        _table_exists.clear() # Clear cache
+    except Exception as e:
+        st.error(f"Gagal mengunggah data ke database: {e}")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Data Fetcher
+# ────────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=600)
+def fetch_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
+    """Mengambil data makro dari tabel MariaDB."""
+    if not _table_exists(TABLE_NAME):
+        return pd.DataFrame()
+    
+    sql = f"""
+        SELECT trade_date, Gold_USD, IDR_USD
+        FROM {TABLE_NAME}
+        WHERE trade_date BETWEEN :start_date AND :end_date
+        ORDER BY trade_date
+    """
+    params = {"start_date": start_date, "end_date": end_date}
+    
+    try:
+        with engine.connect() as con:
+            df = pd.read_sql(text(sql), con, params=params)
+        
+        df['trade_date'] = pd.to_datetime(df['trade_date'])
+        df = df.set_index('trade_date')
+        
+        # Hitung perubahan
+        df['Gold_Change_Pct'] = df['Gold_USD'].pct_change() * 100
+        df['IDR_Change_Pct'] = df['IDR_USD'].pct_change() * 100
+        return df.dropna()
+
+    except Exception as e:
+        st.error(f"Gagal mengambil data dari `{TABLE_NAME}`: {e}")
+        return pd.DataFrame()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Streamlit Interface
 # ────────────────────────────────────────────────────────────────────────────────
 
+# Cek keberadaan tabel dan tampilkan uploader jika belum ada
+if not _table_exists(TABLE_NAME):
+    st.warning(f"Tabel `{TABLE_NAME}` belum ditemukan di database Anda.")
+    
+    with st.expander("🛠️ Klik di sini untuk membuat tabel `macro_data` (Simulasi)") as exp:
+        st.info("Fitur ini akan membuat dan mengisi tabel `macro_data` dengan data historis Emas dan Rupiah (simulasi 5 tahun) untuk keperluan demo.")
+        
+        today = datetime.now().date()
+        sim_start = today - timedelta(days=365 * 5)
+        
+        if st.button("Buat & Isi Data Makro Simulasi"):
+            sim_df = generate_macro_data(sim_start, today)
+            upload_simulated_data(sim_df)
+            st.rerun() # Refresh untuk memuat dashboard utama
+    st.stop()
+    
 # Filter Sidebar
 st.sidebar.header("Filter Periode Makro")
 end_date = datetime.now().date()
@@ -100,21 +169,13 @@ start_date_default = end_date - timedelta(days=365 * 3) # Default 3 tahun
 selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, max_value=end_date)
 selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date)
 
-# Fetch data simulasi
-simulated_df = generate_simulated_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+# Fetch data dari DB
+simulated_df = fetch_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
 
 if simulated_df.empty:
-    st.warning("Data historis tidak tersedia untuk rentang waktu ini.")
+    st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di tabel `{TABLE_NAME}`.")
     st.stop()
-
-# Panggil fungsi fetch (meskipun hanya simulasi)
-with st.expander("🔎 Hasil Google Search (Simulasi Data Historis)"):
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info(fetch_historical_data("gold", GOLD_QUERY))
-    with col2:
-        st.info(fetch_historical_data("idr", IDR_USD_QUERY))
-        
+    
 # Data terakhir
 latest_gold = simulated_df['Gold_USD'].iloc[-1]
 latest_idr = simulated_df['IDR_USD'].iloc[-1]
@@ -237,4 +298,4 @@ fig2.update_layout(
 st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("---")
-st.caption("Disclaimer: Data Emas dan Nilai Tukar di atas adalah data simulasi yang dihasilkan secara matematis. Silakan gunakan sumber data yang terpercaya untuk keputusan investasi nyata.")
+st.caption("⚠️ **Penting:** Data makro di atas adalah **data simulasi** yang di-*generate* secara matematis dan disimpan ke database Anda. Untuk data riil, Anda perlu mengintegrasikan dengan API data finansial yang kredibel.")
