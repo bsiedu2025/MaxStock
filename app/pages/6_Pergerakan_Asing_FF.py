@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 import time
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
     "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
     "yang tersimpan di tabel `macro_data` database Anda."
@@ -156,7 +156,11 @@ def upload_simulated_data(df: pd.DataFrame):
                     # Update progress bar
                     percent_complete = min((i + chunk_size) / total_rows, 1.0)
                     progress_bar.progress(percent_complete, text=f"Mengunggah {min(i + chunk_size, total_rows)} dari {total_rows} baris...")
-                
+                    
+                    # TAMBAHAN VITAL: time.sleep() untuk memaksa UI update
+                    if i % chunk_size == 0 and i > 0:
+                        time.sleep(0.01)
+
                 # Final update
                 progress_bar.progress(1.0, text=f"Pengunggahan selesai: {total_rows} baris.")
 
