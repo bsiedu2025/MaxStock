@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 import time
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
     "Menampilkan data historis harga emas dunia (USD/oz) dan nilai tukar Rupiah terhadap Dolar (IDR/USD) "
     "yang tersimpan di tabel `macro_data` database Anda."
@@ -191,12 +191,38 @@ if not _table_exists(TABLE_NAME):
             # st.rerun() sudah ada di dalam upload_simulated_data
     st.stop()
     
-# Filter Sidebar
+# --- FORM UPDATE HARIAN DI SIDEBAR ---
+with st.sidebar:
+    st.header("🔄 Update Data Harian")
+    with st.form("macro_update_form", clear_on_submit=True):
+        update_date = st.date_input("Tanggal Data", value=datetime.now().date(), max_value=datetime.now().date())
+        gold_price = st.number_input("Harga Emas (USD/oz)", min_value=1.0, format="%.2f", step=1.0)
+        idr_rate = st.number_input("Nilai Tukar (IDR/USD)", min_value=1.0, format="%.0f", step=1.0)
+        
+        submitted = st.form_submit_button("Simpan Data ke Database")
+        
+        if submitted:
+            if gold_price > 0 and idr_rate > 0:
+                # Buat DataFrame dari input tunggal
+                new_data = pd.DataFrame([{
+                    'trade_date': update_date,
+                    'Gold_USD': gold_price,
+                    'IDR_USD': idr_rate
+                }])
+                
+                # Gunakan fungsi upload_simulated_data yang sudah menggunakan REPLACE INTO
+                upload_simulated_data(new_data)
+                # Fungsi upload_simulated_data akan otomatis melakukan st.rerun()
+            else:
+                st.error("Harga Emas dan Nilai Tukar harus diisi dengan nilai > 0.")
+
+
+# Filter Sidebar (Tersedia setelah tabel ada)
 st.sidebar.header("Filter Periode Makro")
 end_date = datetime.now().date()
 start_date_default = end_date - timedelta(days=365 * 3) # Default 3 tahun
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, max_value=end_date)
-selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date)
+selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, max_value=end_date, key="filter_start")
+selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, key="filter_end")
 
 # Fetch data dari DB
 simulated_df = fetch_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
@@ -205,17 +231,27 @@ if simulated_df.empty:
     st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di tabel `{TABLE_NAME}`.")
     st.stop()
     
-# Data terakhir
-latest_gold = simulated_df['Gold_USD'].iloc[-1]
-latest_idr = simulated_df['IDR_USD'].iloc[-1]
-prev_gold = simulated_df['Gold_USD'].iloc[-2] if len(simulated_df) > 1 else latest_gold
-prev_idr = simulated_df['IDR_USD'].iloc[-2] if len(simulated_df) > 1 else latest_idr
+# Data terakhir (Pastikan indeks ada)
+if len(simulated_df) >= 2:
+    latest_gold = simulated_df['Gold_USD'].iloc[-1]
+    latest_idr = simulated_df['IDR_USD'].iloc[-1]
+    prev_gold = simulated_df['Gold_USD'].iloc[-2]
+    prev_idr = simulated_df['IDR_USD'].iloc[-2]
+elif len(simulated_df) == 1:
+    latest_gold = simulated_df['Gold_USD'].iloc[-1]
+    latest_idr = simulated_df['IDR_USD'].iloc[-1]
+    prev_gold = latest_gold # Sama jika hanya ada 1 hari data
+    prev_idr = latest_idr
+else:
+    st.warning("Data tidak cukup untuk menghitung perubahan harian.")
+    st.stop()
+
 
 # Perubahan
 change_gold = latest_gold - prev_gold
-change_gold_pct = (change_gold / prev_gold) * 100
+change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
 change_idr = latest_idr - prev_idr
-change_idr_pct = (change_idr / prev_idr) * 100
+change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Ringkasan Metrik
