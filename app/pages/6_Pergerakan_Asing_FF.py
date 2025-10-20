@@ -70,7 +70,7 @@ def _table_exists(name: str) -> bool:
                 FROM information_schema.tables
                 WHERE table_schema = DATABASE() AND table_name = :t
             """)
-            return bool(con.execute(q, {"t": name}).scalar())
+            return bool(con.execute(q).scalar())
     except Exception:
         return False
 
@@ -97,59 +97,39 @@ def get_latest_trade_date() -> datetime.date:
 @st.cache_data(ttl=600)
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
-    Mengambil data Rupiah dari Google Sheets.
-    Mencari kolom Date dan Price/Close kedua (Blok Rupiah) secara adaptif.
+    Mengambil data Rupiah dari Google Sheets menggunakan raw parsing (kolom C & D)
+    karena header yang diekspor Sheets tidak konsisten.
     """
     if not sheet_id: return pd.DataFrame()
     
-    # Menggunakan gid=0 karena diasumsikan data ada di sheet pertama
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
     
     try:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # Baca CSV, baris 1 adalah header
-        df_raw = pd.read_csv(StringIO(response.text), header=0)
-        # Hapus baris yang kosong atau berisi hanya NaN, ini umum di Sheets
+        # Baca CSV mentah tanpa header
+        df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=1) # Lewati 1 baris (header formula)
         df_raw.dropna(how='all', inplace=True) 
-        df_raw.columns = [c.strip() for c in df_raw.columns]
         
-        # 1. Identifikasi Kolom yang Relevan
-        date_cols = [c for c in df_raw.columns if 'Date' in c or 'date' in c]
-        price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c or 'Close' in c]
+        # Kolom C (Index 2) adalah Date Rupiah, Kolom D (Index 3) adalah Price Rupiah
+        # Asumsi: Formula Emas di A1 (mengisi A, B); Formula Rupiah di C1 (mengisi C, D)
         
-        if len(date_cols) < 2 or len(price_cols) < 2:
-            st.error("Sheets harus memiliki minimal 2 kolom 'Date' dan 2 kolom 'Price/Close' (untuk Emas dan Rupiah).")
-            # st.error(f"Kolom ditemukan: {df_raw.columns.tolist()}") # Debugging
+        if df_raw.shape[1] < 4:
+            st.error("Sheets tidak memiliki 4 kolom yang diharapkan (Date/Price Emas & Date/Price Rupiah). Pastikan formula Rupiah ada di Kolom C.")
             return pd.DataFrame()
-
-        # 2. Ambil Blok Rupiah: Kolom Date kedua dan Kolom Price/Close kedua
-        # Mencari kolom Date yang tidak berpasangan dengan Price pertama (Asumsi Price pertama adalah Emas)
-        
-        # Cari indeks Price/Close kedua
-        price_idx = [i for i, c in enumerate(df_raw.columns) if 'Price' in c or 'price' in c or 'Close' in c]
-        if len(price_idx) < 2: return pd.DataFrame() 
-        
-        idr_price_col_name = df_raw.columns[price_idx[1]] # Nama kolom Price/Close kedua
-        
-        # Kolom Date Rupiah berada tepat sebelum kolom Price/Close Rupiah di CSV mentah
-        idr_date_col_index = price_idx[1] - 1 
-        if idr_date_col_index < 0 or not ('Date' in df_raw.columns[idr_date_col_index] or 'date' in df_raw.columns[idr_date_col_index]):
-             # Fallback: gunakan kolom Date kedua dari daftar
-             idr_date_col_name = date_cols[1] 
-        else:
-             idr_date_col_name = df_raw.columns[idr_date_col_index]
-
-        df_idr = df_raw[[idr_date_col_name, idr_price_col_name]].copy()
+            
+        # Ambil Kolom C (Index 2) dan Kolom D (Index 3)
+        df_idr = df_raw.iloc[:, [2, 3]].copy()
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
-        # 3. Pembersihan Data
+        # Pembersihan Data
         df_idr.replace('', np.nan, inplace=True)
         
+        # Konversi Tanggal (Asumsi format mm/dd/yyyy atau yyyy-mm-dd)
         df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date_raw'], errors='coerce')
         
-        # Hapus karakter non-angka dan konversi ke numerik
+        # Pembersihan Angka
         df_idr['IDR_USD'] = df_idr['IDR_USD'].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
         df_idr['IDR_USD'] = pd.to_numeric(df_idr['IDR_USD'], errors='coerce')
         
@@ -159,13 +139,13 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
         
         # [Debugging Helper]
-        # st.success(f"Berhasil parsing IDR: {len(df_idr)} baris.")
+        # st.success(f"Berhasil parsing IDR menggunakan raw C & D: {len(df_idr)} baris.")
         # st.dataframe(df_idr.tail())
 
         return df_idr
         
     except Exception as e:
-        st.error(f"Gagal mengambil data Rupiah dari Sheets (ID: {sheet_id}). Pastikan link di-set 'Anyone with the link (Viewer)'. Error: {e}")
+        st.error(f"Gagal mengambil data Rupiah dari Sheets. Pastikan link di-set 'Anyone with the link (Viewer)'. Error: {e}")
         return pd.DataFrame()
 
 
