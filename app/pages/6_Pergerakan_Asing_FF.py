@@ -472,8 +472,9 @@ except Exception:
     min_date_db = datetime(1990, 1, 1).date()
 
 
-start_date_default = end_date - timedelta(days=365 * 3) # Default 3 tahun
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=min_date_db, min_value=min_date_db, max_value=end_date, key="filter_start")
+# [FIX] Menggunakan min_date_db sebagai default value untuk selected_start_date
+start_date_default = min_date_db 
+selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, min_value=min_date_db, max_value=end_date, key="filter_start")
 selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, max_value=end_date, key="filter_end")
 
 st.sidebar.markdown("---")
