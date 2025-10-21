@@ -17,7 +17,7 @@ import math
 from io import StringIO # Diperlukan untuk parsing Sheets CSV
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
@@ -101,42 +101,36 @@ def get_latest_trade_date(table_name: str) -> datetime.date:
 @st.cache_data(ttl=600)
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
-    Mengambil data Rupiah dari Google Sheets dengan parsing CSV mentah yang robust.
-    Asumsi: Data Rupiah ada di kolom ke-3 (Date) dan ke-4 (Price/Close) dari CSV.
+    [FIX TERAKHIR] Mengambil data Rupiah dari Google Sheets dengan parsing yang paling robust.
+    Karena Rupiah diisi formula di Cell A1, kita akan ambil Kolom 0 dan 1 (Date & Price)
+    dan mengabaikan kolom lainnya.
     """
     if not sheet_id: return pd.DataFrame()
     
-    csv_url = f"https://docs.google.com/spreadsheets/d/13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY/edit?gid=0#gid=0"
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
     
     try:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # Baca CSV mentah tanpa header
+        # 1. Baca CSV mentah tanpa header
         df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=0)
-        
-        # 1. Identifikasi Baris Awal Data (Hilangkan baris yang isinya kosong atau teks)
-        # Baris pertama yang memiliki format tanggal adalah baris awal data.
         df_raw.dropna(how='all', inplace=True)
         
-        # Cari baris yang isinya data Rupiah (Kolom 2 dan 3 di CSV, karena kolom Emas di 0 dan 1)
-        # Sheets export: [Date_emas], [Price_emas], [Date_idr], [Price_idr]
-        
-        # Cari baris data pertama (baris yang memiliki nilai di Kolom 0/Date)
+        # 2. Identifikasi Baris Awal Data
+        # Cari baris yang memiliki format tanggal di Kolom 0.
         first_data_row_index = df_raw[df_raw.iloc[:, 0].astype(str).str.contains(r'\d{1,2}/\d{1,2}/\d{4}')].index.min()
         
         if pd.isna(first_data_row_index):
-            st.error("Gagal menemukan baris data Rupiah yang valid. Pastikan data Rupiah (GOOGLEFINANCE) ada di kolom C & D.")
+            st.error("Gagal menemukan baris Rupiah yang valid. Pastikan hasil formula GOOGLEFINANCE ada di kolom A & B.")
             return pd.DataFrame()
 
-        # Kita tahu data Rupiah ada di Kolom Index 2 (Date Rupiah) dan Index 3 (Price Rupiah)
+        # 3. Ambil data Rupiah (Kolom Index 0/Date dan Index 1/Price)
         df_idr = df_raw.iloc[first_data_row_index:].copy()
-
-        # Hanya ambil kolom Index 2 dan Index 3
-        df_idr = df_idr.iloc[:, [2, 3]] 
+        df_idr = df_idr.iloc[:, [0, 1]] 
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
-        # 2. Pembersihan Data
+        # 4. Pembersihan Data
         df_idr.replace('', np.nan, inplace=True)
         df_idr.dropna(how='all', inplace=True)
         
@@ -151,6 +145,9 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         
         df_idr = df_idr[['trade_date', 'IDR_USD']]
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
+        
+        # [Debugging Helper]
+        # st.dataframe(df_idr.head())
         
         return df_idr
         
@@ -402,11 +399,9 @@ if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
     with st.expander("🛠️ Klik di sini untuk membuat 2 tabel makro (Setup Awal)") as exp:
         st.info("Pastikan Anda sudah mengatur **Google Sheet** (Share: Anyone with the link) dan mengisi **Spreadsheet ID** di sidebar.")
         
+        # [FIX] Tombol hapus sudah tidak ada di sini, sesuai permintaan user.
         if st.button("📥 Ambil Emas & Rupiah Riil & Buat Tabel", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, type="primary"):
             upload_full_data_to_db_two_tables(st.session_state.sheet_id_input)
-            
-        if st.button("🗑️ Hapus SEMUA Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_all_initial_table"):
-            delete_all_tables()
             
     st.stop()
     
