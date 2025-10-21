@@ -74,10 +74,12 @@ def _table_exists(name: str) -> bool:
         engine = _build_engine()
         with engine.connect() as con:
             # Gunakan COUNT(*) untuk check, lebih cepat daripada information_schema di beberapa MariaDB
-            q = text(f"SELECT COUNT(*) FROM {name} LIMIT 1")
+            # Ini mengasumsikan tabel sudah ada (baik kosong atau berisi data)
+            q = text(f"SELECT COUNT(*) FROM {name}")
             con.execute(q).scalar()
             return True
     except Exception:
+        # Jika tabel belum ada, query akan gagal dan return False
         return False
 
 # Inisialisasi Engine
@@ -337,6 +339,7 @@ def upload_gap_data_two_tables(sheet_id: str):
 @st.cache_data(ttl=600)
 def fetch_and_merge_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
     """Mengambil data Emas dan Rupiah, lalu menggabungkannya."""
+    # Ini memastikan bahwa fetch tidak dipanggil jika tabel belum ada
     if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
         return pd.DataFrame()
     
