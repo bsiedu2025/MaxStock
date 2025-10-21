@@ -484,7 +484,6 @@ except Exception:
 
 # =====================================================================================================================
 # Mengatur Nilai Default ke 1 Desember 2003
-# =================================================================================================003
 # =====================================================================================================================
 
 # Tentukan tanggal awal default manual yang diminta user
@@ -574,10 +573,18 @@ if selected_start_date and selected_end_date:
 
 
 # Fetch data untuk Grafik Utama
-raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+# [CRITICAL FIX] Pengecekan sebelum memanggil strftime
+if selected_start_date is not None and selected_end_date is not None:
+    raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
+else:
+    # Jika tanggal belum disinkronkan, gunakan df kosong
+    raw_df = pd.DataFrame()
+
 
 if raw_df.empty:
     st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di database.")
+    # Kita tidak st.stop() agar pesan peringatan setup awal di sidebar tetap tampil
+    # Tapi kita butuh data dummy untuk mencegah error di plotting
     st.stop()
     
 # Agregasi Data
