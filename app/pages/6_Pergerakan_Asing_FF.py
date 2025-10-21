@@ -17,7 +17,7 @@ import math
 from io import StringIO # Diperlukan untuk parsing Sheets CSV
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah")
 st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
@@ -106,7 +106,7 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
     if not sheet_id: return pd.DataFrame()
     
-    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
+    csv_url = f"https://docs.google.com/spreadsheets/d/13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY/edit?gid=0#gid=0"
     
     try:
         response = requests.get(csv_url, timeout=30)
