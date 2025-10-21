@@ -101,8 +101,8 @@ def get_latest_trade_date(table_name: str) -> datetime.date:
 @st.cache_data(ttl=600)
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
-    Mengambil data Rupiah dari Google Sheets menggunakan raw parsing (kolom C & D)
-    karena header yang diekspor Sheets tidak konsisten.
+    Mengambil data Rupiah dari Google Sheets dengan parsing CSV mentah yang robust.
+    Asumsi: Data Rupiah ada di kolom ke-3 (Date) dan ke-4 (Price/Close) dari CSV.
     """
     if not sheet_id: return pd.DataFrame()
     
@@ -112,51 +112,35 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # Baca CSV mentah. Kita akan tentukan start row-nya nanti.
-        raw_csv_content = response.text.splitlines()
+        # Baca CSV mentah tanpa header
+        df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=0)
         
-        # Cari baris yang mengandung 'Date' (Header yang sebenarnya dari GOOGLEFINANCE)
-        data_start_row = 0
-        for i, line in enumerate(raw_csv_content):
-            # Header Rupiah adalah blok data kedua, kita cari baris yang punya 3 koma atau lebih (4 kolom)
-            # dan mengandung kata 'Date' dan 'Close' (atau Price)
-            if line.count(',') >= 3 and ('Date' in line or 'Price' in line or 'Close' in line):
-                 data_start_row = i # Baris ini dan berikutnya adalah data
-                 break
-
-        if data_start_row == 0:
-            st.error("Gagal menemukan header data di Sheets. Pastikan format kolom C & D benar.")
+        # 1. Identifikasi Baris Awal Data (Hilangkan baris yang isinya kosong atau teks)
+        # Baris pertama yang memiliki format tanggal adalah baris awal data.
+        df_raw.dropna(how='all', inplace=True)
+        
+        # Cari baris yang isinya data Rupiah (Kolom 2 dan 3 di CSV, karena kolom Emas di 0 dan 1)
+        # Sheets export: [Date_emas], [Price_emas], [Date_idr], [Price_idr]
+        
+        # Cari baris data pertama (baris yang memiliki nilai di Kolom 0/Date)
+        first_data_row_index = df_raw[df_raw.iloc[:, 0].astype(str).str.contains(r'\d{1,2}/\d{1,2}/\d{4}')].index.min()
+        
+        if pd.isna(first_data_row_index):
+            st.error("Gagal menemukan baris data Rupiah yang valid. Pastikan data Rupiah (GOOGLEFINANCE) ada di kolom C & D.")
             return pd.DataFrame()
 
-        # Baca CSV, gunakan header yang benar (yang ada di baris data_start_row)
-        df_raw = pd.read_csv(StringIO("\n".join(raw_csv_content[data_start_row:])), header=0)
-        
-        # Membersihkan nama kolom dan menghapus baris kosong
-        df_raw.columns = [c.strip() for c in df_raw.columns]
-        df_raw.dropna(how='all', inplace=True) 
-        
-        # 1. Identifikasi Kolom yang Relevan: Kita tahu data Rupiah adalah blok kedua
-        
-        # Cari indeks Price/Close kedua (Blok Rupiah)
-        price_cols = [c for c in df_raw.columns if 'Price' in c or 'price' in c or 'Close' in c]
-        if len(price_cols) < 2:
-            st.error(f"Ditemukan {len(price_cols)} kolom harga. Butuh 2 (Emas & Rupiah).")
-            return pd.DataFrame()
-        
-        # Kolom Date (Kolom Price-1) dan Price kedua
-        idr_price_col_name = price_cols[1] # Nama kolom Price/Close kedua
-        
-        # Kolom Date Rupiah berada tepat sebelum kolom Price/Close Rupiah
-        idr_date_col_index = df_raw.columns.get_loc(idr_price_col_name) - 1 
-        idr_date_col_name = df_raw.columns[idr_date_col_index]
+        # Kita tahu data Rupiah ada di Kolom Index 2 (Date Rupiah) dan Index 3 (Price Rupiah)
+        df_idr = df_raw.iloc[first_data_row_index:].copy()
 
-        df_idr = df_raw[[idr_date_col_name, idr_price_col_name]].copy()
+        # Hanya ambil kolom Index 2 dan Index 3
+        df_idr = df_idr.iloc[:, [2, 3]] 
         df_idr.columns = ['trade_date_raw', 'IDR_USD']
         
-        # 3. Pembersihan Data
+        # 2. Pembersihan Data
         df_idr.replace('', np.nan, inplace=True)
+        df_idr.dropna(how='all', inplace=True)
         
-        # Konversi Tanggal (Asumsi format mm/dd/yyyy atau yyyy-mm-dd)
+        # Konversi Tanggal (Asumsi format mm/dd/yyyy)
         df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date_raw'], errors='coerce')
         
         # Pembersihan Angka
