@@ -17,7 +17,8 @@ import math
 from io import StringIO # Diperlukan untuk parsing Sheets CSV
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+# JUDUL SUDAH DIGANTI
+st.title("💰 Historis Emas & Nilai Tukar Rupiah")
 st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
@@ -29,6 +30,12 @@ if 'is_loading' not in st.session_state:
 # State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
 if 'sheet_id_input' not in st.session_state:
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
+
+# [FIX] Hapus state ROI Otomatis yang menyebabkan error (sudah tidak digunakan)
+# if 'auto_roi_start' not in st.session_state:
+#     st.session_state.auto_roi_start = None
+# if 'auto_roi_end' not in st.session_state:
+#     st.session_state.auto_roi_end = None
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -70,7 +77,7 @@ def _table_exists(name: str) -> bool:
                 FROM information_schema.tables
                 WHERE table_schema = DATABASE() AND table_name = :t
             """)
-            return bool(con.execute(q, {"t": name}).scalar())
+            return bool(con.execute(q).scalar())
     except Exception:
         return False
 
@@ -513,40 +520,7 @@ st.sidebar.markdown("---")
 # ────────────────────────────────────────────────────────────────────────────────
 # ALAT PENGUKURAN (ROI)
 # ────────────────────────────────────────────────────────────────────────────────
-
-# [BARU] Fungsi Callback untuk menangani event relayout (zoom/pan)
-def handle_relayout_roi(relayout_data):
-    if not relayout_data:
-        return
-
-    # Cek apakah ini event zoom/pan (mengandung range x-axis baru)
-    if 'xaxis.range[0]' in relayout_data and 'xaxis.range[1]' in relayout_data:
-        try:
-            start_str = relayout_data['xaxis.range[0]']
-            end_str = relayout_data['xaxis.range[1]']
-            
-            # Konversi format ISO Plotly ke format date
-            start_date = datetime.fromisoformat(start_str.split('T')[0]).date()
-            end_date = datetime.fromisoformat(end_str.split('T')[0]).date()
-            
-            # Pastikan start date tidak melebihi end date
-            if start_date < end_date:
-                st.session_state.auto_roi_start = start_date
-                st.session_state.auto_roi_end = end_date
-            else:
-                # Jika range terbalik (jarang terjadi), reset
-                st.session_state.auto_roi_start = None
-                st.session_state.auto_roi_end = None
-                
-            # st.experimental_rerun() # Tidak perlu rerun karena Plotly sudah update grafiknya
-            
-        except Exception:
-            # Abaikan error parsing tanggal
-            pass
-
 st.sidebar.header("📏 Alat Pengukuran (ROI)")
-st.sidebar.info("ROI dihitung otomatis saat Anda **Zoom** atau **Geser** grafik Emas.")
-
 
 # Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
 st.sidebar.markdown("---")
@@ -561,19 +535,19 @@ aggregation_freq = st.sidebar.selectbox(
 measurement_results = {}
 
 # Cek apakah ada range yang terekam dari event relayout
-if st.session_state.auto_roi_start and st.session_state.auto_roi_end:
-    start_str = st.session_state.auto_roi_start.strftime('%Y-%m-%d')
-    end_str = st.session_state.auto_roi_end.strftime('%Y-%m-%d')
+# Karena on_relayout TIDAK STABIL, kita hitung ROI berdasarkan filter utama saja
+if selected_start_date and selected_end_date:
+    start_str = selected_start_date.strftime('%Y-%m-%d')
+    end_str = selected_end_date.strftime('%Y-%m-%d')
     
     # Ambil data ROI hanya di rentang yang diklik (raw data untuk akurasi)
-    # Gunakan tanggal yang dipilih dari relayout event
     meas_df_raw = fetch_and_merge_macro_data(start_str, end_str)
     
     if not meas_df_raw.empty:
         # Agregasi data pengukuran (ambil data terakhir di periode agregasi yang dipilih)
         meas_df_agg = aggregate_data(meas_df_raw, aggregation_freq)
         
-        if not meas_df_agg.empty:
+        if not meas_df_agg.empty and len(meas_df_agg) >= 2:
             # Nilai Awal: Ambil baris pertama
             start_gold = meas_df_agg['Gold_USD'].iloc[0]
             start_idr = meas_df_agg['IDR_USD'].iloc[0]
@@ -693,7 +667,8 @@ st.markdown("---")
 # Hasil Pengukuran ROI OTOMATIS (Muncul setelah metrik utama)
 # ────────────────────────────────────────────────────────────────────────────────
 if measurement_results:
-    st.subheader(f"ROI Otomatis ({measurement_results['start_date']} s/d {measurement_results['end_date']})")
+    # ROI otomatis dihitung berdasarkan filter utama di sidebar
+    st.subheader(f"ROI Periode Filter ({measurement_results['start_date']} s/d {measurement_results['end_date']})")
     
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     
@@ -707,7 +682,7 @@ if measurement_results:
 # ────────────────────────────────────────────────────────────────────────────────
 # Grafik Emas dan Rupiah (2 Grafik Terpisah)
 st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
-st.info("💡 ROI dihitung otomatis (di atas) berdasarkan rentang X-Axis yang Anda **Zoom** atau **Geser**.")
+st.info("💡 ROI (di atas) dihitung otomatis berdasarkan rentang waktu yang Anda pilih di **Filter Periode Makro**.")
 
 
 # --- 1. GRAFIK EMAS ---
@@ -740,12 +715,10 @@ fig_gold.update_xaxes(
     )
 )
 
-# [BARU] Menangani Relayout Event untuk Pengukuran ROI OTOMATIS
-gold_relayout_data = st.plotly_chart(
+st.plotly_chart(
     fig_gold, 
     key="gold_chart", 
     use_container_width=True,
-    on_relayout=handle_relayout_roi, # Callback untuk event zoom/pan
     config={
         'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
         'displaylogo': False,
