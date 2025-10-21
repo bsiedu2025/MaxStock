@@ -73,12 +73,10 @@ def _table_exists(name: str) -> bool:
     try:
         engine = _build_engine()
         with engine.connect() as con:
-            q = text("""
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                WHERE table_schema = DATABASE() AND table_name = :t
-            """)
-            return bool(con.execute(q).scalar())
+            # Gunakan COUNT(*) untuk check, lebih cepat daripada information_schema di beberapa MariaDB
+            q = text(f"SELECT COUNT(*) FROM {name} LIMIT 1")
+            con.execute(q).scalar()
+            return True
     except Exception:
         return False
 
