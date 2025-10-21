@@ -1,718 +1,577 @@
 # -*- coding: utf-8 -*-
-# app/pages/6_Pergerakan_Asing_FF.py (Dashboard Makro Baru: Emas & Rupiah dari MariaDB)
+"""
+Streamlit page: History Emas (USD/oz) & Kurs USD/IDR
+- Sumber emas bisa dipilih: Stooq atau Yahoo Finance (toggle di sidebar)
+- Kurs USD/IDR diambil dari Google Sheets (CSV via gviz) ATAU bisa juga Yahoo (opsi cadangan)
+- Simpan ke MySQL: dua tabel (gold_data, idr_data)
+- Join, forward-fill di akhir pekan/libur, agregasi (D/W/M/Y), dan chart Plotly
 
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
-import numpy as np
+Catatan:
+- App tetap bisa jalan tanpa DB (akan tampilkan data in-memory) kalau kredensial DB tidak tersedia.
+- Pastikan pip deps: streamlit, pandas, numpy, SQLAlchemy, mysql-connector-python, plotly, requests, python-dateutil
+"""
+
+from __future__ import annotations
 import os
-import tempfile
-from urllib.parse import quote_plus
-from sqlalchemy import create_engine, text
-import time
-import requests 
+import io
+import sys
 import math
-from io import StringIO # Diperlukan untuk parsing Sheets CSV
+import json
+import time
+import textwrap
+from datetime import date, datetime, timedelta
+from typing import Optional, Tuple
 
-st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+from sqlalchemy import create_engine, text as sql_text
+from sqlalchemy.engine import Engine
+import plotly.express as px
+
+# ------------------------------
+# Page Setup
+# ------------------------------
+st.set_page_config(
+    page_title="History Emas & USD/IDR",
+    page_icon="🪙",
+    layout="wide",
+)
+
+st.title("🪙 History Emas & USD/IDR — dengan Toggle Sumber (Stooq/Yahoo)")
 st.caption(
-    "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
+    "Sumber emas bisa dipilih di sidebar. Data disimpan di MySQL (jika tersedia), lalu digabung dan divisualisasikan."
 )
 
-# Inisialisasi session state
-if 'is_loading' not in st.session_state:
-    st.session_state.is_loading = False
-    
-# State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
-if 'sheet_id_input' not in st.session_state:
-    # [FIX 1] Perbaikan ID Sheets yang salah ketik (dari '...99...' menjadi '...97...')
-    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
-
-# ────────────────────────────────────────────────────────────────────────────────
-# DB Connection & Utility 
-# ────────────────────────────────────────────────────────────────────────────────
-
-@st.cache_resource
-def _build_engine():
-    """Membangun koneksi SQLAlchemy ke database."""
-    host = os.getenv("DB_HOST", st.secrets.get("DB_HOST", ""))
-    port = int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306)))
-    database = os.getenv("DB_NAME", st.secrets.get("DB_NAME", ""))
-    user = os.getenv("DB_USER", st.secrets.get("DB_USER", ""))
-    password = os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", ""))
-    ssl_ca = os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", ""))
-
-    pwd = quote_plus(str(password))
-    connect_args = {}
-    
-    try:
-        if ssl_ca and "BEGIN CERTIFICATE" in ssl_ca:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-            tmp.write(ssl_ca.encode("utf-8")); tmp.flush()
-            connect_args["ssl_ca"] = tmp.name
-    except Exception as e:
-        st.warning(f"Error saat menyiapkan SSL CA: {e}")
-
-    url = f"mysql+mysqlconnector://{user}:{pwd}@{host}:{port}/{database}"
-    return create_engine(url, connect_args=connect_args, pool_recycle=300, pool_pre_ping=True)
-
-@st.cache_data(ttl=3600)
-def _table_exists(name: str) -> bool:
-    """Mengecek apakah tabel ada di database saat ini."""
-    try:
-        engine = _build_engine()
-        with engine.connect() as con:
-            q = text("""
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                WHERE table_schema = DATABASE() AND table_name = :t
-            """)
-            return bool(con.execute(q, {"t": name}).scalar())
-    except Exception:
-        return False
-
-# Inisialisasi Engine
-engine = _build_engine() 
-GOLD_TABLE = "gold_data"
-IDR_TABLE = "idr_data"
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Data Fetchers (Emas Stooq & Rupiah Sheets)
-# ────────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=60)
-def get_latest_trade_date(table_name: str) -> datetime.date:
-    """Mencari tanggal terakhir data di database untuk tabel tertentu."""
-    if not _table_exists(table_name):
-         return datetime(1990, 1, 1).date()
-
-    try:
-        with engine.connect() as con:
-            q = text(f"SELECT MAX(trade_date) FROM {table_name}")
-            max_date = con.execute(q).scalar()
-            return max_date if max_date else datetime(1990, 1, 1).date()
-    except Exception:
-        return datetime(1990, 1, 1).date() # Default awal 1990
-
-# --- NEW: Fetch Rupiah dari Google Sheets ---
-@st.cache_data(ttl=600)
-def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
-    """
-    Mengambil data Rupiah dari Google Sheets dengan parsing yang paling robust.
-    Asumsi: Data Rupiah ada di Kolom 0 dan 1 (A & B) karena hanya ada satu formula GOOGLEFINANCE.
-    """
-    if not sheet_id: 
-        st.error("Spreadsheet ID tidak boleh kosong.")
-        return pd.DataFrame()
-    
-    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
-    
-    try:
-        response = requests.get(csv_url, timeout=30)
-        response.raise_for_status() 
-        
-        # 1. Baca CSV mentah tanpa header
-        df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=0)
-        df_raw.dropna(how='all', inplace=True)
-        
-        # 2. Identifikasi Baris Awal Data (Baris pertama yang punya format tanggal di Kolom 0)
-        first_data_row_index = df_raw[df_raw.iloc[:, 0].astype(str).str.contains(r'\d{1,2}/\d{1,2}/\d{4}')].index.min()
-        
-        if pd.isna(first_data_row_index):
-            st.error("Gagal menemukan baris data Rupiah yang valid. Pastikan hasil formula GOOGLEFINANCE ada di kolom A & B dan file di-set 'Anyone with the link (Viewer)'.")
-            return pd.DataFrame()
-
-        # 3. Ambil data Rupiah (Kolom Index 0/Date dan Index 1/Price)
-        df_idr = df_raw.iloc[first_data_row_index:].copy()
-        df_idr = df_idr.iloc[:, [0, 1]] 
-        df_idr.columns = ['trade_date_raw', 'IDR_USD']
-        
-        # 4. Pembersihan Data
-        df_idr.replace('', np.nan, inplace=True)
-        df_idr.dropna(how='all', inplace=True)
-        
-        # Konversi Tanggal (Asumsi format mm/dd/yyyy)
-        df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date_raw'], errors='coerce')
-        
-        # Pembersihan Angka
-        df_idr['IDR_USD'] = df_idr['IDR_USD'].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
-        df_idr['IDR_USD'] = pd.to_numeric(df_idr['IDR_USD'], errors='coerce')
-        
-        df_idr.dropna(subset=['trade_date', 'IDR_USD'], inplace=True)
-        
-        df_idr = df_idr[['trade_date', 'IDR_USD']]
-        df_idr['trade_date'] = df_idr['trade_date'].dt.date
-        
-        return df_idr
-        
-    except requests.exceptions.HTTPError as he:
-        # Menangkap Error 404 (Not Found) atau 403 (Forbidden)
-        st.error(f"Gagal mengambil data Rupiah dari Sheets. Pastikan link di-set 'Anyone with the link (Viewer)'. Error: {he}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Terjadi kesalahan saat parsing Rupiah: {e}")
-        return pd.DataFrame()
-
-
-def fetch_gold_from_stooq() -> pd.DataFrame:
-    """Mengambil data Emas historis dari Stooq."""
-    stooq_url = "https://stooq.com/q/d/l/?s=xauusd&i=d"
-    
-    try:
-        df_gold = pd.read_csv(stooq_url, index_col='Date', parse_dates=True)
-        df_gold = df_gold[['Close']].copy()
-        df_gold.columns = ['Gold_USD']
-        df_gold = df_gold.sort_index(ascending=True).reset_index()
-        df_gold.rename(columns={'Date': 'trade_date'}, inplace=True)
-        df_gold['trade_date'] = df_gold['trade_date'].dt.date
-        df_gold.dropna(inplace=True)
-        
-        return df_gold
-        
-    except Exception as e:
-        st.error(f"Terjadi kesalahan saat memproses data Emas Stooq: {e}")
-        return pd.DataFrame()
-
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Uploader/Seeder Data (Menangani Dua Tabel)
-# ────────────────────────────────────────────────────────────────────────────────
-
-def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: str, action: str = 'full'):
-    """Fungsi pembantu untuk membuat tabel dan mengunggah data (full atau append)."""
-    total_rows = len(df_data)
-    
-    engine = _build_engine()
-    
-    if action == 'full':
-        # Mode CREATE TABLE
-        with st.status(f"1. Menyiapkan dan Membuat Tabel {table_name}...", expanded=False) as status_bar:
-            with engine.connect() as con:
-                create_table_sql = f"""
-                    CREATE TABLE IF NOT EXISTS {table_name} (
-                        trade_date DATE NOT NULL,
-                        {value_col} FLOAT,
-                        PRIMARY KEY (trade_date)
-                    ) ENGINE=InnoDB;
-                """
-                con.execute(text(f"DROP TABLE IF EXISTS {table_name}")) 
-                con.execute(text(create_table_sql))
-                con.commit()
-            status_bar.update(label=f"✅ Tabel {table_name} siap dibuat.", state="complete")
-
-    # Mode APPEND DATA
-    with st.status(f"2. Mengunggah {total_rows} baris ke {table_name}...", expanded=False) as status_bar:
-        try:
-            df_temp = df_data.set_index('trade_date')
-            df_temp.to_sql(
-                name=table_name, 
-                con=engine, 
-                if_exists='append',
-                index=True,
-                chunksize=5000 
-            )
-            status_bar.update(label=f"✅ Pengunggahan {table_name} Selesai! ({total_rows} baris)", state="complete")
-            return True
-        except Exception as e:
-            st.error(f"❌ Gagal mengunggah data {table_name}! Error: {e}")
-            return False
-
-
-def upload_full_data_to_db_two_tables(sheet_id: str):
-    """Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah dengan commit terpisah."""
-    st.session_state.is_loading = True
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    
-    # 1. Fetch Data
-    df_gold = fetch_gold_from_stooq()
-    df_idr = fetch_idr_from_sheets(sheet_id)
-    
-    if df_gold.empty:
-        st.error("Data Emas tidak ditemukan dari Stooq. Tidak bisa melanjutkan.")
-        st.session_state.is_loading = False
-        return
-    
-    if df_idr.empty:
-        st.error("Data Rupiah tidak ditemukan dari Sheets. Tidak bisa melanjutkan.")
-        st.session_state.is_loading = False
-        return
-        
-    # 2. Upload Emas (Pisah)
-    st.subheader("Proses Upload Emas (`gold_data`)")
-    df_gold_upload = df_gold[['trade_date', 'Gold_USD']]
-    success_gold = _create_and_upload_table(df_gold_upload, GOLD_TABLE, 'Gold_USD', action='full')
-    
-    # 3. Upload Rupiah (Pisah)
-    st.subheader("Proses Upload Rupiah (`idr_data`)")
-    df_idr_upload = df_idr[['trade_date', 'IDR_USD']]
-    success_idr = _create_and_upload_table(df_idr_upload, IDR_TABLE, 'IDR_USD', action='full')
-
-    st.session_state.is_loading = False
-    
-    if success_gold and success_idr:
-        st.success("🎉 Kedua tabel (Emas & Rupiah) berhasil dibuat dan diisi!")
-        st.rerun()
-    else:
-        st.error("⚠️ Proses selesai dengan kegagalan pada satu atau kedua tabel. Cek log di atas.")
-
-
-def delete_all_tables():
-    """Menghapus kedua tabel."""
-    try:
-        with engine.connect() as con:
-            con.execute(text(f"DROP TABLE IF EXISTS {GOLD_TABLE}"))
-            con.execute(text(f"DROP TABLE IF EXISTS {IDR_TABLE}"))
-            con.commit()
-        st.success(f"Kedua tabel (`{GOLD_TABLE}` dan `{IDR_TABLE}`) berhasil dihapus.")
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Gagal menghapus tabel: {e}")
-
-
-def upload_gap_data_two_tables(sheet_id: str):
-    """Mengisi gap data Emas dan Rupiah."""
-    st.session_state.is_loading = True
-    
-    # 1. Tentukan Gap Dates
-    last_date_gold = get_latest_trade_date(GOLD_TABLE)
-    last_date_idr = get_latest_trade_date(IDR_TABLE)
-    
-    # Ambil data sumber lengkap
-    df_full_gold = fetch_gold_from_stooq()
-    df_full_idr = fetch_idr_from_sheets(sheet_id)
-    
-    if df_full_gold.empty or df_full_idr.empty:
-        st.error("Gagal mengambil data Emas atau Rupiah dari sumber.")
-        st.session_state.is_loading = False
-        return
-
-    # 2. Gap Emas
-    df_gold_gap = df_full_gold[df_full_gold['trade_date'] > last_date_gold].copy()
-    
-    # 3. Gap Rupiah
-    df_idr_gap = df_full_idr[df_full_idr['trade_date'] > last_date_idr].copy()
-    
-    
-    if df_gold_gap.empty and df_idr_gap.empty:
-        st.info("Tidak ada data baru yang ditemukan dari sumber. Data Anda sudah terbaru.")
-        st.session_state.is_loading = False
-        return
-
-    # Upload Emas Gap
-    if not df_gold_gap.empty:
-        total_rows = len(df_gold_gap)
-        with st.status(f"Mengisi gap {GOLD_TABLE} ({total_rows} baris)...", expanded=True) as status_bar:
-            df_gold_gap.set_index('trade_date').to_sql(name=GOLD_TABLE, con=engine, if_exists='append', index=True, chunksize=500)
-            status_bar.update(label=f"✅ Gap {GOLD_TABLE} selesai.", state="complete", expanded=False)
-
-    # Upload Rupiah Gap
-    if not df_idr_gap.empty:
-        total_rows = len(df_idr_gap)
-        with st.status(f"Mengisi gap {IDR_TABLE} ({total_rows} baris)...", expanded=True) as status_bar:
-            df_idr_gap.set_index('trade_date').to_sql(name=IDR_TABLE, con=engine, if_exists='append', index=True, chunksize=500)
-            status_bar.update(label=f"✅ Gap {IDR_TABLE} selesai.", state="complete", expanded=False)
-
-    st.cache_data.clear()
-    st.success("🎉 Kedua tabel berhasil di-update dengan data terbaru!")
-    st.session_state.is_loading = False
-    st.rerun() 
-
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Data Fetcher & Aggregator (Satu Fungsi Utama)
-# ────────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=600)
-def fetch_and_merge_macro_data(start_date: str, end_date: str) -> pd.DataFrame:
-    """Mengambil data Emas dan Rupiah, lalu menggabungkannya."""
-    if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
-        return pd.DataFrame()
-    
-    sql_gold = f"SELECT trade_date, Gold_USD FROM {GOLD_TABLE} WHERE trade_date BETWEEN :start_date AND :end_date"
-    sql_idr = f"SELECT trade_date, IDR_USD FROM {IDR_TABLE} WHERE trade_date BETWEEN :start_date AND :end_date"
-    params = {"start_date": start_date, "end_date": end_date}
-    
-    try:
-        with engine.connect() as con:
-            df_gold = pd.read_sql(text(sql_gold), con, params=params)
-            df_idr = pd.read_sql(text(sql_idr), con, params=params)
-        
-        # Merge data
-        df_gold['trade_date'] = pd.to_datetime(df_gold['trade_date'])
-        df_idr['trade_date'] = pd.to_datetime(df_idr['trade_date'])
-        
-        df_merged = pd.merge(df_gold, df_idr, on='trade_date', how='outer') # Outer join agar tidak ada data hilang
-        df_merged = df_merged.set_index('trade_date').sort_index()
-        
-        # Interpolasi untuk mengisi hari yang hilang (Opsional, tapi membuat grafik mulus)
-        df_merged = df_merged.ffill() 
-        
-        return df_merged
-
-    except Exception as e:
-        st.error(f"Gagal mengambil atau menggabungkan data makro: {e}")
-        return pd.DataFrame()
-
-
-def aggregate_data(df: pd.DataFrame, freq: str) -> pd.DataFrame:
-    """Mengagregasi data harian ke frekuensi Mingguan, Bulanan, atau Tahunan."""
-    if freq == 'Harian':
-        return df
-    
-    # ... (Logika agregasi tidak berubah)
-    if freq == 'Mingguan':
-        rule = 'W'
-    elif freq == 'Bulanan':
-        rule = 'M'
-    elif freq == 'Tahunan':
-        rule = 'Y'
-    else:
-        return df 
-    
-    aggregated_df = df.resample(rule).last().dropna()
-    
-    aggregated_df['Gold_Change_Pct'] = aggregated_df['Gold_USD'].pct_change() * 100
-    aggregated_df['IDR_Change_Pct'] = aggregated_df['IDR_USD'].pct_change() * 100
-    
-    return aggregated_df
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Streamlit Interface
-# ────────────────────────────────────────────────────────────────────────────────
-
-# Input Sidebar untuk Google Sheet ID
-st.sidebar.header("🔑 Sumber Data Rupiah Riil")
-st.sidebar.markdown("Masukkan **ID Spreadsheet** Google Sheets Anda yang berisi data USD/IDR.")
-st.session_state.sheet_id_input = st.sidebar.text_input(
-    "ID Spreadsheet (URL antara /d/ dan /edit)", 
-    value=st.session_state.sheet_id_input, 
-    key="sheet_id_key"
+# ------------------------------
+# Helpers
+# ------------------------------
+YAHOO_GOLD_SYMBOL_SPOT = "XAUUSD=X"  # spot gold USD/oz
+YAHOO_GOLD_SYMBOL_FUT = "GC=F"       # alternative futures continuous
+YAHOO_CSV_TEMPLATE = (
+    "https://query1.finance.yahoo.com/v7/finance/download/{symbol}?period1={p1}"
+    "&period2={p2}&interval=1d&events=history&includeAdjustedClose=true"
 )
+STOOQ_GOLD_XAUUSD_CSV = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+GRAM_PER_TROY_OZ = 31.1034768
 
+@st.cache_data(show_spinner=False)
+def _unix_range(start: date, end: date) -> Tuple[int, int]:
+    """Return (period1, period2) as seconds since epoch; period2 exclusive (add 1 day)."""
+    epoch = date(1970, 1, 1)
+    p1 = int((start - epoch).total_seconds())
+    p2 = int(((end + timedelta(days=1)) - epoch).total_seconds())
+    return p1, p2
 
-# Cek keberadaan tabel Emas dan Rupiah
-if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
-    st.warning(f"Tabel makro belum lengkap. Butuh tabel `{GOLD_TABLE}` dan `{IDR_TABLE}`.")
-    
-    with st.expander("🛠️ Klik di sini untuk membuat 2 tabel makro (Setup Awal)") as exp:
-        st.info("Pastikan Anda sudah mengatur **Google Sheet** (Share: Anyone with the link) dan mengisi **Spreadsheet ID** di sidebar.")
-        
-        if st.button("📥 Ambil Emas & Rupiah Riil & Buat Tabel", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, type="primary"):
-            upload_full_data_to_db_two_tables(st.session_state.sheet_id_input)
-            
-        if st.button("🗑️ Hapus SEMUA Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_all_initial_table"):
-            delete_all_tables()
-            
-    st.stop()
-    
-# --- LOGIKA KETIKA KEDUA TABEL SUDAH ADA ---
-else:
-    # --- FORM UPDATE HARIAN DI SIDEBAR (GAP FILLER) ---
-    with st.sidebar:
-        st.header("🔄 Isi Gap Data Otomatis")
-        
-        last_date_gold = get_latest_trade_date(GOLD_TABLE)
-        last_date_idr = get_latest_trade_date(IDR_TABLE)
-        
-        last_update_date = min(last_date_gold, last_date_idr)
-        today = datetime.now().date()
-        
-        if last_update_date >= today:
-            st.success("✅ Data Anda sudah terbaru hingga hari ini!")
+# ------------------------------
+# Database
+# ------------------------------
+
+def _read_db_config() -> Optional[dict]:
+    # Prefer st.secrets then env vars
+    cfg = {}
+    try:
+        if "db" in st.secrets:
+            s = st.secrets["db"]
+            cfg = {
+                "host": s.get("host"),
+                "port": int(s.get("port", 3306)),
+                "database": s.get("name") or s.get("database"),
+                "user": s.get("user"),
+                "password": s.get("password"),
+                "ssl_ca": s.get("ssl_ca"),
+            }
         else:
-            st.info(f"Update terakhir: {last_update_date.strftime('%Y-%m-%d')}. Ada Gap.")
-            
-            if st.button("⚡ Lengkapi Gap Data (Stooq Emas & Sheets Kurs)", 
-                         disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, 
-                         type="primary"):
-                
-                upload_gap_data_two_tables(st.session_state.sheet_id_input)
+            # env fallback
+            cfg = {
+                "host": os.getenv("DB_HOST"),
+                "port": int(os.getenv("DB_PORT", "3306")),
+                "database": os.getenv("DB_NAME"),
+                "user": os.getenv("DB_USER"),
+                "password": os.getenv("DB_PASSWORD"),
+                "ssl_ca": os.getenv("DB_SSL_CA"),
+            }
+    except Exception:
+        pass
 
-    st.sidebar.markdown("---")
-    
-    # Tampilkan tombol untuk update data simulasi 1970 atau menghapus tabel
-    with st.expander("🛠️ Opsi Perawatan Data Makro (Tabel sudah ada)") as exp:
-        st.info("Gunakan tombol ini untuk menghapus tabel atau memperbarui semua data.")
-        
-        col_upd, col_del = st.columns(2)
-        
-        with col_upd:
-            if st.button("🔄 Ambil Ulang & Timpa Kedua Tabel", key="btn_replace_sheets", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input):
-                upload_full_data_to_db_two_tables(st.session_state.sheet_id_input) 
+    if not cfg or not cfg.get("host") or not cfg.get("database"):
+        return None
+    return cfg
 
-        with col_del:
-            if st.button("🗑️ Hapus SEMUA Tabel Macro Data", key="btn_delete_table", disabled=st.session_state.is_loading):
-                delete_all_tables()
+@st.cache_resource(show_spinner=False)
+def get_engine() -> Optional[Engine]:
+    cfg = _read_db_config()
+    if not cfg:
+        return None
 
-# Tampilkan loading indicator global jika sedang proses
-if st.session_state.is_loading:
-    pass
+    # Optional SSL CA file handling
+    connect_args = {}
+    if cfg.get("ssl_ca"):
+        # Write CA to temp file for mysql-connector-python
+        ca_path = os.path.join(os.getcwd(), "_mysql_ca.pem")
+        try:
+            with open(ca_path, "w", encoding="utf-8") as f:
+                f.write(cfg["ssl_ca"])  # assume PEM content
+            connect_args["ssl_ca"] = ca_path
+        except Exception:
+            # Accept path if it's a path, not content
+            if os.path.exists(cfg["ssl_ca"]):
+                connect_args["ssl_ca"] = cfg["ssl_ca"]
 
-# Filter Sidebar (Tersedia setelah tabel ada)
-if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)): st.stop()
+    url = (
+        f"mysql+mysqlconnector://{cfg['user']}:{cfg['password']}@{cfg['host']}:{cfg['port']}/{cfg['database']}"
+    )
+    engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+    return engine
 
-st.sidebar.header("Filter Periode Makro")
-end_date = datetime.now().date()
+# ------------------------------
+# Fetchers
+# ------------------------------
 
-# Cek tanggal terlama dari data di DB untuk min_value
+@st.cache_data(ttl=3600, show_spinner=True)
+def fetch_gold_from_stooq() -> pd.DataFrame:
+    df = pd.read_csv(STOOQ_GOLD_XAUUSD_CSV)
+    # Expected columns: Date,Open,High,Low,Close,Volume
+    df = df.rename(columns={"Date": "trade_date", "Close": "Gold_USD"})
+    # Coerce types
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    df["Gold_USD"] = pd.to_numeric(df["Gold_USD"], errors="coerce")
+    df = df.dropna(subset=["trade_date", "Gold_USD"]).sort_values("trade_date").reset_index(drop=True)
+    return df
+
+@st.cache_data(ttl=3600, show_spinner=True)
+def fetch_gold_from_yahoo(symbol: str = YAHOO_GOLD_SYMBOL_SPOT,
+                          start: Optional[date] = None,
+                          end: Optional[date] = None) -> pd.DataFrame:
+    if start is None:
+        start = date(1970, 1, 1)
+    if end is None:
+        end = date.today()
+    p1, p2 = _unix_range(start, end)
+    url = YAHOO_CSV_TEMPLATE.format(symbol=symbol, p1=p1, p2=p2)
+    df = pd.read_csv(url)
+    # Columns: Date,Open,High,Low,Close,Adj Close,Volume
+    df = df.rename(columns={"Date": "trade_date", "Close": "Gold_USD"})
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    df["Gold_USD"] = pd.to_numeric(df["Gold_USD"], errors="coerce")
+    df = df.dropna(subset=["trade_date", "Gold_USD"]).sort_values("trade_date").reset_index(drop=True)
+    return df
+
+@st.cache_data(ttl=1800, show_spinner=True)
+def fetch_idr_from_sheets(spreadsheet_id: str, gid: int = 0) -> pd.DataFrame:
+    """Ambil kurs USD/IDR dari Google Sheets (tab pertama/gid=0) via CSV gviz.
+    Wajib: kolom pertama = tanggal, kolom kedua = nilai kurs (IDR per USD).
+    Sheet harus public Viewer.
+    """
+    url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
+    df_raw = pd.read_csv(url)
+
+    # Cari dua kolom pertama yang valid
+    # Deteksi kolom tanggal & nilai by position, lalu coerce
+    df = df_raw.copy()
+    if df.shape[1] < 2:
+        raise ValueError("CSV dari Google Sheets minimal harus punya 2 kolom (tanggal; nilai kurs)")
+
+    df = df.iloc[:, :2]
+    df.columns = ["trade_date", "IDR_USD"]
+    # Buang header duplikat seperti baris 'Date' dsb.
+    df = df[~df["trade_date"].astype(str).str.contains("Date", case=False, na=False)]
+
+    # Coerce
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    # Hapus pemisah ribuan koma/titik lalu konversi
+    df["IDR_USD"] = (
+        df["IDR_USD"].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+    )
+    df["IDR_USD"] = pd.to_numeric(df["IDR_USD"], errors="coerce")
+
+    df = df.dropna(subset=["trade_date", "IDR_USD"]).sort_values("trade_date").reset_index(drop=True)
+    return df
+
+# Cadangan: USD/IDR dari Yahoo jika butuh penuh otomatis
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_idr_from_yahoo(start: Optional[date] = None, end: Optional[date] = None) -> pd.DataFrame:
+    if start is None:
+        start = date(1970, 1, 1)
+    if end is None:
+        end = date.today()
+    p1, p2 = _unix_range(start, end)
+    url = YAHOO_CSV_TEMPLATE.format(symbol="USDIDR=X", p1=p1, p2=p2)
+    df = pd.read_csv(url)
+    df = df.rename(columns={"Date": "trade_date", "Close": "IDR_USD"})
+    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
+    df["IDR_USD"] = pd.to_numeric(df["IDR_USD"], errors="coerce")
+    df = df.dropna(subset=["trade_date", "IDR_USD"]).sort_values("trade_date").reset_index(drop=True)
+    return df
+
+# ------------------------------
+# DB schema helpers
+# ------------------------------
+DDL_GOLD = """
+CREATE TABLE IF NOT EXISTS gold_data (
+  trade_date DATE PRIMARY KEY,
+  Gold_USD   DOUBLE
+) ENGINE=InnoDB
+"""
+
+DDL_IDR = """
+CREATE TABLE IF NOT EXISTS idr_data (
+  trade_date DATE PRIMARY KEY,
+  IDR_USD    DOUBLE
+) ENGINE=InnoDB
+"""
+
+
+def recreate_tables(engine: Engine):
+    with engine.begin() as conn:
+        conn.execute(sql_text("DROP TABLE IF EXISTS gold_data"))
+        conn.execute(sql_text("DROP TABLE IF EXISTS idr_data"))
+        conn.execute(sql_text(DDL_GOLD))
+        conn.execute(sql_text(DDL_IDR))
+
+
+def ensure_tables(engine: Engine):
+    with engine.begin() as conn:
+        conn.execute(sql_text(DDL_GOLD))
+        conn.execute(sql_text(DDL_IDR))
+
+
+# ------------------------------
+# Uploaders (full & gap)
+# ------------------------------
+
+def upload_full(engine: Optional[Engine], gold_df: pd.DataFrame, idr_df: pd.DataFrame):
+    if engine is None:
+        st.warning("DB tidak terkonfigurasi. Melewatkan penyimpanan ke MySQL (in-memory saja).")
+        return
+    with st.status("Mempersiapkan tabel & mengunggah (full replace)…", expanded=True) as status:
+        recreate_tables(engine)
+        st.write("✔ Tabel dibuat ulang")
+        gold_df.to_sql("gold_data", con=engine, if_exists="append", index=False)
+        idr_df.to_sql("idr_data", con=engine, if_exists="append", index=False)
+        st.write(f"✔ Upload gold_data: {len(gold_df):,} baris")
+        st.write(f"✔ Upload idr_data : {len(idr_df):,} baris")
+        status.update(label="Selesai full replace ✅", state="complete")
+
+
+def _max_date(engine: Engine, table: str) -> Optional[date]:
+    q = f"SELECT MAX(trade_date) AS d FROM {table}"
+    with engine.connect() as conn:
+        r = conn.execute(sql_text(q)).scalar()
+        if r is None:
+            return None
+        if isinstance(r, datetime):
+            return r.date()
+        return r
+
+
+def upload_gap(engine: Optional[Engine], gold_df: pd.DataFrame, idr_df: pd.DataFrame):
+    if engine is None:
+        st.warning("DB tidak terkonfigurasi. Melewatkan penyimpanan gap ke MySQL (in-memory saja).")
+        return
+
+    ensure_tables(engine)
+
+    with st.status("Mengunggah gap data…", expanded=True) as status:
+        # GOLD
+        dmax_gold = _max_date(engine, "gold_data")
+        if dmax_gold is None:
+            st.write("gold_data kosong → mengunggah penuh…")
+            gold_to_up = gold_df
+        else:
+            gold_to_up = gold_df[gold_df["trade_date"] > dmax_gold]
+        if not gold_to_up.empty:
+            gold_to_up.to_sql("gold_data", con=engine, if_exists="append", index=False)
+            st.write(f"✔ gold_data +{len(gold_to_up):,} baris")
+        else:
+            st.write("gold_data tidak ada gap")
+
+        # IDR
+        dmax_idr = _max_date(engine, "idr_data")
+        if dmax_idr is None:
+            st.write("idr_data kosong → mengunggah penuh…")
+            idr_to_up = idr_df
+        else:
+            idr_to_up = idr_df[idr_df["trade_date"] > dmax_idr]
+        if not idr_to_up.empty:
+            idr_to_up.to_sql("idr_data", con=engine, if_exists="append", index=False)
+            st.write(f"✔ idr_data +{len(idr_to_up):,} baris")
+        else:
+            st.write("idr_data tidak ada gap")
+
+        status.update(label="Selesai unggah gap ✅", state="complete")
+
+
+# ------------------------------
+# Query merged & aggregate
+# ------------------------------
+
+@st.cache_data(ttl=600, show_spinner=False)
+def read_joined(engine: Optional[Engine], start: date, end: date) -> pd.DataFrame:
+    if engine is None:
+        return pd.DataFrame()
+    q = sql_text(
+        """
+        SELECT g.trade_date,
+               g.Gold_USD,
+               i.IDR_USD
+        FROM gold_data g
+        FULL JOIN idr_data i ON i.trade_date = g.trade_date
+        WHERE (g.trade_date BETWEEN :s AND :e) OR (i.trade_date BETWEEN :s AND :e)
+        ORDER BY 1
+        """
+    )
+    # Note: FULL JOIN not supported by MySQL; use UNION to emulate
+    if engine.dialect.name.lower().startswith("mysql"):
+        q = sql_text(
+            """
+            SELECT t.trade_date, t.Gold_USD, t.IDR_USD FROM (
+              SELECT g.trade_date, g.Gold_USD, i.IDR_USD
+              FROM gold_data g
+              LEFT JOIN idr_data i ON i.trade_date = g.trade_date
+              WHERE g.trade_date BETWEEN :s AND :e
+              UNION
+              SELECT i.trade_date, g.Gold_USD, i.IDR_USD
+              FROM idr_data i
+              LEFT JOIN gold_data g ON g.trade_date = i.trade_date
+              WHERE i.trade_date BETWEEN :s AND :e
+            ) t
+            ORDER BY t.trade_date
+            """
+        )
+
+    with engine.connect() as conn:
+        df = pd.read_sql(q, conn, params={"s": start, "e": end})
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    # Forward-fill to cover weekend/libur
+    df = df.set_index(pd.to_datetime(df["trade_date"])).sort_index()
+    idx = pd.date_range(start, end, freq="D")
+    df = df.reindex(idx)
+    df["Gold_USD"] = df["Gold_USD"].ffill()
+    df["IDR_USD"] = df["IDR_USD"].ffill()
+    df["trade_date"] = df.index.date
+    df = df[["trade_date", "Gold_USD", "IDR_USD"]].reset_index(drop=True)
+    return df
+
+
+def aggregate(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    s = pd.to_datetime(df["trade_date"])  # index for resample
+    g = pd.Series(df["Gold_USD"].values, index=s)
+    r = pd.Series(df["IDR_USD"].values, index=s)
+
+    # Resample ke last value tiap periode
+    g_res = g.resample(freq).last()
+    r_res = r.resample(freq).last()
+
+    out = pd.DataFrame({
+        "trade_date": g_res.index.date,
+        "Gold_USD": g_res.values,
+        "IDR_USD": r_res.values,
+    })
+    out["Gold_IDR_per_gram"] = out["Gold_USD"] * out["IDR_USD"] / GRAM_PER_TROY_OZ
+
+    # %Change terhadap periode sebelumnya
+    out["Gold_USD_%chg"] = out["Gold_USD"].pct_change() * 100.0
+    out["IDR_USD_%chg"] = out["IDR_USD"].pct_change() * 100.0
+    return out.dropna(how="all")
+
+# ------------------------------
+# Sidebar Controls
+# ------------------------------
+with st.sidebar:
+    st.header("⚙️ Pengaturan Data")
+
+    gold_source = st.radio(
+        "Sumber Emas (USD/oz)",
+        options=["Stooq", "Yahoo Finance"],
+        index=0,
+        help="Pilih sumber data emas. Jika salah satu gagal, gunakan yang lain."
+    )
+
+    yahoo_symbol = st.selectbox(
+        "Symbol Yahoo (jika Yahoo dipilih)",
+        options=[YAHOO_GOLD_SYMBOL_SPOT, YAHOO_GOLD_SYMBOL_FUT],
+        index=0,
+        help="XAUUSD=X = spot; GC=F = futures continuous"
+    )
+
+    st.markdown("---")
+    st.subheader("Kurs USD/IDR dari Google Sheets")
+    sheet_id = st.text_input(
+        "Spreadsheet ID",
+        value=os.getenv("FX_SHEET_ID", ""),
+        placeholder="1x_your_google_sheet_id_here",
+        help="Ambil bagian di URL di antara /d/ dan /edit. Share: Anyone with link (Viewer). Kolom1=tanggal, Kolom2=kurs."
+    )
+    gid = st.number_input("GID tab (opsional)", min_value=0, value=int(os.getenv("FX_SHEET_GID", "0")))
+
+    st.markdown("---")
+    st.subheader("Rentang Tanggal & Agregasi")
+    today = date.today()
+    default_start = today - timedelta(days=365)
+    start_date = st.date_input("Mulai", value=default_start)
+    end_date = st.date_input("Selesai", value=today)
+
+    freq_label = st.selectbox("Agregasi", ["Harian", "Mingguan", "Bulanan", "Tahunan"], index=0)
+    freq_map = {"Harian": "D", "Mingguan": "W", "Bulanan": "M", "Tahunan": "Y"}
+    freq = freq_map[freq_label]
+
+    st.markdown("---")
+    colb1, colb2 = st.columns(2)
+    with colb1:
+        do_full = st.button("📥 Ambil & Buat Tabel (Full Replace)")
+    with colb2:
+        do_gap = st.button("⚡ Lengkapi Gap Data")
+
+# ------------------------------
+# Fetch source data (gold & fx)
+# ------------------------------
+# Ambil emas sesuai toggle (untuk tampilan &/atau unggah ke DB)
 try:
-    with engine.connect() as con:
-        # Mencari tanggal terlama untuk inisialisasi filter
-        query_min_date = text(f"SELECT MIN(trade_date) FROM (SELECT MIN(trade_date) AS trade_date FROM {GOLD_TABLE} UNION ALL SELECT MIN(trade_date) AS trade_date FROM {IDR_TABLE}) AS combined_dates")
-        min_date_db = con.execute(query_min_date).scalar()
-        if not min_date_db:
-             min_date_db = datetime(1990, 1, 1).date()
-
-except Exception:
-    min_date_db = datetime(1990, 1, 1).date()
-
-
-# [FIX TOTAL] Menyimpan nilai min_date_db ke session_state dan memaksa value di date_input
-if 'min_date_db' not in st.session_state:
-    st.session_state.min_date_db = min_date_db
-
-if 'start_date_filter' not in st.session_state:
-    st.session_state.start_date_filter = st.session_state.min_date_db
-    st.session_state.end_date_filter = end_date
-
-# Gunakan session state untuk mengontrol nilai
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", 
-    value=st.session_state.start_date_filter, 
-    min_value=st.session_state.min_date_db, 
-    max_value=end_date, 
-    key="filter_start"
-)
-selected_end_date = st.sidebar.date_input("Tanggal Akhir", 
-    value=st.session_state.end_date_filter, 
-    min_value=selected_start_date, 
-    max_value=end_date, 
-    key="filter_end"
-)
-
-# Update session state jika ada perubahan
-st.session_state.start_date_filter = selected_start_date
-st.session_state.end_date_filter = selected_end_date
-
-st.sidebar.markdown("---")
-# Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
-aggregation_freq = st.sidebar.selectbox(
-    "Agregasi Data",
-    ['Harian', 'Mingguan', 'Bulanan', 'Tahunan'],
-    index=0
-)
-
-# Fetch data harian dari DB
-raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
-
-if raw_df.empty:
-    st.warning(f"Tidak ada data makro tersedia untuk rentang waktu ini di database.")
-    st.stop()
-    
-# Agregasi Data
-simulated_df = aggregate_data(raw_df, aggregation_freq)
-
-
-# Data terakhir (Pastikan indeks ada dan hitung perubahan untuk metrik)
-if len(simulated_df) >= 2:
-    latest_gold = simulated_df['Gold_USD'].iloc[-1]
-    latest_idr = simulated_df['IDR_USD'].iloc[-1]
-    prev_gold = simulated_df['Gold_USD'].iloc[-2]
-    prev_idr = simulated_df['IDR_USD'].iloc[-2]
-
-    # --- [FIXED] Pengecekan NaN/None sebelum menghitung perubahan ---
-    # Cek Gold
-    if pd.isna(latest_gold) or pd.isna(prev_gold):
-        change_gold = 0; change_gold_pct = 0
-        latest_gold_val = np.nan
+    if gold_source == "Stooq":
+        gold_df_all = fetch_gold_from_stooq()
+        gold_df_range = gold_df_all[(gold_df_all["trade_date"] >= start_date) & (gold_df_all["trade_date"] <= end_date)]
     else:
-        change_gold = latest_gold - prev_gold
-        change_gold_pct = (change_gold / prev_gold) * 100 if prev_gold != 0 else 0
-        latest_gold_val = latest_gold
-    
-    # Cek IDR
-    if pd.isna(latest_idr) or pd.isna(prev_idr):
-        change_idr = 0; change_idr_pct = 0
-        latest_idr_val = np.nan
-    else:
-        change_idr = latest_idr - prev_idr
-        change_idr_pct = (change_idr / prev_idr) * 100 if prev_idr != 0 else 0
-        latest_idr_val = latest_idr
-        
-elif len(simulated_df) == 1:
-    latest_gold = simulated_df['Gold_USD'].iloc[-1]
-    latest_idr = simulated_df['IDR_USD'].iloc[-1]
-    change_gold = 0; change_gold_pct = 0
-    change_idr = 0; change_idr_pct = 0
-    latest_gold_val = latest_gold if not pd.isna(latest_gold) else np.nan
-    latest_idr_val = latest_idr if not pd.isna(latest_idr) else np.nan
+        gold_df_all = fetch_gold_from_yahoo(symbol=yahoo_symbol, start=start_date, end=end_date)
+        gold_df_range = gold_df_all.copy()
+except Exception as e:
+    st.error(f"Gagal mengambil data emas dari {gold_source}: {e}")
+    gold_df_all = pd.DataFrame(columns=["trade_date", "Gold_USD"])  # empty fallback
+    gold_df_range = gold_df_all
+
+# Ambil kurs IDR/USD
+idr_df_range = pd.DataFrame(columns=["trade_date", "IDR_USD"])  # init
+fx_err = None
+if sheet_id:
+    try:
+        idr_full = fetch_idr_from_sheets(sheet_id, gid=gid)
+        idr_df_range = idr_full[(idr_full["trade_date"] >= start_date) & (idr_full["trade_date"] <= end_date)]
+    except Exception as e:
+        fx_err = f"Google Sheets gagal: {e}"
 else:
-    st.warning("Data tidak cukup untuk menghitung perubahan.")
-    st.stop()
+    fx_err = "Spreadsheet ID belum diisi."
 
+# Jika Google Sheets gagal, tawarkan Yahoo sebagai fallback cepat (read-only)
+if fx_err:
+    st.warning(f"{fx_err} → mencoba fallback Yahoo (read-only) …")
+    try:
+        idr_df_range = fetch_idr_from_yahoo(start=start_date, end=end_date)
+    except Exception as e:
+        st.error(f"Fallback Yahoo juga gagal: {e}")
+        idr_df_range = pd.DataFrame(columns=["trade_date", "IDR_USD"])  # keep empty
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Ringkasan Metrik
-st.subheader("Ringkasan Data Makro Terbaru")
+# ------------------------------
+# Upload ke DB (opsional)
+# ------------------------------
+engine = get_engine()
 
-col_g1, col_g2, col_i1, col_i2 = st.columns(4)
+if do_full:
+    try:
+        # Untuk full replace, gunakan seluruh histori agar tabel lengkap
+        gold_for_upload = gold_df_all
+        if sheet_id:
+            idr_for_upload = fetch_idr_from_sheets(sheet_id, gid=gid)
+        else:
+            idr_for_upload = fetch_idr_from_yahoo()
+        upload_full(engine, gold_for_upload, idr_for_upload)
+    except Exception as e:
+        st.exception(e)
 
-# --- Fungsi helper untuk format metrik yang tahan NaN/None ---
-def format_metric_value(value, prefix="", suffix=""):
-    if pd.isna(value):
-        return "N/A"
-    if prefix == "Rp":
-        return f"Rp{value:,.0f}"
-    return f"{prefix}{value:,.2f}{suffix}"
+if do_gap:
+    try:
+        # Gap upload memakai seluruh histori sumber agar bisa difilter > MAX(trade_date)
+        gold_for_upload = gold_df_all
+        if sheet_id:
+            idr_for_upload = fetch_idr_from_sheets(sheet_id, gid=gid)
+        else:
+            idr_for_upload = fetch_idr_from_yahoo()
+        upload_gap(engine, gold_for_upload, idr_for_upload)
+    except Exception as e:
+        st.exception(e)
 
-with col_g1:
-    st.metric(
-        label="Harga Emas (USD/oz)",
-        value=format_metric_value(latest_gold_val, prefix="$"),
-        delta=f"{change_gold:+.2f}" if not pd.isna(change_gold) and change_gold != 0 else None
-    )
-with col_g2:
-    st.metric(
-        label="Perubahan Emas (%)",
-        value=format_metric_value(change_gold_pct, suffix="%"),
-        delta=None,
-    )
-
-with col_i1:
-    st.metric(
-        label="Nilai Tukar (IDR/USD)",
-        # [FIX] Menggunakan helper function
-        value=format_metric_value(latest_idr_val, prefix="Rp"),
-        delta=f"Rp{change_idr:+.0f}" if not pd.isna(change_idr) and change_idr != 0 else None
-    )
-with col_i2:
-    st.metric(
-        label="Perubahan Rupiah (%)",
-        value=format_metric_value(change_idr_pct, suffix="%"),
-        delta=None,
-        delta_color="inverse" # Warna delta terbalik, karena kenaikan kurs IDR buruk
-    )
-
-st.markdown("---") 
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Grafik Emas dan Rupiah (2 Grafik Terpisah)
-st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
-
-# --- 1. GRAFIK EMAS ---
-st.markdown("#### Harga Emas Dunia (USD/oz)")
-fig_gold = go.Figure()
-fig_gold.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['Gold_USD'], name='Gold (USD/oz)', line=dict(color='#FFD700', width=1.5)), 
-)
-
-fig_gold.update_layout(
-    height=450,
-    title_text=f"Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
-    hovermode="x unified",
-    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1),
-)
-
-fig_gold.update_yaxes(title_text="Harga Emas (USD/oz)", tickformat="$,.0f")
-
-# Range Selector untuk Emas
-fig_gold.update_xaxes(
-    type='date',
-    rangeslider_visible=True,
-    rangeselector=dict(
-        buttons=list([
-            dict(count=1, label="1B", step="month", stepmode="backward"),
-            dict(count=6, label="6B", step="month", stepmode="backward"),
-            dict(count=1, label="1T", step="year", stepmode="backward"),
-            dict(step="all")
-        ])
-    )
-)
-
-st.plotly_chart(fig_gold, use_container_width=True)
-
-
-# --- 2. GRAFIK RUPIAH ---
-st.markdown("#### Nilai Tukar Rupiah (IDR/USD)")
-fig_idr = go.Figure()
-fig_idr.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_USD'], name='IDR/USD Rate', line=dict(color='#008000', width=1.5)), 
-)
-
-fig_idr.update_layout(
-    height=450,
-    title_text=f"Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
-    hovermode="x unified",
-    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1),
-)
-
-fig_idr.update_yaxes(title_text="Nilai Tukar (IDR/USD)", tickprefix="Rp", tickformat=",0f")
-
-# Range Selector untuk Rupiah
-fig_idr.update_xaxes(
-    type='date',
-    rangeslider_visible=True,
-    rangeselector=dict(
-        buttons=list([
-            dict(count=1, label="1B", step="month", stepmode="backward"),
-            dict(count=6, label="6B", step="month", stepmode="backward"),
-            dict(count=1, label="1T", step="year", stepmode="backward"),
-            dict(step="all")
-        ])
-    )
-)
-
-st.plotly_chart(fig_idr, use_container_width=True)
-
-
-st.markdown("---") 
-st.subheader(f"Analisis Pergerakan {aggregation_freq} (Persentase)")
-
-# Hitung ulang perubahan persentase untuk grafik di bawah (selain mode Harian)
-if aggregation_freq != 'Harian':
-    df_chart = simulated_df.copy()
-    df_chart['Gold_Change_Pct'] = df_chart['Gold_USD'].pct_change() * 100
-    df_chart['IDR_Change_Pct'] = df_chart['IDR_USD'].pct_change() * 100
-    df_chart = df_chart.dropna()
+# ------------------------------
+# Join untuk tampilan (ambil dari DB jika ada; kalau tidak, gabung in-memory)
+# ------------------------------
+if engine is not None:
+    try:
+        merged = read_joined(engine, start=start_date, end=end_date)
+    except Exception as e:
+        st.warning(f"Gagal baca dari DB, gunakan data in-memory: {e}")
+        engine = None
+        merged = pd.DataFrame()
 else:
-    # Untuk harian, kita menggunakan raw_df untuk perubahan % (setelah fetch, sebelum agregasi)
-    # Karena raw_df tidak memiliki Gold_Change_Pct, kita hitung di sini
-    df_chart = raw_df.copy()
-    df_chart['Gold_Change_Pct'] = df_chart['Gold_USD'].pct_change() * 100
-    df_chart['IDR_Change_Pct'] = df_chart['IDR_USD'].pct_change() * 100
-    df_chart = df_chart.dropna()
+    merged = pd.DataFrame()
 
+if engine is None:
+    # Gabung in-memory (outer join), lalu ffill
+    merged = pd.merge(
+        gold_df_range, idr_df_range, on="trade_date", how="outer"
+    ).sort_values("trade_date")
+    if not merged.empty:
+        tmp_idx = pd.to_datetime(merged["trade_date"])  # build daily index for ffill
+        idx = pd.date_range(start_date, end_date, freq="D")
+        merged = merged.set_index(tmp_idx).reindex(idx)
+        merged["Gold_USD"] = merged["Gold_USD"].ffill()
+        merged["IDR_USD"] = merged["IDR_USD"].ffill()
+        merged["trade_date"] = merged.index.date
+        merged = merged.reset_index(drop=True)
 
-fig2 = make_subplots(specs=[[{"secondary_y": True}]])
+# ------------------------------
+# Output Tables & Charts
+# ------------------------------
 
-# Perubahan Emas Harian/Agregasi
-fig2.add_trace(
-    go.Bar(x=df_chart.index, y=df_chart['Gold_Change_Pct'], name=f'Emas (% per {aggregation_freq})', opacity=0.8, marker_color=np.where(df_chart['Gold_Change_Pct'] > 0, 'green', 'red')),
-    secondary_y=False
+st.subheader("📄 Data Gabungan (Harian)")
+if merged.empty:
+    st.info("Data gabungan kosong. Periksa sumber atau tanggal.")
+else:
+    merged["Gold_IDR_per_gram"] = merged["Gold_USD"] * merged["IDR_USD"] / GRAM_PER_TROY_OZ
+    st.dataframe(merged.tail(20), use_container_width=True)
+
+    # Metrics
+    last_row = merged.dropna().iloc[-1]
+    st.metric(
+        label="Gold USD/oz (terkini)",
+        value=f"{last_row['Gold_USD']:.2f}",
+    )
+    st.metric(
+        label="USD/IDR (terkini)",
+        value=f"{last_row['IDR_USD']:.2f}",
+    )
+    st.metric(
+        label="Emas IDR/gram (terkini)",
+        value=f"{last_row['Gold_IDR_per_gram']:.0f}",
+    )
+
+    # Charts
+    c1, c2 = st.columns(2)
+    with c1:
+        fig1 = px.line(merged, x="trade_date", y="Gold_USD", title="Gold USD/oz (Harian)")
+        fig1.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig1, use_container_width=True)
+    with c2:
+        fig2 = px.line(merged, x="trade_date", y="IDR_USD", title="USD/IDR (Harian)")
+        fig2.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # Aggregation
+    st.subheader(f"📊 Agregasi ({freq_label})")
+    agg = aggregate(merged, freq=freq)
+    if not agg.empty:
+        st.dataframe(agg.tail(12), use_container_width=True)
+        fig3 = px.bar(agg, x="trade_date", y="Gold_USD_%chg", title="% Perubahan Gold USD/oz")
+        fig3.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig3, use_container_width=True)
+
+        fig4 = px.line(agg, x="trade_date", y="Gold_IDR_per_gram", title="Emas (IDR/gram)")
+        fig4.update_layout(margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig4, use_container_width=True)
+
+# ------------------------------
+# Footer
+# ------------------------------
+st.caption(
+    "Sumber emas: Stooq (xauusd) atau Yahoo (XAUUSD=X / GC=F). Kurs: Google Sheets (gviz CSV) atau fallback Yahoo."
 )
-
-# Perubahan Rupiah Harian/Agregasi
-fig2.add_trace(
-    go.Scatter(x=df_chart.index, y=df_chart['IDR_Change_Pct'], name=f'Rupiah (% per {aggregation_freq})', mode='lines', line=dict(color='orange', width=2)), 
-    secondary_y=True
-)
-
-fig2.update_yaxes(title_text="Emas (% Perubahan)", secondary_y=False)
-fig2.update_yaxes(title_text="Rupiah (% Perubahan)", secondary_y=True)
-
-fig2.update_layout(
-    title_text=f"Perbandingan Perubahan {aggregation_freq} Emas vs Rupiah",
-    height=500,
-    hovermode="x unified",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5)
-)
-
-st.plotly_chart(fig2, use_container_width=True)
-
-st.markdown("---") 
-st.caption("⚠️ **Penting:** Data Emas diambil dari Stooq. Data Rupiah diambil dari Google Sheets. Pastikan **Spreadsheet ID** di sidebar valid dan Sheets sudah diatur *sharing*-nya.")
