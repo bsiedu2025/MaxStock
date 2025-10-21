@@ -28,8 +28,8 @@ if 'is_loading' not in st.session_state:
     
 # State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
 if 'sheet_id_input' not in st.session_state:
-    # [UPDATE] Mengganti default ID Sheets sesuai permintaan user
-    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl99FlaHWwjMY" 
+    # [FIX 1] Perbaikan ID Sheets yang salah ketik (dari '...99...' menjadi '...97...')
+    st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
@@ -101,11 +101,12 @@ def get_latest_trade_date(table_name: str) -> datetime.date:
 @st.cache_data(ttl=600)
 def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
     """
-    [FIX TERAKHIR] Mengambil data Rupiah dari Google Sheets dengan parsing yang paling robust.
-    Karena Rupiah diisi formula di Cell A1, kita akan ambil Kolom 0 dan 1 (Date & Price)
-    dan mengabaikan kolom lainnya.
+    Mengambil data Rupiah dari Google Sheets dengan parsing yang paling robust.
+    Asumsi: Data Rupiah ada di Kolom 0 dan 1 (A & B) karena hanya ada satu formula GOOGLEFINANCE.
     """
-    if not sheet_id: return pd.DataFrame()
+    if not sheet_id: 
+        st.error("Spreadsheet ID tidak boleh kosong.")
+        return pd.DataFrame()
     
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
     
@@ -117,12 +118,11 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=0)
         df_raw.dropna(how='all', inplace=True)
         
-        # 2. Identifikasi Baris Awal Data
-        # Cari baris yang memiliki format tanggal di Kolom 0.
+        # 2. Identifikasi Baris Awal Data (Baris pertama yang punya format tanggal di Kolom 0)
         first_data_row_index = df_raw[df_raw.iloc[:, 0].astype(str).str.contains(r'\d{1,2}/\d{1,2}/\d{4}')].index.min()
         
         if pd.isna(first_data_row_index):
-            st.error("Gagal menemukan baris Rupiah yang valid. Pastikan hasil formula GOOGLEFINANCE ada di kolom A & B.")
+            st.error("Gagal menemukan baris data Rupiah yang valid. Pastikan hasil formula GOOGLEFINANCE ada di kolom A & B dan file di-set 'Anyone with the link (Viewer)'.")
             return pd.DataFrame()
 
         # 3. Ambil data Rupiah (Kolom Index 0/Date dan Index 1/Price)
@@ -146,13 +146,14 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         df_idr = df_idr[['trade_date', 'IDR_USD']]
         df_idr['trade_date'] = df_idr['trade_date'].dt.date
         
-        # [Debugging Helper]
-        # st.dataframe(df_idr.head())
-        
         return df_idr
         
+    except requests.exceptions.HTTPError as he:
+        # Menangkap Error 404 (Not Found) atau 403 (Forbidden)
+        st.error(f"Gagal mengambil data Rupiah dari Sheets. Pastikan link di-set 'Anyone with the link (Viewer)'. Error: {he}")
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Gagal mengambil data Rupiah dari Sheets. Pastikan link di-set 'Anyone with the link (Viewer)'. Error: {e}")
+        st.error(f"Terjadi kesalahan saat parsing Rupiah: {e}")
         return pd.DataFrame()
 
 
@@ -180,19 +181,19 @@ def fetch_gold_from_stooq() -> pd.DataFrame:
 # Uploader/Seeder Data (Menangani Dua Tabel)
 # ────────────────────────────────────────────────────────────────────────────────
 
-def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: str):
-    """Fungsi pembantu untuk membuat tabel dan mengunggah data."""
+def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: str, action: str = 'full'):
+    """Fungsi pembantu untuk membuat tabel dan mengunggah data (full atau append)."""
     total_rows = len(df_data)
     
-    with st.status(f"Memproses {table_name}...", expanded=True) as status_bar:
-        try:
-            status_bar.update(label=f"1. Menyiapkan koneksi database untuk {table_name}...", state="running")
-            engine = _build_engine()
-            
-            # 2. Menghapus tabel lama dan membuat tabel baru (Mode CREATE)
-            status_bar.update(label=f"2. Menghapus tabel lama dan membuat tabel {table_name}...")
+    # [FIX 2] Mengganti st.status di sini agar bisa digunakan di upload_full_data_to_db_two_tables
+    # dan memisahkan proses commit.
+    
+    engine = _build_engine()
+    
+    if action == 'full':
+        # Mode CREATE TABLE
+        with st.status(f"1. Menyiapkan dan Membuat Tabel {table_name}...", expanded=False) as status_bar:
             with engine.connect() as con:
-                 # Pastikan tabel dibuat dengan PRIMARY KEY (trade_date)
                 create_table_sql = f"""
                     CREATE TABLE IF NOT EXISTS {table_name} (
                         trade_date DATE NOT NULL,
@@ -200,32 +201,31 @@ def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: 
                         PRIMARY KEY (trade_date)
                     ) ENGINE=InnoDB;
                 """
-                con.execute(text(f"DROP TABLE IF EXISTS {table_name}")) # Hapus yang lama
+                con.execute(text(f"DROP TABLE IF EXISTS {table_name}")) 
                 con.execute(text(create_table_sql))
                 con.commit()
-            
-            # 3. Mengunggah data menggunakan to_sql
-            status_bar.update(label=f"3. Mengunggah {total_rows} baris ke {table_name}...", state="running")
-            
+            status_bar.update(label=f"✅ Tabel {table_name} siap dibuat.", state="complete")
+
+    # Mode APPEND DATA
+    with st.status(f"2. Mengunggah {total_rows} baris ke {table_name}...", expanded=False) as status_bar:
+        try:
             df_temp = df_data.set_index('trade_date')
             df_temp.to_sql(
                 name=table_name, 
                 con=engine, 
-                if_exists='append', 
+                if_exists='append',
                 index=True,
                 chunksize=5000 
             )
-            
-            status_bar.update(label=f"✅ Pengunggahan {table_name} Selesai! ({total_rows} baris)", state="complete", expanded=False)
+            status_bar.update(label=f"✅ Pengunggahan {table_name} Selesai! ({total_rows} baris)", state="complete")
             return True
-
         except Exception as e:
-            status_bar.update(label=f"❌ Gagal mengunggah data {table_name}!", state="error", expanded=True)
-            st.error(f"Terjadi kesalahan database pada {table_name}: {e}")
+            st.error(f"❌ Gagal mengunggah data {table_name}! Error: {e}")
             return False
 
+
 def upload_full_data_to_db_two_tables(sheet_id: str):
-    """Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah."""
+    """[FIX 2] Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah dengan commit terpisah."""
     st.session_state.is_loading = True
     st.cache_data.clear()
     st.cache_resource.clear()
@@ -234,18 +234,25 @@ def upload_full_data_to_db_two_tables(sheet_id: str):
     df_gold = fetch_gold_from_stooq()
     df_idr = fetch_idr_from_sheets(sheet_id)
     
-    if df_gold.empty or df_idr.empty:
-        st.error("Data Emas atau Rupiah tidak lengkap. Tidak bisa melanjutkan.")
+    if df_gold.empty:
+        st.error("Data Emas tidak ditemukan dari Stooq. Tidak bisa melanjutkan.")
+        st.session_state.is_loading = False
+        return
+    
+    if df_idr.empty:
+        st.error("Data Rupiah tidak ditemukan dari Sheets. Tidak bisa melanjutkan.")
         st.session_state.is_loading = False
         return
         
-    # 2. Upload Emas
+    # 2. Upload Emas (Pisah)
+    st.subheader("Proses Upload Emas (`gold_data`)")
     df_gold_upload = df_gold[['trade_date', 'Gold_USD']]
-    success_gold = _create_and_upload_table(df_gold_upload, GOLD_TABLE, 'Gold_USD')
+    success_gold = _create_and_upload_table(df_gold_upload, GOLD_TABLE, 'Gold_USD', action='full')
     
-    # 3. Upload Rupiah
+    # 3. Upload Rupiah (Pisah)
+    st.subheader("Proses Upload Rupiah (`idr_data`)")
     df_idr_upload = df_idr[['trade_date', 'IDR_USD']]
-    success_idr = _create_and_upload_table(df_idr_upload, IDR_TABLE, 'IDR_USD')
+    success_idr = _create_and_upload_table(df_idr_upload, IDR_TABLE, 'IDR_USD', action='full')
 
     st.session_state.is_loading = False
     
@@ -253,7 +260,7 @@ def upload_full_data_to_db_two_tables(sheet_id: str):
         st.success("🎉 Kedua tabel (Emas & Rupiah) berhasil dibuat dan diisi!")
         st.rerun()
     else:
-        st.error("⚠️ Proses selesai dengan kegagalan pada satu atau kedua tabel.")
+        st.error("⚠️ Proses selesai dengan kegagalan pada satu atau kedua tabel. Cek log di atas.")
 
 
 def delete_all_tables():
@@ -399,9 +406,11 @@ if not (_table_exists(GOLD_TABLE) and _table_exists(IDR_TABLE)):
     with st.expander("🛠️ Klik di sini untuk membuat 2 tabel makro (Setup Awal)") as exp:
         st.info("Pastikan Anda sudah mengatur **Google Sheet** (Share: Anyone with the link) dan mengisi **Spreadsheet ID** di sidebar.")
         
-        # [FIX] Tombol hapus sudah tidak ada di sini, sesuai permintaan user.
         if st.button("📥 Ambil Emas & Rupiah Riil & Buat Tabel", disabled=st.session_state.is_loading or not st.session_state.sheet_id_input, type="primary"):
             upload_full_data_to_db_two_tables(st.session_state.sheet_id_input)
+            
+        if st.button("🗑️ Hapus SEMUA Tabel Macro Data", disabled=st.session_state.is_loading, key="delete_all_initial_table"):
+            delete_all_tables()
             
     st.stop()
     
