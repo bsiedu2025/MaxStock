@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# app/pages/6_History_Emas_IDRUSD.py (Dashboard Makro Baru: Emas & Rupiah)
+# app/pages/6_Pergerakan_Asing_FF.py (Dashboard Makro Baru: Emas & Rupiah dari MariaDB)
 
 import streamlit as st
 import pandas as pd
@@ -17,7 +17,7 @@ import math
 from io import StringIO # Diperlukan untuk parsing Sheets CSV
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
 st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
@@ -462,17 +462,42 @@ end_date = datetime.now().date()
 
 # Cek tanggal terlama dari data di DB untuk min_value
 try:
-    min_date_gold = get_latest_trade_date(GOLD_TABLE)
-    min_date_idr = get_latest_trade_date(IDR_TABLE)
-    min_date_db = min(min_date_gold, min_date_idr)
+    with engine.connect() as con:
+        # Mencari tanggal terlama untuk inisialisasi filter
+        query_min_date = text(f"SELECT MIN(trade_date) FROM (SELECT MIN(trade_date) AS trade_date FROM {GOLD_TABLE} UNION ALL SELECT MIN(trade_date) AS trade_date FROM {IDR_TABLE}) AS combined_dates")
+        min_date_db = con.execute(query_min_date).scalar()
+        if not min_date_db:
+             min_date_db = datetime(1990, 1, 1).date()
+
 except Exception:
     min_date_db = datetime(1990, 1, 1).date()
 
 
-# [FIX] Menggunakan min_date_db sebagai default value untuk selected_start_date
-start_date_default = min_date_db 
-selected_start_date = st.sidebar.date_input("Tanggal Mulai", value=start_date_default, min_value=min_date_db, max_value=end_date, key="filter_start")
-selected_end_date = st.sidebar.date_input("Tanggal Akhir", value=end_date, min_value=selected_start_date, max_value=end_date, key="filter_end")
+# [FIX TOTAL] Menyimpan nilai min_date_db ke session_state dan memaksa value di date_input
+if 'min_date_db' not in st.session_state:
+    st.session_state.min_date_db = min_date_db
+
+if 'start_date_filter' not in st.session_state:
+    st.session_state.start_date_filter = st.session_state.min_date_db
+    st.session_state.end_date_filter = end_date
+
+# Gunakan session state untuk mengontrol nilai
+selected_start_date = st.sidebar.date_input("Tanggal Mulai", 
+    value=st.session_state.start_date_filter, 
+    min_value=st.session_state.min_date_db, 
+    max_value=end_date, 
+    key="filter_start"
+)
+selected_end_date = st.sidebar.date_input("Tanggal Akhir", 
+    value=st.session_state.end_date_filter, 
+    min_value=selected_start_date, 
+    max_value=end_date, 
+    key="filter_end"
+)
+
+# Update session state jika ada perubahan
+st.session_state.start_date_filter = selected_start_date
+st.session_state.end_date_filter = selected_end_date
 
 st.sidebar.markdown("---")
 # Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
