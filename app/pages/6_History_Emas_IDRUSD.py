@@ -23,21 +23,22 @@ st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
 
-# Inisialisasi session state
-if 'is_loading' not in st.session_state:
-    st.session_state.is_loading = False
-    
-# State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
+# ────────────────────────────────────────────────────────────────────────────────
+# Inisialisasi session state (DIPERBAIKI TOTAL AGAR BERSIH)
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Default Sheet ID
 if 'sheet_id_input' not in st.session_state:
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
-
-# [FIX] Hapus state ROI Otomatis yang menyebabkan error (sudah tidak digunakan)
-# if 'auto_roi_start' not in st.session_state:
-#     st.session_state.auto_roi_start = None
-# if 'auto_roi_end' not in st.session_state:
-#     st.session_state.auto_roi_end = None
-
-
+# Status Loading
+if 'is_loading' not in st.session_state:
+    st.session_state.is_loading = False
+# Inisialisasi Filter (Akan diset setelah min_date_db ditemukan)
+if 'start_date_filter' not in st.session_state:
+    st.session_state.start_date_filter = None
+if 'end_date_filter' not in st.session_state:
+    st.session_state.end_date_filter = None
+    
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
 # ────────────────────────────────────────────────────────────────────────────────
