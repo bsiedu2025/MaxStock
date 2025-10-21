@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# app/pages/6_Pergerakan_Asing_FF.py (Dashboard Makro Baru: Emas & Rupiah dari MariaDB)
+# app/pages/6_History_Emas_IDRUSD.py (Dashboard Makro Baru: Emas & Rupiah)
 
 import streamlit as st
 import pandas as pd
@@ -17,7 +17,7 @@ import math
 from io import StringIO # Diperlukan untuk parsing Sheets CSV
 
 st.set_page_config(page_title="💰 Historis Emas & Rupiah", page_icon="📈", layout="wide")
-st.title("💰 Historis Emas & Nilai Tukar Rupiah (MariaDB)")
+st.title("💰 Historis Emas & Nilai Tukar Rupiah")
 st.caption(
     "Menampilkan data historis harga **Emas (riil dari Stooq)** dan **Nilai Tukar Rupiah (riil dari Google Sheets)** yang tersimpan di tabel terpisah (`gold_data` & `idr_data`) database Anda."
 )
