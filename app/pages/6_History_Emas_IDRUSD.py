@@ -30,6 +30,13 @@ if 'is_loading' not in st.session_state:
 if 'sheet_id_input' not in st.session_state:
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
+# State untuk menyimpan rentang ROI Otomatis (BARU)
+if 'auto_roi_start' not in st.session_state:
+    st.session_state.auto_roi_start = None
+if 'auto_roi_end' not in st.session_state:
+    st.session_state.auto_roi_end = None
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -113,7 +120,7 @@ def fetch_idr_from_sheets(sheet_id: str) -> pd.DataFrame:
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status() 
         
-        # 1. Baca CSV mentah tanpa header
+        # 1. Baca CSV mentah tanpa header, skip baris kosong di awal
         df_raw = pd.read_csv(StringIO(response.text), header=None, skiprows=0)
         df_raw.dropna(how='all', inplace=True)
         
@@ -512,17 +519,39 @@ st.sidebar.markdown("---")
 # ────────────────────────────────────────────────────────────────────────────────
 # ALAT PENGUKURAN (ROI)
 # ────────────────────────────────────────────────────────────────────────────────
+
+# [BARU] Fungsi Callback untuk menangani event relayout (zoom/pan)
+def handle_relayout_roi(relayout_data):
+    if not relayout_data:
+        return
+
+    # Cek apakah ini event zoom/pan (mengandung range x-axis baru)
+    if 'xaxis.range[0]' in relayout_data and 'xaxis.range[1]' in relayout_data:
+        try:
+            start_str = relayout_data['xaxis.range[0]']
+            end_str = relayout_data['xaxis.range[1]']
+            
+            # Konversi format ISO Plotly ke format date
+            start_date = datetime.fromisoformat(start_str.split('T')[0]).date()
+            end_date = datetime.fromisoformat(end_str.split('T')[0]).date()
+            
+            # Pastikan start date tidak melebihi end date
+            if start_date < end_date:
+                st.session_state.auto_roi_start = start_date
+                st.session_state.auto_roi_end = end_date
+            else:
+                # Jika range terbalik (jarang terjadi), reset
+                st.session_state.auto_roi_start = None
+                st.session_state.auto_roi_end = None
+                
+            # st.experimental_rerun() # Tidak perlu rerun karena Plotly sudah update grafiknya
+            
+        except Exception:
+            # Abaikan error parsing tanggal
+            pass
+
 st.sidebar.header("📏 Alat Pengukuran (ROI)")
-
-# [FIX] Kembali menggunakan Date Input yang stabil
-st.sidebar.info("Gunakan input di bawah untuk mengukur ROI, karena fitur klik di grafik tidak stabil.")
-
-# Menggunakan nilai dari date_input utama sebagai batas
-min_meas_date = selected_start_date
-max_meas_date = selected_end_date
-
-date_start_meas = st.sidebar.date_input("Titik Awal Pengukuran", value=min_meas_date, min_value=min_meas_date, max_value=max_meas_date, key="meas_start")
-date_end_meas = st.sidebar.date_input("Titik Akhir Pengukuran", value=max_meas_date, min_value=date_start_meas, max_value=max_meas_date, key="meas_end")
+st.sidebar.info("ROI dihitung otomatis saat Anda **Zoom** atau **Geser** grafik Emas.")
 
 
 # Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
@@ -533,13 +562,17 @@ aggregation_freq = st.sidebar.selectbox(
     index=0
 )
 
-# --- Pengukuran ROI ---
+
+# --- Pengukuran ROI Otomatis ---
 measurement_results = {}
-if date_start_meas and date_end_meas and date_start_meas <= date_end_meas:
-    start_str = date_start_meas.strftime('%Y-%m-%d')
-    end_str = date_end_meas.strftime('%Y-%m-%d')
+
+# Cek apakah ada range yang terekam dari event relayout
+if st.session_state.auto_roi_start and st.session_state.auto_roi_end:
+    start_str = st.session_state.auto_roi_start.strftime('%Y-%m-%d')
+    end_str = st.session_state.auto_roi_end.strftime('%Y-%m-%d')
     
-    # Ambil data ROI hanya di rentang yang diklik
+    # Ambil data ROI hanya di rentang yang diklik (raw data untuk akurasi)
+    # Gunakan tanggal yang dipilih dari relayout event
     meas_df_raw = fetch_and_merge_macro_data(start_str, end_str)
     
     if not meas_df_raw.empty:
@@ -547,38 +580,29 @@ if date_start_meas and date_end_meas and date_start_meas <= date_end_meas:
         meas_df_agg = aggregate_data(meas_df_raw, aggregation_freq)
         
         if not meas_df_agg.empty:
-            # Cari nilai di tanggal terdekat
-            try:
-                # Nilai Awal: Ambil baris pertama
-                start_gold = meas_df_agg['Gold_USD'].iloc[0]
-                start_idr = meas_df_agg['IDR_USD'].iloc[0]
-                start_date_actual = meas_df_agg.index[0].date()
-                
-                # Nilai Akhir: Ambil baris terakhir
-                end_gold = meas_df_agg['Gold_USD'].iloc[-1]
-                end_idr = meas_df_agg['IDR_USD'].iloc[-1]
-                end_date_actual = meas_df_agg.index[-1].date()
+            # Nilai Awal: Ambil baris pertama
+            start_gold = meas_df_agg['Gold_USD'].iloc[0]
+            start_idr = meas_df_agg['IDR_USD'].iloc[0]
+            start_date_actual = meas_df_agg.index[0].date()
+            
+            # Nilai Akhir: Ambil baris terakhir
+            end_gold = meas_df_agg['Gold_USD'].iloc[-1]
+            end_idr = meas_df_agg['IDR_USD'].iloc[-1]
+            end_date_actual = meas_df_agg.index[-1].date()
 
-                # Hitung Perubahan
-                gold_change_pct = (end_gold / start_gold - 1) * 100 if start_gold else np.nan
-                idr_change_pct = (end_idr / start_idr - 1) * 100 if start_idr else np.nan
-                
-                measurement_results = {
-                    'start_date': start_date_actual,
-                    'end_date': end_date_actual,
-                    'start_gold': start_gold,
-                    'end_gold': end_gold,
-                    'gold_pct': gold_change_pct,
-                    'start_idr': start_idr,
-                    'end_idr': end_idr,
-                    'idr_pct': idr_change_pct,
-                }
-            except Exception as e:
-                 # st.error(f"Gagal hitung ROI: {e}") # Sembunyikan error dari user
-                 pass
+            # Hitung Perubahan
+            gold_change_pct = (end_gold / start_gold - 1) * 100 if start_gold else np.nan
+            idr_change_pct = (end_idr / start_idr - 1) * 100 if start_idr else np.nan
+            
+            measurement_results = {
+                'start_date': start_date_actual,
+                'end_date': end_date_actual,
+                'gold_pct': gold_change_pct,
+                'idr_pct': idr_change_pct,
+            }
 
 
-# Fetch data untuk Grafik Utama (berdasarkan selected_start_date dan selected_end_date)
+# Fetch data untuk Grafik Utama
 raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
 
 if raw_df.empty:
@@ -672,26 +696,25 @@ with col_i2:
 st.markdown("---") 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Hasil Pengukuran ROI (Muncul setelah metrik utama)
+# Hasil Pengukuran ROI OTOMATIS (Muncul setelah metrik utama)
 # ────────────────────────────────────────────────────────────────────────────────
 if measurement_results:
-    st.subheader(f"Hasil Pengukuran ROI ({measurement_results['start_date']} s/d {measurement_results['end_date']})")
+    st.subheader(f"ROI Otomatis ({measurement_results['start_date']} s/d {measurement_results['end_date']})")
     
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     
     with m_col1:
-        st.metric("ROI Emas (%)", f"{measurement_results['gold_pct']:+.2f}%", 
-                  help=f"Dari ${measurement_results['start_gold']:,.2f} menjadi ${measurement_results['end_gold']:,.2f}")
+        st.metric("ROI Emas (%)", f"{measurement_results['gold_pct']:+.2f}%")
     with m_col2:
-        st.metric("ROI Rupiah (%)", f"{measurement_results['idr_pct']:+.2f}%", 
-                  help=f"Dari Rp{measurement_results['start_idr']:,.0f} menjadi Rp{measurement_results['end_idr']:,.0f}",
-                  delta_color="inverse")
+        st.metric("ROI Rupiah (%)", f"{measurement_results['idr_pct']:+.2f}%", delta_color="inverse")
     
     st.markdown("---")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Grafik Emas dan Rupiah (2 Grafik Terpisah)
 st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
+st.info("💡 ROI dihitung otomatis (di atas) berdasarkan rentang X-Axis yang Anda **Zoom** atau **Geser**.")
+
 
 # --- 1. GRAFIK EMAS ---
 st.markdown("#### Harga Emas Dunia (USD/oz)")
@@ -723,10 +746,12 @@ fig_gold.update_xaxes(
     )
 )
 
-st.plotly_chart(
+# [BARU] Menangani Relayout Event untuk Pengukuran ROI OTOMATIS
+gold_relayout_data = st.plotly_chart(
     fig_gold, 
     key="gold_chart", 
     use_container_width=True,
+    on_relayout=handle_relayout_roi, # Callback untuk event zoom/pan
     config={
         'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
         'displaylogo': False,
