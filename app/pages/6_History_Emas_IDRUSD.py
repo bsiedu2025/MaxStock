@@ -30,12 +30,6 @@ if 'is_loading' not in st.session_state:
 if 'sheet_id_input' not in st.session_state:
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
-# State untuk menyimpan rentang ROI Otomatis (BARU)
-if 'auto_roi_start' not in st.session_state:
-    st.session_state.auto_roi_start = None
-if 'auto_roi_end' not in st.session_state:
-    st.session_state.auto_roi_end = None
-
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
