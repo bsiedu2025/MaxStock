@@ -185,9 +185,6 @@ def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: 
     """Fungsi pembantu untuk membuat tabel dan mengunggah data (full atau append)."""
     total_rows = len(df_data)
     
-    # [FIX 2] Mengganti st.status di sini agar bisa digunakan di upload_full_data_to_db_two_tables
-    # dan memisahkan proses commit.
-    
     engine = _build_engine()
     
     if action == 'full':
@@ -225,7 +222,7 @@ def _create_and_upload_table(df_data: pd.DataFrame, table_name: str, value_col: 
 
 
 def upload_full_data_to_db_two_tables(sheet_id: str):
-    """[FIX 2] Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah dengan commit terpisah."""
+    """Menyimpan data penuh Emas dan Rupiah ke dua tabel terpisah dengan commit terpisah."""
     st.session_state.is_loading = True
     st.cache_data.clear()
     st.cache_resource.clear()
@@ -579,47 +576,29 @@ with col_i2:
 st.markdown("---") 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Grafik Terpadu (Emas dan Rupiah)
+# Grafik Emas dan Rupiah (2 Grafik Terpisah)
 st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
 
-# Membangun subplot tanpa subplot titles, karena akan dihapus
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08)
-
-# Grafik Emas (Row 1)
-fig.add_trace(
+# --- 1. GRAFIK EMAS ---
+st.markdown("#### Harga Emas Dunia (USD/oz)")
+fig_gold = go.Figure()
+fig_gold.add_trace(
     go.Scatter(x=simulated_df.index, y=simulated_df['Gold_USD'], name='Gold (USD/oz)', line=dict(color='#FFD700', width=1.5)), 
-    row=1, col=1
 )
-fig.update_yaxes(title_text="Harga Emas (USD/oz)", tickformat="$,.0f", row=1, col=1)
 
-# Grafik Rupiah (Row 2)
-fig.add_trace(
-    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_USD'], name='IDR/USD Rate', line=dict(color='#008000', width=1.5)), 
-    row=2, col=1
-)
-fig.update_yaxes(title_text="Nilai Tukar (IDR/USD)", tickprefix="Rp", tickformat=",0f", row=2, col=1)
-
-
-# Update Layout
-fig.update_layout(
-    height=700,
-    title_text=f"Historis Harga Emas dan Nilai Tukar Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
+fig_gold.update_layout(
+    height=450,
+    title_text=f"Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
     hovermode="x unified",
-    margin=dict(l=40, r=40, t=60, b=40),
-    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1)
+    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1),
 )
 
-fig.update_xaxes(
-    type='date',
-    # Range slider hanya ditampilkan di sumbu-x paling bawah (row=2)
-    rangeslider_visible=False,
-    row=1, col=1
-)
+fig_gold.update_yaxes(title_text="Harga Emas (USD/oz)", tickformat="$,.0f")
 
-fig.update_xaxes(
+# Range Selector untuk Emas
+fig_gold.update_xaxes(
     type='date',
-    # Range slider ditampilkan di sumbu-x paling bawah (row=2)
-    rangeslider_visible=True, 
+    rangeslider_visible=True,
     rangeselector=dict(
         buttons=list([
             dict(count=1, label="1B", step="month", stepmode="backward"),
@@ -627,12 +606,44 @@ fig.update_xaxes(
             dict(count=1, label="1T", step="year", stepmode="backward"),
             dict(step="all")
         ])
-    ),
-    row=2, col=1
+    )
 )
 
+st.plotly_chart(fig_gold, use_container_width=True)
 
-st.plotly_chart(fig, use_container_width=True)
+
+# --- 2. GRAFIK RUPIAH ---
+st.markdown("#### Nilai Tukar Rupiah (IDR/USD)")
+fig_idr = go.Figure()
+fig_idr.add_trace(
+    go.Scatter(x=simulated_df.index, y=simulated_df['IDR_USD'], name='IDR/USD Rate', line=dict(color='#008000', width=1.5)), 
+)
+
+fig_idr.update_layout(
+    height=450,
+    title_text=f"Agregasi {aggregation_freq} ({selected_start_date.strftime('%Y-%m-%d')} s/d {selected_end_date.strftime('%Y-%m-%d')})",
+    hovermode="x unified",
+    legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="right", x=1),
+)
+
+fig_idr.update_yaxes(title_text="Nilai Tukar (IDR/USD)", tickprefix="Rp", tickformat=",0f")
+
+# Range Selector untuk Rupiah
+fig_idr.update_xaxes(
+    type='date',
+    rangeslider_visible=True,
+    rangeselector=dict(
+        buttons=list([
+            dict(count=1, label="1B", step="month", stepmode="backward"),
+            dict(count=6, label="6B", step="month", stepmode="backward"),
+            dict(count=1, label="1T", step="year", stepmode="backward"),
+            dict(step="all")
+        ])
+    )
+)
+
+st.plotly_chart(fig_idr, use_container_width=True)
+
 
 st.markdown("---") 
 st.subheader(f"Analisis Pergerakan {aggregation_freq} (Persentase)")
