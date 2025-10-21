@@ -30,14 +30,6 @@ if 'is_loading' not in st.session_state:
 if 'sheet_id_input' not in st.session_state:
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
-# State untuk menyimpan titik klik ROI (Baru)
-if 'roi_start_date' not in st.session_state:
-    st.session_state.roi_start_date = None
-if 'roi_end_date' not in st.session_state:
-    st.session_state.roi_end_date = None
-if 'roi_click_counter' not in st.session_state:
-    st.session_state.roi_click_counter = 0
-
 # ────────────────────────────────────────────────────────────────────────────────
 # DB Connection & Utility 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -521,14 +513,17 @@ st.sidebar.markdown("---")
 # ALAT PENGUKURAN (ROI)
 # ────────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("📏 Alat Pengukuran (ROI)")
-st.sidebar.info("Klik tombol di bawah lalu klik dua titik (Start/End) pada grafik Emas di bawah.")
 
-# Tombol untuk mengaktifkan mode pengukuran
-if st.sidebar.button("🔴 Aktifkan Mode Pengukuran", key="activate_meas_mode", type="secondary"):
-    st.session_state.roi_click_counter = 0 # Reset counter
-    st.session_state.roi_start_date = None
-    st.session_state.roi_end_date = None
-    st.info("Mode Pengukuran Aktif! Klik dua titik di grafik Harga Emas.")
+# [FIX] Kembali menggunakan Date Input yang stabil
+st.sidebar.info("Gunakan input di bawah untuk mengukur ROI, karena fitur klik di grafik tidak stabil.")
+
+# Menggunakan nilai dari date_input utama sebagai batas
+min_meas_date = selected_start_date
+max_meas_date = selected_end_date
+
+date_start_meas = st.sidebar.date_input("Titik Awal Pengukuran", value=min_meas_date, min_value=min_meas_date, max_value=max_meas_date, key="meas_start")
+date_end_meas = st.sidebar.date_input("Titik Akhir Pengukuran", value=max_meas_date, min_value=date_start_meas, max_value=max_meas_date, key="meas_end")
+
 
 # Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
 st.sidebar.markdown("---")
@@ -538,86 +533,52 @@ aggregation_freq = st.sidebar.selectbox(
     index=0
 )
 
-# [FIX] Mendefinisikan fungsi callback untuk menangani klik
-def handle_roi_click(clicked_data, key):
-    # Pastikan data yang diklik berasal dari grafik
-    if not clicked_data or 'points' not in clicked_data:
-        return
-        
-    clicked_point = clicked_data['points'][0]
-    
-    # Ambil nilai tanggal mentah (Plotly mengembalikan string ISO)
-    clicked_date_str = clicked_point['x']
-    
-    # Konversi string tanggal ke objek date
-    try:
-        # Plotly menggunakan format ISO, misal '2020-01-01T00:00:00'
-        clicked_date = datetime.fromisoformat(clicked_date_str.split('T')[0]).date()
-    except Exception:
-        # Jika ada error, ambil tanggal hari ini saja
-        clicked_date = datetime.now().date()
-        
-    # Logic untuk menyimpan titik Start dan End
-    if st.session_state.roi_click_counter == 0:
-        st.session_state.roi_start_date = clicked_date
-        st.session_state.roi_click_counter = 1
-        st.toast(f"Titik Awal (Start) diset: {clicked_date}", icon="🎯")
-    elif st.session_state.roi_click_counter == 1:
-        # Pastikan tanggal akhir tidak sebelum tanggal awal
-        if clicked_date < st.session_state.roi_start_date:
-            st.session_state.roi_end_date = st.session_state.roi_start_date
-            st.session_state.roi_start_date = clicked_date
-        else:
-            st.session_state.roi_end_date = clicked_date
-            
-        st.session_state.roi_click_counter = 2 # Selesai
-        st.toast(f"Titik Akhir (End) diset: {clicked_date}. Hitung ROI...", icon="✅")
-        st.experimental_rerun() # Refresh untuk memicu perhitungan ROI
-
-
 # --- Pengukuran ROI ---
 measurement_results = {}
-if st.session_state.roi_start_date and st.session_state.roi_end_date:
-    start_str = st.session_state.roi_start_date.strftime('%Y-%m-%d')
-    end_str = st.session_state.roi_end_date.strftime('%Y-%m-%d')
+if date_start_meas and date_end_meas and date_start_meas <= date_end_meas:
+    start_str = date_start_meas.strftime('%Y-%m-%d')
+    end_str = date_end_meas.strftime('%Y-%m-%d')
     
     # Ambil data ROI hanya di rentang yang diklik
     meas_df_raw = fetch_and_merge_macro_data(start_str, end_str)
     
     if not meas_df_raw.empty:
-        # Ambil data di tanggal terdekat
-        try:
-            # Nilai Awal: Cari tanggal terdekat ke start_date
-            start_row = meas_df_raw.iloc[0]
-            start_gold = start_row['Gold_USD']
-            start_idr = start_row['IDR_USD']
-            start_date_actual = start_row.name.date()
-            
-            # Nilai Akhir: Cari tanggal terdekat ke end_date
-            end_row = meas_df_raw.iloc[-1]
-            end_gold = end_row['Gold_USD']
-            end_idr = end_row['IDR_USD']
-            end_date_actual = end_row.name.date()
+        # Agregasi data pengukuran (ambil data terakhir di periode agregasi yang dipilih)
+        meas_df_agg = aggregate_data(meas_df_raw, aggregation_freq)
+        
+        if not meas_df_agg.empty:
+            # Cari nilai di tanggal terdekat
+            try:
+                # Nilai Awal: Ambil baris pertama
+                start_gold = meas_df_agg['Gold_USD'].iloc[0]
+                start_idr = meas_df_agg['IDR_USD'].iloc[0]
+                start_date_actual = meas_df_agg.index[0].date()
+                
+                # Nilai Akhir: Ambil baris terakhir
+                end_gold = meas_df_agg['Gold_USD'].iloc[-1]
+                end_idr = meas_df_agg['IDR_USD'].iloc[-1]
+                end_date_actual = meas_df_agg.index[-1].date()
 
-            # Hitung Perubahan
-            gold_change_pct = (end_gold / start_gold - 1) * 100 if start_gold else np.nan
-            idr_change_pct = (end_idr / start_idr - 1) * 100 if start_idr else np.nan
-            
-            measurement_results = {
-                'start_date': start_date_actual,
-                'end_date': end_date_actual,
-                'start_gold': start_gold,
-                'end_gold': end_gold,
-                'gold_pct': gold_change_pct,
-                'start_idr': start_idr,
-                'end_idr': end_idr,
-                'idr_pct': idr_change_pct,
-            }
-        except Exception:
-             pass # Biarkan results kosong jika gagal hitung
+                # Hitung Perubahan
+                gold_change_pct = (end_gold / start_gold - 1) * 100 if start_gold else np.nan
+                idr_change_pct = (end_idr / start_idr - 1) * 100 if start_idr else np.nan
+                
+                measurement_results = {
+                    'start_date': start_date_actual,
+                    'end_date': end_date_actual,
+                    'start_gold': start_gold,
+                    'end_gold': end_gold,
+                    'gold_pct': gold_change_pct,
+                    'start_idr': start_idr,
+                    'end_idr': end_idr,
+                    'idr_pct': idr_change_pct,
+                }
+            except Exception as e:
+                 # st.error(f"Gagal hitung ROI: {e}") # Sembunyikan error dari user
+                 pass
 
 
-# Fetch data untuk Grafik Utama
+# Fetch data untuk Grafik Utama (berdasarkan selected_start_date dan selected_end_date)
 raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
 
 if raw_df.empty:
@@ -731,8 +692,6 @@ if measurement_results:
 # ────────────────────────────────────────────────────────────────────────────────
 # Grafik Emas dan Rupiah (2 Grafik Terpisah)
 st.subheader("Grafik Historis (Emas dan Nilai Tukar)")
-st.info("💡 Klik 'Aktifkan Mode Pengukuran' di sidebar, lalu klik dua titik (Start/End) pada grafik di bawah untuk mengukur ROI.")
-
 
 # --- 1. GRAFIK EMAS ---
 st.markdown("#### Harga Emas Dunia (USD/oz)")
@@ -764,13 +723,10 @@ fig_gold.update_xaxes(
     )
 )
 
-# [BARU] Menangani Click Event untuk Pengukuran ROI
-gold_clicked_data = st.plotly_chart(
+st.plotly_chart(
     fig_gold, 
     key="gold_chart", 
     use_container_width=True,
-    on_click=handle_roi_click if st.session_state.roi_click_counter < 2 else None, # Hanya aktif jika mode pengukuran aktif
-    # Menambahkan anotasi garis putus-putus jika titik awal sudah diklik
     config={
         'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
         'displaylogo': False,
