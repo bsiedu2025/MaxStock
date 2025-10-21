@@ -28,7 +28,6 @@ if 'is_loading' not in st.session_state:
     
 # State untuk menyimpan Sheet ID (untuk digunakan di seluruh app)
 if 'sheet_id_input' not in st.session_state:
-    # [FIX 1] Perbaikan ID Sheets yang salah ketik (dari '...99...' menjadi '...97...')
     st.session_state.sheet_id_input = "13tvBjRlF_BDAfg2sApGG9jW-KI6A8Fdl97FlaHWwjMY" 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -472,21 +471,21 @@ try:
 except Exception:
     min_date_db = datetime(1990, 1, 1).date()
 
+
 # =====================================================================================================================
-# [UPDATE BARU] Mengatur Nilai Default ke 1 Desember 2003
+# [FIX TOTAL] Mengatur Nilai Default ke 1 Desember 2003
 # =====================================================================================================================
 
 # Tentukan tanggal awal default manual yang diminta user
 DEFAULT_START_DATE_MANUAL = datetime(2003, 12, 1).date()
 
-# [FIX TOTAL] Menyimpan nilai min_date_db ke session_state
+# [FIX] Menyimpan nilai min_date_db ke session_state
 if 'min_date_db' not in st.session_state:
     st.session_state.min_date_db = min_date_db
 
+# Jika filter belum pernah di-set, atur nilai default-nya
 if 'start_date_filter' not in st.session_state:
-    # Nilai default filter saat pertama kali load adalah 1 Des 2003, tapi tidak boleh lebih awal dari data DB
     default_start_value = max(DEFAULT_START_DATE_MANUAL, st.session_state.min_date_db)
-    
     st.session_state.start_date_filter = default_start_value
     st.session_state.end_date_filter = end_date
 
@@ -509,14 +508,68 @@ st.session_state.start_date_filter = selected_start_date
 st.session_state.end_date_filter = selected_end_date
 
 st.sidebar.markdown("---")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# ALAT PENGUKURAN (ROI)
+# ────────────────────────────────────────────────────────────────────────────────
+st.sidebar.header("📏 Alat Pengukuran (ROI)")
+
+# [FIX] Menggunakan nilai dari date_input utama sebagai batas
+min_meas_date = selected_start_date
+max_meas_date = selected_end_date
+
+# Pastikan tanggal pengukuran berada di dalam rentang filter utama
+date_start_meas = st.sidebar.date_input("Titik Awal Pengukuran", value=min_meas_date, min_value=min_meas_date, max_value=max_meas_date, key="meas_start")
+date_end_meas = st.sidebar.date_input("Titik Akhir Pengukuran", value=max_meas_date, min_value=date_start_meas, max_value=max_meas_date, key="meas_end")
+
 # Pilihan Agregasi (Mingguan, Bulanan, Tahunan)
+st.sidebar.markdown("---")
 aggregation_freq = st.sidebar.selectbox(
     "Agregasi Data",
     ['Harian', 'Mingguan', 'Bulanan', 'Tahunan'],
     index=0
 )
 
-# Fetch data harian dari DB
+# Fetch data harian dari DB (untuk pengukuran)
+meas_df_raw = fetch_and_merge_macro_data(date_start_meas.strftime('%Y-%m-%d'), date_end_meas.strftime('%Y-%m-%d'))
+
+measurement_results = {}
+if not meas_df_raw.empty:
+    # Agregasi data pengukuran (ambil data terakhir di periode agregasi yang dipilih)
+    meas_df_agg = aggregate_data(meas_df_raw, aggregation_freq)
+    
+    if not meas_df_agg.empty:
+        # Cari nilai di tanggal terdekat
+        try:
+            # Nilai Awal: Ambil baris pertama
+            start_gold = meas_df_agg['Gold_USD'].iloc[0]
+            start_idr = meas_df_agg['IDR_USD'].iloc[0]
+            start_date_actual = meas_df_agg.index[0].date()
+            
+            # Nilai Akhir: Ambil baris terakhir
+            end_gold = meas_df_agg['Gold_USD'].iloc[-1]
+            end_idr = meas_df_agg['IDR_USD'].iloc[-1]
+            end_date_actual = meas_df_agg.index[-1].date()
+
+            # Hitung Perubahan
+            gold_change_pct = (end_gold / start_gold - 1) * 100 if start_gold else np.nan
+            idr_change_pct = (end_idr / start_idr - 1) * 100 if start_idr else np.nan
+            
+            measurement_results = {
+                'start_date': start_date_actual,
+                'end_date': end_date_actual,
+                'start_gold': start_gold,
+                'end_gold': end_gold,
+                'gold_pct': gold_change_pct,
+                'start_idr': start_idr,
+                'end_idr': end_idr,
+                'idr_pct': idr_change_pct,
+            }
+        except Exception as e:
+             # st.error(f"Gagal hitung ROI: {e}") # Sembunyikan error dari user
+             pass
+
+# Fetch data untuk Grafik Utama (berdasarkan selected_start_date dan selected_end_date)
 raw_df = fetch_and_merge_macro_data(selected_start_date.strftime('%Y-%m-%d'), selected_end_date.strftime('%Y-%m-%d'))
 
 if raw_df.empty:
@@ -608,6 +661,24 @@ with col_i2:
     )
 
 st.markdown("---") 
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Hasil Pengukuran ROI (Muncul setelah metrik utama)
+# ────────────────────────────────────────────────────────────────────────────────
+if measurement_results:
+    st.subheader(f"Hasil Pengukuran ROI ({measurement_results['start_date']} s/d {measurement_results['end_date']})")
+    
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    
+    with m_col1:
+        st.metric("ROI Emas (%)", f"{measurement_results['gold_pct']:+.2f}%", 
+                  help=f"Dari ${measurement_results['start_gold']:,.2f} menjadi ${measurement_results['end_gold']:,.2f}")
+    with m_col2:
+        st.metric("ROI Rupiah (%)", f"{measurement_results['idr_pct']:+.2f}%", 
+                  help=f"Dari Rp{measurement_results['start_idr']:,.0f} menjadi Rp{measurement_results['end_idr']:,.0f}",
+                  delta_color="inverse")
+    
+    st.markdown("---")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Grafik Emas dan Rupiah (2 Grafik Terpisah)
