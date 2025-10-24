@@ -5,7 +5,7 @@ from io import StringIO, BytesIO
 import os
 from datetime import datetime
 
-# PERBAIKAN: Import fungsi yang baru kita pastikan ada di db_utils
+# Import fungsi insert DB yang baru dibuat
 from db_utils import insert_daily_market_data 
 
 st.set_page_config(page_title="📥 Import Data Market Harian", layout="wide")
@@ -13,7 +13,6 @@ st.title("📥 Import Data Market Harian")
 st.markdown("Halaman untuk memasukkan data ringkasan harian (Ringkasan Saham) ke tabel `daily_stock_market_data`.")
 
 # --- Daftar Kolom yang Diharapkan dari File CSV/Excel (Harus Cocok dengan file lo)
-# Digunakan untuk validasi
 EXPECTED_COLS = {
     'KODE_SAHAM': 'Ticker',
     'TANGGAL_PERDAGANGAN_TERAKHIR': 'Tanggal',
@@ -36,22 +35,29 @@ def process_uploaded_file(uploaded_file):
              data = uploaded_file.getvalue().decode("utf-8")
              df = pd.read_csv(StringIO(data))
         
-        # 1. Bersihkan Nama Kolom
-        original_cols = list(df.columns)
+        # 1. Bersihkan Nama Kolom (Ini adalah langkah yang bisa menyebabkan error jika ada header duplikat/aneh)
         df.columns = df.columns.str.strip().str.replace(' ', '_', regex=False).str.replace('.', '', regex=False).str.upper()
         
+        # DEBUG: Tampilkan kolom yang ditemukan
+        st.info(f"Header yang ditemukan di file setelah dibersihkan: {list(df.columns)}")
+
         # 2. Cek Kolom Wajib
+        # Lo perlu memastikan bahwa kolom di df.columns sama persis dengan yang ada di db_utils.py!
         required_cols = list(EXPECTED_COLS.keys())
         missing_cols = [col for col in required_cols if col not in df.columns]
         
         if missing_cols:
-             st.error(f"Kolom wajib tidak ditemukan di file. Pastikan header sesuai. Missing: {', '.join(missing_cols)}")
-             st.write("Daftar Kolom di File Anda:", original_cols)
+             st.error(f"Kolom wajib tidak ditemukan di file. Missing: {', '.join(missing_cols)}")
              return None
 
         # 3. Konversi Tanggal dan Bersihkan data
-        df['TANGGAL_PERDAGANGAN_TERAKHIR'] = pd.to_datetime(df['TANGGAL_PERDAGANGAN_TERAKHIR'], errors='coerce')
-        df = df.dropna(subset=['KODE_SAHAM', 'TANGGAL_PERDAGANGAN_TERAKHIR'])
+        # Lo harus menggunakan .get() atau .loc[] untuk menghindari KeyError di sini juga
+        
+        # Gunakan .get() untuk akses kolom, lebih aman dari KeyError
+        if 'TANGGAL_PERDAGANGAN_TERAKHIR' in df.columns:
+            df['TANGGAL_PERDAGUNGAN_TERAKHIR'] = pd.to_datetime(df['TANGGAL_PERDAGUNGAN_TERAKHIR'], errors='coerce')
+        
+        df = df.dropna(subset=['KODE_SAHAM', 'TANGGAL_PERDAGUNGAN_TERAKHIR'])
         
         return df
         
@@ -79,7 +85,7 @@ with tab1:
         if df_preview is not None:
             st.success(f"File **{uploaded_file.name}** berhasil dimuat. Ditemukan {len(df_preview)} baris data valid.")
             st.write("Pratinjau 5 baris pertama (sebelum disimpan):")
-            st.dataframe(df_preview[list(EXPECTED_COLS.keys())].head(), use_container_width=True)
+            st.dataframe(df_preview[[c for c in df_preview.columns if c in EXPECTED_COLS.keys()]].head(), use_container_width=True)
             
             if st.button("🚀 Simpan Data ke Database", type="primary", key="save_single_button"):
                 with st.spinner("Memproses dan menyimpan data..."):
