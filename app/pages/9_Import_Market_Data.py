@@ -5,7 +5,7 @@ from io import StringIO, BytesIO
 import os
 from datetime import datetime
 
-# Import fungsi insert DB yang baru dibuat
+# PERBAIKAN: Import fungsi yang baru kita pastikan ada di db_utils
 from db_utils import insert_daily_market_data 
 
 st.set_page_config(page_title="📥 Import Data Market Harian", layout="wide")
@@ -13,16 +13,16 @@ st.title("📥 Import Data Market Harian")
 st.markdown("Halaman untuk memasukkan data ringkasan harian (Ringkasan Saham) ke tabel `daily_stock_market_data`.")
 
 # --- Daftar Kolom yang Diharapkan dari File CSV/Excel (Harus Cocok dengan file lo)
+# Digunakan untuk validasi
 EXPECTED_COLS = {
     'KODE_SAHAM': 'Ticker',
     'TANGGAL_PERDAGANGAN_TERAKHIR': 'Tanggal',
-    'SEBELUMNYA': 'Prev. Close',
-    'PENUTUPAN': 'Close',
+    'PENUTUPAN': 'Close Price',
     'VOLUME': 'Volume',
     'NILAI': 'Nilai',
     'FOREIGN_SELL': 'Foreign Sell',
     'FOREIGN_BUY': 'Foreign Buy'
-    # Tambahkan semua header penting di sini untuk cek
+    # Kolom harga dan volume lainnya juga harus ada
 }
 
 # --- Fungsi Bantuan untuk Memproses File ---
@@ -30,6 +30,7 @@ def process_uploaded_file(uploaded_file):
     """Membaca file, membersihkan header, dan menampilkan preview."""
     try:
         if uploaded_file.name.endswith('.xlsx'):
+             # Asumsi Streamlit support membaca Excel jika library seperti openpyxl terinstall
              df = pd.read_excel(uploaded_file, sheet_name=0)
         else: # Asumsi CSV
              data = uploaded_file.getvalue().decode("utf-8")
@@ -78,11 +79,10 @@ with tab1:
         if df_preview is not None:
             st.success(f"File **{uploaded_file.name}** berhasil dimuat. Ditemukan {len(df_preview)} baris data valid.")
             st.write("Pratinjau 5 baris pertama (sebelum disimpan):")
-            st.dataframe(df_preview[list(EXPECTED_COLS.keys())].head(), use_container_width=True) # Tampilkan hanya kolom yang penting
+            st.dataframe(df_preview[list(EXPECTED_COLS.keys())].head(), use_container_width=True)
             
             if st.button("🚀 Simpan Data ke Database", type="primary", key="save_single_button"):
                 with st.spinner("Memproses dan menyimpan data..."):
-                    # Panggil fungsi insert yang baru
                     rows_affected = insert_daily_market_data(df_preview)
                     if rows_affected > 0:
                         st.success(f"✅ Berhasil menyimpan/mengupdate {rows_affected} baris data ke `daily_stock_market_data`!")
@@ -110,7 +110,6 @@ with tab2:
                     df_to_save = process_uploaded_file(file)
                     
                     if df_to_save is not None and not df_to_save.empty:
-                        # Panggil fungsi insert yang baru
                         rows = insert_daily_market_data(df_to_save)
                         if rows > 0:
                             total_rows_affected += rows
