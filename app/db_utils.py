@@ -282,6 +282,69 @@ def get_distinct_tickers_from_price_history_with_suffix(suffix: Optional[str] = 
     if isinstance(rows[0], (list, tuple)):
         return [r[0] for r in rows]
     return []
+# ----------------------------------------------------------------------------
+# Import data harian
+# ----------------------------------------------------------------------------
+
+def insert_daily_market_data(df: pd.DataFrame) -> int:
+    """Insert atau Update (UPSERT) data market harian dari DataFrame (sesuai format Ringkasan Saham)."""
+    if df is None or df.empty:
+        # st.warning tidak bisa dipakai di sini, gunakan print/log
+        print("DataFrame kosong; tidak ada yang disimpan.")
+        return 0
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Query UPSERT untuk tabel daily_stock_market_data
+        q = """
+        INSERT INTO daily_stock_market_data
+               (ticker, trade_date, previous_close, open_price, high_price, low_price, 
+                close_price, price_change, volume, value_turnover, frequency, 
+                individual_index, listed_shares, tradeable_shares, weight_for_index, 
+                foreign_sell_volume, foreign_buy_volume)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            previous_close=VALUES(previous_close), open_price=VALUES(open_price), high_price=VALUES(high_price),
+            low_price=VALUES(low_price), close_price=VALUES(close_price), price_change=VALUES(price_change),
+            volume=VALUES(volume), value_turnover=VALUES(value_turnover), frequency=VALUES(frequency),
+            individual_index=VALUES(individual_index), listed_shares=VALUES(listed_shares),
+            tradeable_shares=VALUES(tradeable_shares), weight_for_index=VALUES(weight_for_index),
+            foreign_sell_volume=VALUES(foreign_sell_volume), foreign_buy_volume=VALUES(foreign_buy_volume);
+        """
+        records = []
+        
+        # Iterasi melalui DataFrame
+        for idx, row in df.iterrows():
+            records.append((
+                str(row.get('KODE_SAHAM', '')).upper(),
+                pd.to_datetime(row.get('TANGGAL_PERDAGANGAN_TERAKHIR')).date(), 
+                float(row.get('SEBELUMNYA')) if pd.notna(row.get('SEBELUMNYA')) else None,
+                float(row.get('OPEN_PRICE')) if pd.notna(row.get('OPEN_PRICE')) else None,
+                float(row.get('TERTINGGI')) if pd.notna(row.get('TERTINGGI')) else None,
+                float(row.get('TERENDAH')) if pd.notna(row.get('TERENDAH')) else None,
+                float(row.get('PENUTUPAN')) if pd.notna(row.get('PENUTUPAN')) else None,
+                float(row.get('SELISIH')) if pd.notna(row.get('SELISIH')) else None,
+                int(row.get('VOLUME')) if pd.notna(row.get('VOLUME')) else None,
+                int(row.get('NILAI')) if pd.notna(row.get('NILAI')) else None,
+                int(row.get('FREKUENSI')) if pd.notna(row.get('FREKUENSI')) else None,
+                float(row.get('INDEX_INDIVIDUAL')) if pd.notna(row.get('INDEX_INDIVIDUAL')) else None,
+                int(row.get('LISTED_SHARES')) if pd.notna(row.get('LISTED_SHARES')) else None,
+                int(row.get('TRADEBLE_SHARES')) if pd.notna(row.get('TRADEBLE_SHARES')) else None,
+                float(row.get('WEIGHT_FOR_INDEX')) if pd.notna(row.get('WEIGHT_FOR_INDEX')) else None,
+                int(row.get('FOREIGN_SELL')) if pd.notna(row.get('FOREIGN_SELL')) else None,
+                int(row.get('FOREIGN_BUY')) if pd.notna(row.get('FOREIGN_BUY')) else None,
+            ))
+            
+        cur.executemany(q, records)
+        conn.commit()
+        return cur.rowcount
+    except mysql.connector.Error as err:
+        print(f"Gagal menyimpan data market harian ke DB: {err}")
+        conn.rollback()
+        return -1
+    finally:
+        cur.close(); conn.close()
 
 # -----------------------------------------------------------------------------
 # Util eksternal (dipakai halaman lain)
