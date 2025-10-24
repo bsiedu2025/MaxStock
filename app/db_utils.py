@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, tempfile, textwrap
-from datetime import date
+from datetime import date, timedelta # Tambahkan timedelta untuk fungsi get_ticker_list_for_update
 from typing import Dict, Any, Optional, Tuple, List
 
 import pandas as pd
@@ -39,264 +39,290 @@ def _load_cfg() -> Tuple[Dict[str, Any], Optional[str]]:
     except Exception:
         # st.secrets bisa tidak tersedia saat run lokal tanpa secrets.toml
         pass
-    # env fallback
+
+    # env
     for k in REQUIRED_KEYS + ["DB_SSL_CA", "DB_KIND"]:
-        if k not in cfg or cfg[k] in ("", None):
-            v = os.getenv(k)
-            if v:
-                cfg[k] = v.strip()
-    # validasi wajib
-    missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
-    if missing:
-        return cfg, f"Secrets DB belum lengkap. Missing: {', '.join(missing)}"
+        if k in os.environ:
+            v = os.environ[k]
+            if isinstance(v, str):
+                v = v.strip()
+            cfg[k] = v
+
+    # Validation
+    missing_keys = [k for k in REQUIRED_KEYS if k not in cfg or not cfg[k]]
+    if missing_keys:
+        return {}, f"Kunci konfigurasi DB yang hilang/kosong: {', '.join(missing_keys)}"
+    
     return cfg, None
 
-def check_secrets(show_in_ui: bool = True) -> bool:
-    _, err = _load_cfg()
-    if err and show_in_ui:
-        st.error(f"Gagal terhubung ke database: {err}")
-    return err is None
+# -----------------------------------------------------------------------------
+# Koneksi DB
+# -----------------------------------------------------------------------------
+_DB_POOL: Optional[pooling.MySQLConnectionPool] = None
 
-# -----------------------------------------------------------------------------
-# SSL CA helper (cache sekali)
-# -----------------------------------------------------------------------------
-@st.cache_resource
-def _get_ssl_ca_path(ca_text: Optional[str]) -> Optional[str]:
-    """Tulis isi CA (multiline) ke file sementara, dikembalikan path-nya. Dicache sekali per session."""
-    if not ca_text:
-        return None
-    ca_text = textwrap.dedent(str(ca_text)).strip()
-    tmp = tempfile.NamedTemporaryFile(prefix="aiven_ca_", suffix=".pem", delete=False)
-    tmp.write(ca_text.encode("utf-8"))
-    tmp.flush()
-    tmp.close()
-    return tmp.name
+def _get_db_pool() -> Optional[pooling.MySQLConnectionPool]:
+    """Inisialisasi dan kembalikan koneksi pool."""
+    global _DB_POOL
+    if _DB_POOL:
+        return _DB_POOL
 
-# -----------------------------------------------------------------------------
-# Connection Pool (cache sekali)
-# -----------------------------------------------------------------------------
-def _make_pool(cfg: Dict[str, Any]) -> pooling.MySQLConnectionPool:
-    ca_path = _get_ssl_ca_path(cfg.get("DB_SSL_CA"))
-    kwargs = dict(
-        host=cfg["DB_HOST"],
-        port=int(cfg["DB_PORT"]),
-        database=cfg["DB_NAME"],
-        user=cfg["DB_USER"],
-        password=cfg["DB_PASSWORD"],
-        charset="utf8mb4",
-        autocommit=False,
-        ssl_ca=ca_path if ca_path else None,
-    )
-    # Hapus field None agar tidak dipass ke driver
-    kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=5, **kwargs)
-
-@st.cache_resource
-def _get_pool() -> pooling.MySQLConnectionPool:
     cfg, err = _load_cfg()
     if err:
-        raise RuntimeError(err)
-    return _make_pool(cfg)
+        st.error(f"Error Konfigurasi Database: {err}")
+        return None
+    
+    try:
+        pool_args = {
+            "pool_name": "st_maxstock_pool",
+            "pool_size": 5, # Jumlah koneksi maksimal di pool
+            "host": str(cfg["DB_HOST"]),
+            "port": int(cfg["DB_PORT"]),
+            "database": str(cfg["DB_NAME"]),
+            "user": str(cfg["DB_USER"]),
+            "password": str(cfg["DB_PASSWORD"]),
+            "charset": "utf8mb4",
+            "autocommit": False
+        }
+
+        # Handle SSL/TLS
+        if cfg.get("DB_SSL_CA"):
+            pool_args["ssl_ca"] = str(cfg["DB_SSL_CA"])
+            pool_args["ssl_verify_cert"] = True
+            st.info("Koneksi Database menggunakan SSL/TLS.")
+        
+        _DB_POOL = pooling.MySQLConnectionPool(**pool_args)
+        return _DB_POOL
+    except Exception as e:
+        st.error(f"Gagal membuat koneksi pool DB: {e}")
+        return None
 
 def get_db_connection():
-    """Ambil koneksi dari pool (lebih hemat latency daripada bikin koneksi baru)."""
-    pool = _get_pool()
-    return pool.get_connection()
-
-# Alias kompatibilitas
-get_connection = get_db_connection
-get_db_conn = get_db_connection
-
-def get_db_name() -> str:
-    """Ambil nama DB aktif (berguna untuk tampilan UI)."""
-    cfg, _ = _load_cfg()
-    return str(cfg.get("DB_NAME", "")).strip()
-
-def get_connection_info() -> Dict[str, Any]:
-    cfg, _ = _load_cfg()
-    return {
-        "host": cfg.get("DB_HOST", ""),
-        "port": cfg.get("DB_PORT", ""),
-        "name": cfg.get("DB_NAME", ""),
-        "user": cfg.get("DB_USER", ""),
-        "kind": cfg.get("DB_KIND", "mysql"),
-        "ssl": "yes" if cfg.get("DB_SSL_CA") else "no",
-    }
+    """Ambil koneksi dari pool."""
+    pool = _get_db_pool()
+    if pool:
+        try:
+            return pool.get_connection()
+        except Exception as e:
+            st.error(f"Gagal mengambil koneksi dari pool: {e}")
+            return None
+    return None
 
 # -----------------------------------------------------------------------------
-# Helper eksekusi SQL
+# DDL (Data Definition Language)
 # -----------------------------------------------------------------------------
-def execute_query(query: str, params=None, fetch_one=False, fetch_all=False, is_dml_ddl=False):
-    """Helper eksekusi SQL dengan commit/rollback & hasil fleksibel."""
-    conn = get_db_connection()
-    cursor = None
-    try:
-        cursor = conn.cursor(dictionary=(fetch_one or fetch_all))
-        cursor.execute(query, params or ())
-        if is_dml_ddl:
-            conn.commit()
-            return (cursor.rowcount if cursor.rowcount != -1 else True, None)
-        if fetch_one:
-            return (cursor.fetchone(), None)
-        if fetch_all:
-            return (cursor.fetchall(), None)
-        return (True, None)
-    except mysql.connector.Error as err:
-        if conn.is_connected():
-            conn.rollback()
-        return (None if (fetch_one or fetch_all) else False, f"Error SQL: {err}")
-    finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
-
-# -----------------------------------------------------------------------------
-# Schema & CRUD data saham
-# -----------------------------------------------------------------------------
-def create_tables_if_not_exist():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
+def create_tables_if_not_exist() -> None:
+    """Buat semua tabel yang dibutuhkan jika belum ada."""
+    
+    # [1] stock_prices_history (Data Harga Historis yfinance)
+    stock_prices_history_query = textwrap.dedent("""
         CREATE TABLE IF NOT EXISTS stock_prices_history (
-            Ticker  VARCHAR(20) NOT NULL,
-            Tanggal DATE NOT NULL,
-            Open    DECIMAL(19,4),
-            High    DECIMAL(19,4),
-            Low     DECIMAL(19,4),
-            Close   DECIMAL(19,4),
-            Volume  BIGINT,
-            PRIMARY KEY (Ticker, Tanggal)
+            Ticker VARCHAR(20) NOT NULL,
+            Date DATE NOT NULL,
+            Open DECIMAL(10, 2),
+            High DECIMAL(10, 2),
+            Low DECIMAL(10, 2),
+            Close DECIMAL(10, 2),
+            Volume BIGINT,
+            PRIMARY KEY (Ticker, Date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-        """)
-        conn.commit()
-        st.toast("Schema dicek/dibuat.", icon="✅")
-    finally:
-        cur.close(); conn.close()
+    """)
 
-def insert_stock_price_data(df_stock: pd.DataFrame, ticker_symbol: str) -> int:
-    """Insert IGNORE data historis harga saham dari DataFrame ke tabel."""
-    if df_stock is None or df_stock.empty:
-        st.warning("DataFrame kosong; tidak ada yang disimpan.")
-        return 0
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        q = """INSERT IGNORE INTO stock_prices_history
-               (Ticker, Tanggal, Open, High, Low, Close, Volume)
-               VALUES (%s,%s,%s,%s,%s,%s,%s);"""
-        count = 0
-        for idx, row in df_stock.iterrows():
-            tanggal = idx.date() if hasattr(idx, "date") else idx
-            cur.execute(q, (
-                ticker_symbol, tanggal,
-                float(row.get("Open")) if pd.notna(row.get("Open")) else None,
-                float(row.get("High")) if pd.notna(row.get("High")) else None,
-                float(row.get("Low"))  if pd.notna(row.get("Low"))  else None,
-                float(row.get("Close"))if pd.notna(row.get("Close"))else None,
-                int(row.get("Volume")) if pd.notna(row.get("Volume")) else None,
-            ))
-            count += cur.rowcount
-        conn.commit()
-        return count
-    finally:
-        cur.close(); conn.close()
+    # [2] ksei_month (Data KSEI/Kustodian Bulanan)
+    ksei_month_query = textwrap.dedent("""
+        CREATE TABLE IF NOT EXISTS ksei_month (
+            period DATE NOT NULL,
+            ticker VARCHAR(20) NOT NULL,
+            custodian_category VARCHAR(50) NOT NULL,
+            local_foreign CHAR(1) NOT NULL,
+            shares_held BIGINT,
+            value_held DECIMAL(19, 4),
+            PRIMARY KEY (period, ticker, custodian_category, local_foreign)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
+    
+    # [3] stock_list (Daftar Ticker yang sudah disimpan)
+    # Ini adalah tabel yang berisi daftar ticker yang datanya sudah pernah di-fetch dan disimpan
+    stock_list_query = textwrap.dedent("""
+        CREATE TABLE IF NOT EXISTS stock_list (
+            Ticker VARCHAR(20) NOT NULL PRIMARY KEY,
+            Name VARCHAR(255),
+            LatestUpdate DATE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
+    
+    # [4] daily_stock_market_data (BARU: Data Ringkasan Harian dari File Upload)
+    daily_stock_market_data_query = textwrap.dedent("""
+        CREATE TABLE IF NOT EXISTS daily_stock_market_data (
+            ticker VARCHAR(20) NOT NULL,
+            trade_date DATE NOT NULL,
+            previous_close DECIMAL(10, 2),
+            open_price DECIMAL(10, 2),
+            high_price DECIMAL(10, 2),
+            low_price DECIMAL(10, 2),
+            close_price DECIMAL(10, 2),
+            price_change DECIMAL(10, 2),
+            volume BIGINT,
+            value_turnover BIGINT,
+            frequency INT,
+            individual_index DECIMAL(19, 4),
+            listed_shares BIGINT,
+            tradeable_shares BIGINT,
+            weight_for_index DECIMAL(19, 4),
+            foreign_sell_volume BIGINT,
+            foreign_buy_volume BIGINT,
+            PRIMARY KEY (ticker, trade_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
 
-def fetch_stock_prices_from_db(ticker_symbol: str, start_date: Optional[date]=None, end_date: Optional[date]=None) -> pd.DataFrame:
-    """Ambil data historis suatu ticker dari DB sebagai DataFrame (index=Tanggal)."""
+    queries = [
+        stock_prices_history_query, 
+        ksei_month_query, 
+        stock_list_query,
+        daily_stock_market_data_query # <-- Tambahkan tabel baru di sini
+    ]
+
     conn = get_db_connection()
-    q = "SELECT Tanggal, Open, High, Low, Close, Volume FROM stock_prices_history WHERE Ticker=%s"
-    params = [ticker_symbol]
-    if start_date and end_date:
-        q += " AND Tanggal BETWEEN %s AND %s"; params += [start_date, end_date]
-    elif start_date:
-        q += " AND Tanggal >= %s"; params += [start_date]
-    elif end_date:
-        q += " AND Tanggal <= %s"; params += [end_date]
-    q += " ORDER BY Tanggal ASC"
+    if not conn: return
+    
     try:
-        df = pd.read_sql(q, conn, params=params, index_col="Tanggal")
-        if not df.empty:
-            df.index = pd.to_datetime(df.index)
-        return df
+        cur = conn.cursor()
+        for q in queries:
+            cur.execute(q)
+        conn.commit()
+        st.success("Tabel database berhasil dicek/dibuat.")
+    except mysql.connector.Error as err:
+        st.error(f"Gagal membuat tabel: {err}")
     finally:
         conn.close()
 
-def get_saved_tickers_summary() -> pd.DataFrame:
-    """Ringkasan data per ticker (jumlah baris, rentang tanggal, harga terakhir, hi/lo)."""
-    q = """
-    SELECT sph.Ticker, COUNT(*) as Jumlah_Data,
-           MIN(sph.Tanggal) as Tanggal_Awal,
-           MAX(sph.Tanggal) as Tanggal_Terakhir,
-           (SELECT sp_last.Close FROM stock_prices_history sp_last
-            WHERE sp_last.Ticker = sph.Ticker
-            ORDER BY sp_last.Tanggal DESC LIMIT 1) as Harga_Penutupan_Terakhir,
-           MAX(sph.High) as Harga_Tertinggi_Periode,
-           MIN(sph.Low)  as Harga_Terendah_Periode
-    FROM stock_prices_history sph
-    GROUP BY sph.Ticker
-    ORDER BY sph.Ticker ASC;
-    """
-    rows, err = execute_query(q, fetch_all=True)
-    if err or not rows:
-        return pd.DataFrame(columns=[
-            "Ticker","Jumlah_Data","Tanggal_Awal","Tanggal_Terakhir",
-            "Harga_Penutupan_Terakhir","Harga_Tertinggi_Periode","Harga_Terendah_Periode"
-        ])
-    df = pd.DataFrame(rows)
-    if "Tanggal_Awal" in df: df["Tanggal_Awal"] = pd.to_datetime(df["Tanggal_Awal"], errors="coerce")
-    if "Tanggal_Terakhir" in df: df["Tanggal_Terakhir"] = pd.to_datetime(df["Tanggal_Terakhir"], errors="coerce")
-    return df
+# -----------------------------------------------------------------------------
+# DML (Data Manipulation Language) & Query Fetching
+# -----------------------------------------------------------------------------
+def execute_query(query: str, params: Optional[Tuple[Any, ...]] = None, fetch_all: bool = False, fetch_one: bool = False) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Jalankan query umum (SELECT, UPDATE, DELETE)."""
+    conn = get_db_connection()
+    if not conn:
+        return None, "Koneksi database gagal."
+    
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(query, params)
+        
+        if query.strip().upper().startswith("SELECT"):
+            result = cur.fetchall() if fetch_all else cur.fetchone() if fetch_one else []
+            if fetch_all:
+                return result, None
+            elif fetch_one:
+                return [result] if result else [], None
+            else:
+                return [], None
+        else:
+            conn.commit()
+            return [{"rows_affected": cur.rowcount}], None
+            
+    except mysql.connector.Error as err:
+        return None, str(err)
+    except Exception as e:
+        return None, f"Error tak terduga: {e}"
+    finally:
+        if conn and conn.is_connected():
+            cur.close()
+            conn.close()
 
-def get_table_list() -> List[str]:
-    """Daftar tabel di database aktif."""
-    rows, err = execute_query("SHOW TABLES;", fetch_all=True)
-    if err or not rows:
-        return []
-    # dict cursor -> key pertama adalah "Tables_in_<DBNAME>"
-    if isinstance(rows[0], dict):
-        key = list(rows[0].keys())[0]
-        return [r[key] for r in rows]
-    if isinstance(rows[0], (list, tuple)):
-        return [r[0] for r in rows]
-    return []
+def fetch_stock_prices_from_db(ticker: str, start_date: date, end_date: date) -> pd.DataFrame:
+    """Ambil data harga historis dari DB."""
+    query = textwrap.dedent("""
+        SELECT Date, Open, High, Low, Close, Volume 
+        FROM stock_prices_history 
+        WHERE Ticker = %s AND Date BETWEEN %s AND %s 
+        ORDER BY Date ASC;
+    """)
+    params = (ticker, start_date, end_date)
+    
+    result, error = execute_query(query, params, fetch_all=True)
+    
+    if error:
+        st.error(f"Gagal mengambil data harga dari DB: {error}")
+        return pd.DataFrame()
+        
+    if result:
+        df = pd.DataFrame(result)
+        df = df.set_index('Date')
+        df.index = pd.to_datetime(df.index)
+        return df
+    return pd.DataFrame()
 
-def get_distinct_tickers_from_price_history_with_suffix(suffix: Optional[str] = None) -> List[str]:
-    """
-    Ambil daftar DISTINCT Ticker dari stock_prices_history.
-    Jika suffix diberikan (mis. '.JK'), filter yang berakhiran suffix tsb.
-    """
-    if suffix:
-        q = "SELECT DISTINCT Ticker FROM stock_prices_history WHERE Ticker LIKE %s ORDER BY Ticker ASC;"
-        params = [f"%{suffix}"]
-    else:
-        q = "SELECT DISTINCT Ticker FROM stock_prices_history ORDER BY Ticker ASC;"
-        params = []
-    rows, err = execute_query(q, params=params, fetch_all=True)
-    if err or not rows:
-        return []
-    if isinstance(rows[0], dict):
-        key = list(rows[0].keys())[0]
-        return [r[key] for r in rows]
-    if isinstance(rows[0], (list, tuple)):
-        return [r[0] for r in rows]
-    return []
-# ----------------------------------------------------------------------------
-# Import data harian
-# ----------------------------------------------------------------------------
-
-def insert_daily_market_data(df: pd.DataFrame) -> int:
-    """Insert atau Update (UPSERT) data market harian dari DataFrame (sesuai format Ringkasan Saham)."""
-    if df is None or df.empty:
-        # st.warning tidak bisa dipakai di sini, gunakan print/log
-        print("DataFrame kosong; tidak ada yang disimpan.")
+def insert_stock_price_data(ticker: str, df_history: pd.DataFrame) -> int:
+    """Insert atau Update (UPSERT) data harga saham dari yfinance."""
+    if df_history is None or df_history.empty:
+        st.warning(f"DataFrame {ticker} kosong; tidak ada yang disimpan.")
         return 0
     
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        q = """
+        INSERT INTO stock_prices_history 
+               (Ticker, Date, Open, High, Low, Close, Volume)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            Open=VALUES(Open), High=VALUES(High), Low=VALUES(Low), Close=VALUES(Close), Volume=VALUES(Volume);
+        """
+        
+        records = []
+        for index, row in df_history.iterrows():
+            records.append((
+                ticker, 
+                index.date(), # Date (dari index DataFrame yfinance)
+                row.get('Open'), 
+                row.get('High'), 
+                row.get('Low'), 
+                row.get('Close'), 
+                row.get('Volume')
+            ))
+            
+        cur.executemany(q, records)
+        conn.commit()
+        
+        # Update/Insert ke stock_list
+        update_stock_list_query = """
+        INSERT INTO stock_list (Ticker, Name, LatestUpdate)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            LatestUpdate = VALUES(LatestUpdate);
+        """
+        latest_date = df_history.index[-1].date()
+        # Asumsi nama saham tidak diketahui di sini, jadi diisi None atau biarkan kolom Name kosong
+        cur.execute(update_stock_list_query, (ticker, None, latest_date)) 
+        conn.commit()
+        
+        return cur.rowcount # Mengembalikan jumlah baris yang terpengaruh di stock_prices_history
+    except mysql.connector.Error as err:
+        st.error(f"Gagal menyimpan data harga {ticker} ke DB: {err}")
+        conn.rollback()
+        return -1
+    finally:
+        cur.close(); conn.close()
+
+# -----------------------------------------------------------------------------
+# [BARU] DML untuk Tabel daily_stock_market_data
+# -----------------------------------------------------------------------------
+def insert_daily_market_data(df: pd.DataFrame) -> int:
+    """Insert atau Update (UPSERT) data market harian dari DataFrame (sesuai format Ringkasan Saham)."""
+    if df is None or df.empty:
+        # Gunakan print untuk logging jika dipanggil dari background process (bukan Streamlit UI)
+        print("DataFrame kosong; tidak ada yang disimpan.")
+        return 0
+    
+    conn = get_db_connection() 
+    if conn is None:
+        print("Koneksi database gagal dalam insert_daily_market_data.")
+        return -1
+        
+    cur = conn.cursor()
+    try:
         # Query UPSERT untuk tabel daily_stock_market_data
+        # Ganti dengan nama tabel yang sudah lo buat: daily_stock_market_data
         q = """
         INSERT INTO daily_stock_market_data
                (ticker, trade_date, previous_close, open_price, high_price, low_price, 
@@ -314,8 +340,9 @@ def insert_daily_market_data(df: pd.DataFrame) -> int:
         """
         records = []
         
-        # Iterasi melalui DataFrame
+        # Iterasi melalui DataFrame (pastikan header di file CSV lo sama persis)
         for idx, row in df.iterrows():
+            # Asumsi nama kolom di DataFrame sudah dibersihkan dan UPPERCASE
             records.append((
                 str(row.get('KODE_SAHAM', '')).upper(),
                 pd.to_datetime(row.get('TANGGAL_PERDAGANGAN_TERAKHIR')).date(), 
@@ -345,6 +372,83 @@ def insert_daily_market_data(df: pd.DataFrame) -> int:
         return -1
     finally:
         cur.close(); conn.close()
+        
+# -----------------------------------------------------------------------------
+# Fungsi Query Pendukung (Stock Tickers & Summary)
+# -----------------------------------------------------------------------------
+def get_saved_tickers_summary() -> pd.DataFrame:
+    """Ambil ringkasan ticker yang sudah tersimpan di stock_list."""
+    query = textwrap.dedent("""
+        SELECT 
+            t1.Ticker,
+            t1.Name,
+            t1.LatestUpdate,
+            t2.rows_count
+        FROM stock_list t1
+        LEFT JOIN (
+            SELECT Ticker, COUNT(*) as rows_count
+            FROM stock_prices_history
+            GROUP BY Ticker
+        ) t2 ON t1.Ticker = t2.Ticker
+        ORDER BY t1.LatestUpdate DESC;
+    """)
+    result, error = execute_query(query, fetch_all=True)
+    if error:
+        st.error(f"Gagal mengambil ringkasan ticker: {error}")
+        return pd.DataFrame()
+        
+    if result:
+        df = pd.DataFrame(result)
+        # Handle datetime/date
+        if 'LatestUpdate' in df.columns:
+            df['LatestUpdate'] = pd.to_datetime(df['LatestUpdate']).dt.date
+        return df
+    return pd.DataFrame()
+
+def get_ticker_list_for_update(max_age_days: int = 1) -> List[str]:
+    """
+    Ambil daftar ticker yang perlu diupdate: 
+    1. Belum ada di stock_list
+    2. Sudah ada, tapi LatestUpdate lebih lama dari max_age_days (default 1 hari)
+    """
+    check_date = date.today() - timedelta(days=max_age_days)
+    
+    query = textwrap.dedent("""
+        SELECT Ticker FROM stock_list
+        WHERE LatestUpdate IS NULL OR LatestUpdate < %s;
+    """)
+    params = (check_date,)
+    
+    result, error = execute_query(query, params, fetch_all=True)
+    if error:
+        print(f"Error fetching ticker list for update: {error}")
+        return []
+    
+    # Konversi hasil list of dicts ke list of strings
+    if result:
+        return [row['Ticker'] for row in result]
+    return []
+
+def fetch_all_distinct_tickers() -> List[str]:
+    """Mengambil semua ticker unik yang ada di stock_prices_history."""
+    query = "SELECT DISTINCT Ticker FROM stock_prices_history ORDER BY Ticker ASC;"
+    result, error = execute_query(query, fetch_all=True)
+    if error or not result:
+        return []
+    return [row['Ticker'] for row in result if row['Ticker']]
+
+def single_column_result_to_list(rows: List[Dict[str, Any]]) -> List[Any]:
+    """Utility untuk mengubah hasil fetch_all berisi satu kolom menjadi list sederhana."""
+    if not rows:
+        return []
+    # Coba identifikasi nama kolom pertama
+    if isinstance(rows[0], dict) and rows[0]:
+        key = list(rows[0].keys())[0]
+        return [r[key] for r in rows]
+    # Fallback jika cursor bukan dictionary (walaupun sudah diset dictionary=True)
+    if isinstance(rows[0], (list, tuple)):
+        return [r[0] for r in rows]
+    return []
 
 # -----------------------------------------------------------------------------
 # Util eksternal (dipakai halaman lain)
@@ -375,6 +479,6 @@ def get_stock_info(ticker: str) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 try:
     _cfg_for_export, _err_ = _load_cfg()
-    DB_NAME: str = str(_cfg_for_export.get("DB_NAME", "")).strip()
+    DB_NAME: str = str(_cfg_for_export.get("DB_NAME", ""))
 except Exception:
-    DB_NAME = ""
+    DB_NAME: str = ""
