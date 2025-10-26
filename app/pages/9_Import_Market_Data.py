@@ -7,7 +7,7 @@
 import io
 import os
 import math
-from typing import List, Tuple
+from typing import List
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +18,7 @@ st.title("📥 Import Market Data Harian (CSV/XLSX) → `data_harian`")
 
 with st.expander("ℹ️ Petunjuk & Catatan", expanded=False):
     st.markdown(
-        "- Format kolom mengikuti file contoh **Ringkasan Saham-YYYYMMDD.csv** (BEI).\n"
+        "- Format kolom mengikuti file contoh **Ringkasan Saham-YYYYMMDD.csv/xlsx** (BEI).\n"
         "- Kunci unik: **(kode_saham, trade_date)** → tidak akan dobel saat upload berulang.\n"
         "- Bisa unggah **satu** atau **banyak file** sekaligus.\n"
         "- Pilih mode **Lewati Duplikat (INSERT IGNORE)** atau **Update Jika Ada (UPSERT)**."
@@ -94,18 +94,45 @@ def parse_id_date(s: str):
     except Exception:
         return None
 
+def _read_csv_robust(uploaded_file) -> pd.DataFrame:
+    # Baca isi bytes → coba beberapa kombinasi encoding & delimiter
+    raw = uploaded_file.read()
+    # reset pointer agar bisa dibaca ulang di tempat lain jika perlu
+    def try_read(encoding: str, sep: str):
+        try:
+            text = raw.decode(encoding, errors='ignore')
+            return pd.read_csv(io.StringIO(text), sep=sep)
+        except Exception:
+            return None
+    # urutan percobaan
+    for enc in ("utf-8", "utf-16", "latin1"):
+        for sep in (",", ";", "\t"):
+            df = try_read(enc, sep)
+            if df is not None and len(df.columns) >= 3:
+                return df
+    # terakhir: coba pandas langsung tanpa decode manual
+    uploaded_file.seek(0)
+    return pd.read_csv(uploaded_file)
+
 def read_any(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     if name.endswith(('.xlsx', '.xls')):
-        df = pd.read_excel(uploaded_file)
+        try:
+            import openpyxl  # wajib untuk xlsx
+        except Exception:
+            st.error(
+                "File Excel terdeteksi (**.xlsx/.xls**), tetapi dependensi **openpyxl** belum terpasang.\n\n"
+                "Tambahkan `openpyxl>=3.1.2` ke **requirements.txt**, lalu deploy ulang. "
+                "Sementara waktu, kamu bisa upload **CSV** sebagai alternatif."
+            )
+            st.stop()
+        # pastikan pointer di awal
+        uploaded_file.seek(0)
+        # force engine agar jelas
+        return pd.read_excel(uploaded_file, engine="openpyxl")
     else:
-        # CSV fallback
-        raw = uploaded_file.read()
-        text = raw.decode('utf-8', errors='ignore')
-        df = pd.read_csv(io.StringIO(text))
-    # strip column names
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+        uploaded_file.seek(0)
+        return _read_csv_robust(uploaded_file)
 
 def normalize_market_df(df: pd.DataFrame, source_file: str = None) -> pd.DataFrame:
     # mapping default sesuai contoh BEI
@@ -137,7 +164,6 @@ def normalize_market_df(df: pd.DataFrame, source_file: str = None) -> pd.DataFra
     out['bid'] = num('Bid')
     out['bid_volume'] = num('Bid Volume')
     out['listed_shares'] = num('Listed Shares')
-    # antisipasi typo 'Tradeble Shares'
     out['tradeable_shares'] = num('Tradeble Shares') if 'Tradeble Shares' in df.columns else num('Tradeable Shares')
     out['weight_for_index'] = num('Weight For Index')
     out['foreign_sell'] = num('Foreign Sell')
@@ -167,7 +193,8 @@ preview_rows = st.number_input("Preview baris", 5, 50, 20, 5)
 
 mode = st.radio(
     "Mode insert ke database:",
-    options=["Lewati duplikat (INSERT IGNORE)", "Update jika sudah ada (UPSERT)"]
+    options=["Lewati duplikat (INSERT IGNORE)", "Update jika sudah ada (UPSERT)"],
+    index=0
 )
 
 parsed: List[pd.DataFrame] = []
@@ -175,6 +202,7 @@ if files:
     st.write(f"Total file terpilih: **{len(files)}**")
     for up in files:
         with st.expander(f"📄 Preview: {up.name}", expanded=False):
+            up.seek(0)
             df_raw = read_any(up)
             st.dataframe(df_raw.head(preview_rows), use_container_width=True)
             df_norm = normalize_market_df(df_raw, source_file=up.name)
@@ -274,25 +302,37 @@ if st.button("🚀 Simpan ke `data_harian`", type="primary") and parsed:
         pbar = st.progress(0, text="Menyimpan ke database...")
         affected_total = 0
 
-        data_iter = (tuple(v if (pd.notna(v) if isinstance(v, float) else v) else None for v in row) 
-                     for row in all_df.itertuples(index=False, name=None))
+        def to_sql_tuple(row):
+            tup = []
+            for v in row:
+                if isinstance(v, float):
+                    tup.append(v if pd.notna(v) else None)
+                else:
+                    # strings/ints already fine; convert NaN to None
+                    try:
+                        if pd.isna(v):
+                            tup.append(None)
+                        else:
+                            tup.append(v)
+                    except Exception:
+                        tup.append(v)
+            return tuple(tup)
 
-        # executemany per batch
         rows_buffer = []
         b = 0
-        for tup in data_iter:
-            rows_buffer.append(tup)
+        for row in all_df.itertuples(index=False, name=None):
+            rows_buffer.append(to_sql_tuple(row))
             if len(rows_buffer) >= batch_size:
                 cur.executemany(sql, rows_buffer)
                 conn.commit()
-                affected_total += cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
+                affected_total += cur.rowcount or 0
                 rows_buffer.clear()
                 b += 1
-                pbar.progress(min((b) / total_batches, 1.0), text=f"Menyimpan batch {b}/{total_batches}...")
+                pbar.progress(min(b / total_batches, 1.0), text=f"Menyimpan batch {b}/{total_batches}...")
         if rows_buffer:
             cur.executemany(sql, rows_buffer)
             conn.commit()
-            affected_total += cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
+            affected_total += cur.rowcount or 0
             b += 1
             pbar.progress(1.0, text=f"Menyimpan batch {b}/{b}...")
 
@@ -302,8 +342,10 @@ if st.button("🚀 Simpan ke `data_harian`", type="primary") and parsed:
     except Exception as e:
         st.exception(e)
     finally:
-        try: conn.close()
-        except Exception: pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # Footer
 st.markdown("---")
