@@ -6,8 +6,7 @@
 # - Export CSV
 
 import io
-import math
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 from typing import Tuple, Optional
 
 import pandas as pd
@@ -33,6 +32,25 @@ if not check_secrets(show_in_ui=True):
     st.stop()
 
 st.caption(f"DB aktif: **{get_db_name()}**")
+
+# ───────────────────── Helper koneksi aman ─────────────────────
+def _ensure_alive(conn):
+    try:
+        # mysql-connector punya .reconnect(attempts, delay)
+        conn.reconnect(attempts=2, delay=1)
+    except Exception:
+        pass
+
+def _safe_close(conn):
+    try:
+        if hasattr(conn, "is_connected"):
+            if conn.is_connected():
+                conn.close()
+        else:
+            conn.close()
+    except Exception:
+        # swallow supaya tidak mengganggu UI
+        pass
 
 # ──────────────────────── DB PREP (views) ───────────────────────
 DDL_V_DAILY_METRICS = """
@@ -114,11 +132,13 @@ def ensure_views(conn):
         cur.execute(DDL_V_ANOMALY_20D)
         conn.commit()
     except Exception as e:
-        # Don't block the page—show the error nicely
-        st.warning("Gagal membuat VIEW (mungkin hak akses terbatas). Halaman tetap coba jalan dengan tabel mentah.")
+        st.warning("Gagal membuat VIEW (mungkin hak akses terbatas). Halaman tetap jalan dengan tabel mentah.")
         st.caption(f"Detail: {e}")
     finally:
-        cur.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 def get_date_bounds(conn) -> Tuple[date, date]:
     q = "SELECT MIN(trade_date), MAX(trade_date) FROM data_harian"
@@ -136,6 +156,7 @@ def get_date_bounds(conn) -> Tuple[date, date]:
 def fetch_net_foreign_rank(start: date, end: date, min_advt: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
     conn = get_db_connection()
     try:
+        _ensure_alive(conn)
         ensure_views(conn)
         sql = """
         SELECT
@@ -164,12 +185,13 @@ def fetch_net_foreign_rank(start: date, end: date, min_advt: Optional[float], ma
         df = pd.read_sql(sql, conn, params=params)
         return df
     finally:
-        conn.close()
+        _safe_close(conn)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_top_movers(trade_dt: date, min_advt: Optional[float], max_spread: Optional[float], topn: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
     conn = get_db_connection()
     try:
+        _ensure_alive(conn)
         ensure_views(conn)
         base = """
         SELECT
@@ -179,7 +201,6 @@ def fetch_top_movers(trade_dt: date, min_advt: Optional[float], max_spread: Opti
         WHERE trade_date = %s
         """
         params = [trade_dt]
-        # filter likuiditas & spread
         if min_advt is not None and min_advt > 0:
             base += " AND advt_20 >= %s"
             params.append(min_advt)
@@ -192,7 +213,7 @@ def fetch_top_movers(trade_dt: date, min_advt: Optional[float], max_spread: Opti
         df_loser  = df_all.sort_values(by="ret_1d", ascending=True ).head(int(topn)).reset_index(drop=True)
         return df_gainer, df_loser
     finally:
-        conn.close()
+        _safe_close(conn)
 
 def fmt_money(x):
     try:
@@ -205,9 +226,10 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 # ───────────────────────────── Sidebar ─────────────────────────────
 conn_for_bounds = get_db_connection()
+_ensure_alive(conn_for_bounds)
 ensure_views(conn_for_bounds)
 min_d, max_d = get_date_bounds(conn_for_bounds)
-conn_for_bounds.close()
+_safe_close(conn_for_bounds)
 
 colA, colB = st.columns([1,1])
 with colA:
@@ -232,8 +254,7 @@ st.markdown("---")
 # ───────────────────────────── Foreign Flow ─────────────────────────────
 st.subheader("🟩 Top Net **Buy Asing** (Akumulasi)")
 df_rank = fetch_net_foreign_rank(start_date, end_date, min_advt_20, max_spread_bps, topn*2)
-# split buy & sell dari satu query (lebih hemat)
-df_buy = df_rank.sort_values("cum_net_foreign", ascending=False).head(topn).reset_index(drop=True)
+df_buy  = df_rank.sort_values("cum_net_foreign", ascending=False).head(topn).reset_index(drop=True)
 df_sell = df_rank.sort_values("cum_net_foreign", ascending=True ).head(topn).reset_index(drop=True)
 
 c1, c2 = st.columns(2)
@@ -264,7 +285,7 @@ st.markdown("---")
 
 # ───────────────────────────── Movers 1D ─────────────────────────────
 st.subheader("⚡ Top Movers (1D)")
-mcol1, mcol2 = st.columns([1,3])
+mcol1, _ = st.columns([1,3])
 with mcol1:
     movers_date = st.date_input("Tanggal untuk Movers (1D)", value=end_date, min_value=min_d, max_value=max_d, key="movers_date")
 
