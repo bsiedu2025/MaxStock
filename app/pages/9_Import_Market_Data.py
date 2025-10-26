@@ -1,301 +1,310 @@
 # app/pages/9_Import_Market_Data.py
-# Upload data harian pergerakan asing (CSV/XLSX) → data_harian
-# Mendukung import satuan dan bulk. Aman dari duplikasi (Primary Key: kode_saham, tanggal_perdagangan).
+# Import Ringkasan Saham Harian (CSV/XLSX) → data_harian
+# - Support single & bulk upload
+# - Dedup by (kode_saham, trade_date)
+# - UPSERT (optional) or INSERT IGNORE
 
 import io
 import os
 import math
-import tempfile
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple
 
 import pandas as pd
 import streamlit as st
-import mysql.connector
-from mysql.connector import pooling
-from mysql.connector.errors import IntegrityError
+from db_utils import get_db_connection, get_db_name, check_secrets
 
-# -------------------------------------------------------------------------
-# PERBAIKAN: Mengimpor fungsi koneksi DB dari db_utils.py
-# Asumsi: db_utils.py berada di path yang bisa diimpor (misalnya di root folder app)
-# Jika db_utils.py tidak bisa diimpor langsung, ganti baris ini:
-try:
-    # Coba impor langsung fungsi get_pool dari db_utils.py
-    # Ganti 'db_utils' dengan nama modul/file yang benar jika berbeda
-    from db_utils import get_pool 
-    
-    # Ambil pool dan ssl_ca_file (get_pool di db_utils.py harus mengembalikan tuple (pool, ssl_ca_file))
-    db_pool, ssl_ca_file = get_pool()
-except ImportError:
-    st.error("🚨 Gagal mengimpor fungsi 'get_pool' dari 'db_utils.py'. Pastikan file ada dan dapat diakses.")
-    db_pool = None
-    ssl_ca_file = None
-except Exception as e:
-    db_pool = None
-    ssl_ca_file = None
-    st.error(f"🚨 Gagal menginisialisasi koneksi database. Cek konfigurasi DB di st.secrets atau 'db_utils.py': {e}")
-# -------------------------------------------------------------------------
+st.set_page_config(page_title="📥 Import Market Data Harian", page_icon="📥", layout="wide")
+st.title("📥 Import Market Data Harian (CSV/XLSX) → `data_harian`")
+
+with st.expander("ℹ️ Petunjuk & Catatan", expanded=False):
+    st.markdown(
+        "- Format kolom mengikuti file contoh **Ringkasan Saham-YYYYMMDD.csv** (BEI).\n"
+        "- Kunci unik: **(kode_saham, trade_date)** → tidak akan dobel saat upload berulang.\n"
+        "- Bisa unggah **satu** atau **banyak file** sekaligus.\n"
+        "- Pilih mode **Lewati Duplikat (INSERT IGNORE)** atau **Update Jika Ada (UPSERT)**."
+    )
+
+if not check_secrets(show_in_ui=True):
+    st.stop()
+
+# ──────────────────────────────────────────────────────────────────────────
+# Schema
+# ──────────────────────────────────────────────────────────────────────────
+def ensure_table_data_harian(conn):
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS data_harian (
+        trade_date           DATE         NOT NULL,
+        kode_saham           VARCHAR(20)  NOT NULL,
+        nama_perusahaan      VARCHAR(255) NULL,
+        remarks              VARCHAR(255) NULL,
+
+        sebelumnya           DECIMAL(19,4) NULL,
+        open_price           DECIMAL(19,4) NULL,
+        first_trade          DECIMAL(19,4) NULL,
+        tertinggi            DECIMAL(19,4) NULL,
+        terendah             DECIMAL(19,4) NULL,
+        penutupan            DECIMAL(19,4) NULL,
+        selisih              DECIMAL(19,4) NULL,
+
+        volume               BIGINT       NULL,
+        nilai                BIGINT       NULL,
+        frekuensi            BIGINT       NULL,
+        index_individual     DECIMAL(19,4) NULL,
+        offer                DECIMAL(19,4) NULL,
+        offer_volume         BIGINT       NULL,
+        bid                  DECIMAL(19,4) NULL,
+        bid_volume           BIGINT       NULL,
+        listed_shares        BIGINT       NULL,
+        tradeable_shares     BIGINT       NULL,
+        weight_for_index     BIGINT       NULL,
+        foreign_sell         BIGINT       NULL,
+        foreign_buy          BIGINT       NULL,
+        non_regular_volume   BIGINT       NULL,
+        non_regular_value    BIGINT       NULL,
+        non_regular_frequency BIGINT      NULL,
+
+        source_file          VARCHAR(255) NULL,
+        created_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+        PRIMARY KEY (kode_saham, trade_date),
+        KEY idx_trade_date (trade_date),
+        KEY idx_kode_saham (kode_saham)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """)
+    cur.close()
 
 
-st.set_page_config(page_title="📥 Import Data Harian", page_icon="📈", layout="wide")
-st.title("📥 Import Data Harian Saham & Asing → `data_harian`")
-st.markdown("Unggah file CSV/XLSX (format `Ringkasan Saham-20251003.csv`) untuk diimpor ke tabel `data_harian`. Data duplikat (berdasarkan Kode Saham dan Tanggal) akan diabaikan.")
+# ──────────────────────────────────────────────────────────────────────────
+# File parsing & normalization
+# ──────────────────────────────────────────────────────────────────────────
+ID_MONTH = {'Jan':'01','Feb':'02','Mar':'03','Apr':'04','Mei':'05','Jun':'06','Jul':'07','Agt':'08','Sep':'09','Okt':'10','Nov':'11','Des':'12'}
 
-
-# Nama-nama kolom dari file sumber ke nama kolom di tabel DB
-COL_MAP = {
-    'No': 'no',
-    'Kode Saham': 'kode_saham',
-    'Nama Perusahaan': 'nama_perusahaan',
-    'Remarks': 'remarks',
-    'Sebelumnya': 'sebelumnya',
-    'Open Price': 'open_price',
-    'Tanggal Perdagangan Terakhir': 'tanggal_perdagangan',
-    'First Trade': 'first_trade',
-    'Tertinggi': 'tertinggi',
-    'Terendah': 'terendah',
-    'Penutupan': 'penutupan',
-    'Selisih': 'selisih',
-    'Volume': 'volume',
-    'Nilai': 'nilai',
-    'Frekuensi': 'frekuensi',
-    'Index Individual': 'index_individual',
-    'Offer': 'offer',
-    'Offer Volume': 'offer_volume',
-    'Bid': 'bid',
-    'Bid Volume': 'bid_volume',
-    'Listed Shares': 'listed_shares',
-    'Tradeble Shares': 'tradeble_shares',
-    'Weight For Index': 'weight_for_index',
-    'Foreign Sell': 'foreign_sell',
-    'Foreign Buy': 'foreign_buy',
-    'Non Regular Volume': 'non_regular_volume',
-    'Non Regular Value': 'non_regular_value',
-    'Non Regular Frequency': 'non_regular_frequency',
-}
-
-
-def _process_dataframe(df: pd.DataFrame, source_filename: str) -> Optional[pd.DataFrame]:
-    """Bersihkan, ubah nama kolom, dan konversi tipe data DataFrame."""
+def parse_id_date(s: str):
+    if s is None:
+        return None
+    s = str(s).strip()
+    parts = s.split()
+    if len(parts) == 3 and parts[1] in ID_MONTH:
+        d = parts[0].zfill(2); m = ID_MONTH[parts[1]]; y = parts[2]
+        return f"{y}-{m}-{d}"
+    # fallback
     try:
-        # 1. Ubah nama kolom
-        df.columns = [COL_MAP.get(col, col) for col in df.columns]
-
-        # Filter hanya kolom yang dibutuhkan (yang ada di COL_MAP.values())
-        valid_cols = list(COL_MAP.values())
-        if 'source_file' not in valid_cols:
-             valid_cols.append('source_file')
-             
-        df = df[[col for col in df.columns if col in valid_cols]]
-        
-        # 2. Pembersihan dan Konversi
-        
-        # Konversi tanggal
-        df['tanggal_perdagangan'] = pd.to_datetime(df['tanggal_perdagangan'], errors='coerce')
-        
-        # Hapus baris dengan tanggal atau kode saham yang hilang
-        df.dropna(subset=['tanggal_perdagangan', 'kode_saham'], inplace=True)
-        
-        # Konversi tipe data numerik (mengatasi separator desimal/ribuan jika ada)
-        numeric_cols = [c for c in df.columns if c not in ['kode_saham', 'nama_perusahaan', 'remarks', 'tanggal_perdagangan', 'source_file']]
-        for col in numeric_cols:
-            # Gunakan pd.to_numeric untuk penanganan yang lebih baik
-            # errors='coerce' akan mengubah nilai yang tidak dapat dikonversi menjadi NaN
-            df[col] = pd.to_numeric(df[col], errors='coerce') 
-            df[col].fillna(0, inplace=True) # Isi NaN dengan 0
-            
-        # Pastikan Kode Saham huruf kapital dan tanpa spasi
-        df['kode_saham'] = df['kode_saham'].astype(str).str.upper().str.strip()
-
-        # Tambahkan nama file sumber
-        df['source_file'] = source_filename
-
-        return df
-
-    except Exception as e:
-        st.error(f"Kesalahan saat memproses data: {e}")
-        st.dataframe(df.head())
+        return pd.to_datetime(s, dayfirst=True).strftime("%Y-%m-%d")
+    except Exception:
         return None
 
+def read_any(uploaded_file) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+    if name.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(uploaded_file)
+    else:
+        # CSV fallback
+        raw = uploaded_file.read()
+        text = raw.decode('utf-8', errors='ignore')
+        df = pd.read_csv(io.StringIO(text))
+    # strip column names
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
-def _import_file_to_db(df: pd.DataFrame, conn: mysql.connector.MySQLConnection, source_filename: str) -> int:
-    """Mengimpor data dari DataFrame ke tabel data_harian dengan INSERT IGNORE."""
-    table_name = "data_harian"
-    
-    # Kolom untuk SQL (sama dengan urutan di DataFrame yang sudah diproses)
-    cols = list(df.columns)
-    cols_str = ", ".join(cols)
-    placeholders = ", ".join(["%s"] * len(cols))
-    
-    # Gunakan INSERT IGNORE untuk menghindari duplikasi (Primary Key: kode_saham, tanggal_perdagangan)
-    sql = f"INSERT IGNORE INTO {table_name} ({cols_str}) VALUES ({placeholders})"
-    
-    # Ubah DataFrame menjadi list of tuples
-    data_to_insert = [tuple(r) for r in df.itertuples(index=False, name=None)]
-    total_rows = len(data_to_insert)
-    inserted_total = 0
+def normalize_market_df(df: pd.DataFrame, source_file: str = None) -> pd.DataFrame:
+    # mapping default sesuai contoh BEI
+    get = lambda c: df[c] if c in df.columns else None
 
-    if total_rows == 0:
-        return 0
+    out = pd.DataFrame()
+    out['trade_date'] = (get('Tanggal Perdagangan Terakhir') or pd.Series([None]*len(df))).map(parse_id_date)
+    out['kode_saham'] = (get('Kode Saham') or pd.Series([None]*len(df))).astype(str).str.upper().str.strip()
+    out['nama_perusahaan'] = (get('Nama Perusahaan') or pd.Series([None]*len(df))).astype(str).str.strip()
+    out['remarks'] = (get('Remarks') or pd.Series([None]*len(df)))
 
-    st.info(f"Mencoba insert {total_rows:,} baris dari file: {source_filename}...")
-    
+    def num(col):
+        s = get(col)
+        return pd.to_numeric(s, errors='coerce') if s is not None else None
+
+    out['sebelumnya'] = num('Sebelumnya')
+    out['open_price'] = num('Open Price')
+    out['first_trade'] = num('First Trade')
+    out['tertinggi'] = num('Tertinggi')
+    out['terendah'] = num('Terendah')
+    out['penutupan'] = num('Penutupan')
+    out['selisih'] = num('Selisih')
+    out['volume'] = num('Volume')
+    out['nilai'] = num('Nilai')
+    out['frekuensi'] = num('Frekuensi')
+    out['index_individual'] = num('Index Individual')
+    out['offer'] = num('Offer')
+    out['offer_volume'] = num('Offer Volume')
+    out['bid'] = num('Bid')
+    out['bid_volume'] = num('Bid Volume')
+    out['listed_shares'] = num('Listed Shares')
+    # antisipasi typo 'Tradeble Shares'
+    out['tradeable_shares'] = num('Tradeble Shares') if 'Tradeble Shares' in df.columns else num('Tradeable Shares')
+    out['weight_for_index'] = num('Weight For Index')
+    out['foreign_sell'] = num('Foreign Sell')
+    out['foreign_buy'] = num('Foreign Buy')
+    out['non_regular_volume'] = num('Non Regular Volume')
+    out['non_regular_value'] = num('Non Regular Value')
+    out['non_regular_frequency'] = num('Non Regular Frequency')
+    out['source_file'] = source_file
+
+    # bersih & dedup
+    out = out.dropna(subset=['trade_date','kode_saham'])
+    out = out.drop_duplicates(subset=['kode_saham','trade_date'], keep='last')
+    return out
+
+# ──────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────
+st.caption(f"DB aktif: **{get_db_name()}**")
+
+files = st.file_uploader(
+    "Pilih file harian (CSV/XLSX). Anda bisa pilih **satu** atau **banyak** file sekaligus.",
+    type=["csv", "xlsx", "xls"],
+    accept_multiple_files=True,
+    key="uploader_market_daily",
+)
+preview_rows = st.number_input("Preview baris", 5, 50, 20, 5)
+
+mode = st.radio(
+    "Mode insert ke database:",
+    options=["Lewati duplikat (INSERT IGNORE)", "Update jika sudah ada (UPSERT)"]
+)
+
+parsed: List[pd.DataFrame] = []
+if files:
+    st.write(f"Total file terpilih: **{len(files)}**")
+    for up in files:
+        with st.expander(f"📄 Preview: {up.name}", expanded=False):
+            df_raw = read_any(up)
+            st.dataframe(df_raw.head(preview_rows), use_container_width=True)
+            df_norm = normalize_market_df(df_raw, source_file=up.name)
+            st.caption(f"Baris siap simpan dari file ini: {len(df_norm):,}")
+            st.dataframe(df_norm.head(preview_rows), use_container_width=True)
+            parsed.append(df_norm)
+
+if st.button("🚀 Simpan ke `data_harian`", type="primary") and parsed:
+    all_df = pd.concat(parsed, ignore_index=True) if parsed else pd.DataFrame()
+    if all_df.empty:
+        st.warning("Tidak ada baris valid untuk disimpan.")
+        st.stop()
+
+    # Dedup in-batch
+    before = len(all_df)
+    all_df = all_df.drop_duplicates(subset=['kode_saham','trade_date'], keep='last')
+    after = len(all_df)
+    if after < before:
+        st.info(f"Menghapus duplikat dalam batch: {before - after:,} baris. Sisa: {after:,}")
+
+    conn = get_db_connection()
     try:
+        ensure_table_data_harian(conn)
         cur = conn.cursor()
-        
-        batch_size = 5000  # Ukuran batch untuk performa
-        total_batches = math.ceil(total_rows / batch_size)
-        pbar = st.progress(0, text=f"Menyimpan ke database (Batch 0/{total_batches})...")
 
-        for b in range(total_batches):
-            start = b * batch_size
-            end = min(start + batch_size, total_rows)
-            batch = data_to_insert[start:end]
-            
-            # Eksekusi batch
-            cur.executemany(sql, batch)
-            
-            # Catat jumlah baris yang benar-benar terinsert
-            # MySQL connector hanya mengembalikan 0 untuk INSERT IGNORE yang diabaikan.
-            # Kita akan mengandalkan cur.rowcount untuk jumlah baris yang diproses (terinsert/diabaikan)
-            inserted_total += cur.rowcount
-            
+        order = [
+            'trade_date','kode_saham','nama_perusahaan','remarks',
+            'sebelumnya','open_price','first_trade','tertinggi','terendah','penutupan','selisih',
+            'volume','nilai','frekuensi','index_individual','offer','offer_volume','bid','bid_volume',
+            'listed_shares','tradeable_shares','weight_for_index','foreign_sell','foreign_buy',
+            'non_regular_volume','non_regular_value','non_regular_frequency','source_file'
+        ]
+        all_df = all_df[order]
+
+        if mode.startswith("Lewati"):
+            sql = """
+            INSERT IGNORE INTO data_harian
+            (trade_date, kode_saham, nama_perusahaan, remarks,
+             sebelumnya, open_price, first_trade, tertinggi, terendah, penutupan, selisih,
+             volume, nilai, frekuensi, index_individual, offer, offer_volume, bid, bid_volume,
+             listed_shares, tradeable_shares, weight_for_index, foreign_sell, foreign_buy,
+             non_regular_volume, non_regular_value, non_regular_frequency, source_file)
+            VALUES
+            (%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,
+             %s,%s,%s,%s)
+            """
+        else:
+            # UPSERT → update kolom non-key
+            sql = """
+            INSERT INTO data_harian
+            (trade_date, kode_saham, nama_perusahaan, remarks,
+             sebelumnya, open_price, first_trade, tertinggi, terendah, penutupan, selisih,
+             volume, nilai, frekuensi, index_individual, offer, offer_volume, bid, bid_volume,
+             listed_shares, tradeable_shares, weight_for_index, foreign_sell, foreign_buy,
+             non_regular_volume, non_regular_value, non_regular_frequency, source_file)
+            VALUES
+            (%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,%s,%s,%s,
+             %s,%s,%s,%s,%s,
+             %s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE
+               nama_perusahaan=VALUES(nama_perusahaan),
+               remarks=VALUES(remarks),
+               sebelumnya=VALUES(sebelumnya),
+               open_price=VALUES(open_price),
+               first_trade=VALUES(first_trade),
+               tertinggi=VALUES(tertinggi),
+               terendah=VALUES(terendah),
+               penutupan=VALUES(penutupan),
+               selisih=VALUES(selisih),
+               volume=VALUES(volume),
+               nilai=VALUES(nilai),
+               frekuensi=VALUES(frekuensi),
+               index_individual=VALUES(index_individual),
+               offer=VALUES(offer),
+               offer_volume=VALUES(offer_volume),
+               bid=VALUES(bid),
+               bid_volume=VALUES(bid_volume),
+               listed_shares=VALUES(listed_shares),
+               tradeable_shares=VALUES(tradeable_shares),
+               weight_for_index=VALUES(weight_for_index),
+               foreign_sell=VALUES(foreign_sell),
+               foreign_buy=VALUES(foreign_buy),
+               non_regular_volume=VALUES(non_regular_volume),
+               non_regular_value=VALUES(non_regular_value),
+               non_regular_frequency=VALUES(non_regular_frequency),
+               source_file=VALUES(source_file)
+            """
+
+        batch_size = 5000
+        total_rows = len(all_df)
+        total_batches = math.ceil(total_rows / batch_size)
+        pbar = st.progress(0, text="Menyimpan ke database...")
+        affected_total = 0
+
+        data_iter = (tuple(v if (pd.notna(v) if isinstance(v, float) else v) else None for v in row) 
+                     for row in all_df.itertuples(index=False, name=None))
+
+        # executemany per batch
+        rows_buffer = []
+        b = 0
+        for tup in data_iter:
+            rows_buffer.append(tup)
+            if len(rows_buffer) >= batch_size:
+                cur.executemany(sql, rows_buffer)
+                conn.commit()
+                affected_total += cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
+                rows_buffer.clear()
+                b += 1
+                pbar.progress(min((b) / total_batches, 1.0), text=f"Menyimpan batch {b}/{total_batches}...")
+        if rows_buffer:
+            cur.executemany(sql, rows_buffer)
             conn.commit()
-            pbar.progress((b + 1) / total_batches, text=f"Menyimpan batch {b+1}/{total_batches}...")
+            affected_total += cur.rowcount if (cur.rowcount and cur.rowcount > 0) else 0
+            b += 1
+            pbar.progress(1.0, text=f"Menyimpan batch {b}/{b}...")
 
         cur.close()
         pbar.empty()
-        
-        # Karena kita tidak bisa mendapatkan rowcount yang sukses untuk INSERT IGNORE dengan mudah, 
-        # kita laporkan total baris yang diproses.
-        # Catatan: inserted_total menunjukkan jumlah baris yang dicoba insert/diupdate, bukan baris baru saja.
-        st.success(f"Selesai. Total baris dalam file: {total_rows:,}. Baris yang diproses/dicoba insert: {inserted_total:,}. Baris duplikat diabaikan.")
-        return total_rows
-        
+        st.success(f"Selesai. Baris diproses: {total_rows:,}. Baris terpengaruh menurut DB: {affected_total:,}.")
     except Exception as e:
-        conn.rollback()
-        st.error(f"Terjadi kesalahan saat menyimpan data ke DB: {e}")
-        return 0
-
-
-def main_upload_processor(uploaded_files: List[st.runtime.uploaded_file_manager.UploadedFile], is_bulk: bool):
-    """Fungsi utama untuk memproses unggahan file."""
-    if not db_pool:
-        st.warning("Koneksi database tidak tersedia. Mohon cek konfigurasi DB Anda.")
-        return
-
-    total_processed = 0
-    
-    # Dapatkan koneksi dari pool
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        
-        for uploaded_file in uploaded_files:
-            file_name = uploaded_file.name
-            st.subheader(f"Memproses file: {file_name}")
-
-            # 1. Baca File
-            try:
-                # Perbaikan: Tambahkan penanganan encoding yang lebih baik, terutama untuk CSV
-                if file_name.endswith('.csv'):
-                    # Coba encoding umum, lalu fallback
-                    try:
-                        df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8')
-                    except UnicodeDecodeError:
-                        uploaded_file.seek(0) # Reset pointer file
-                        df = pd.read_csv(uploaded_file, sep=',', encoding='latin1')
-                elif file_name.endswith('.xlsx') or file_name.endswith('.xls'):
-                    df = pd.read_excel(uploaded_file)
-                else:
-                    st.error(f"Format file '{file_name}' tidak didukung. Hanya CSV/XLSX.")
-                    continue
-                
-                # Cek apakah DataFrame kosong
-                if df.empty:
-                    st.warning(f"File '{file_name}' kosong.")
-                    continue
-
-            except Exception as e:
-                st.error(f"Gagal membaca file '{file_name}': {e}")
-                continue
-
-            # 2. Proses DataFrame
-            processed_df = _process_dataframe(df, file_name)
-            if processed_df is None:
-                st.error(f"Gagal memproses data dalam file '{file_name}'.")
-                continue
-            
-            # Tampilkan pratinjau data yang sudah diproses
-            if not is_bulk:
-                st.info("Pratinjau data yang sudah diproses (5 baris pertama):")
-                st.dataframe(processed_df.head())
-
-            # 3. Impor ke DB
-            rows_imported = _import_file_to_db(processed_df, conn, file_name)
-            total_processed += rows_imported
-
-    except Exception as e:
-        st.error(f"Kesalahan koneksi database: {e}")
+        st.exception(e)
     finally:
-        # Tutup koneksi dan hapus file SSL CA jika ada
-        if conn and conn.is_connected():
-            conn.close()
-        
-        if ssl_ca_file and os.path.exists(ssl_ca_file):
-            try: os.unlink(ssl_ca_file) 
-            except Exception: pass
-            
-    if total_processed > 0:
-        st.balloons()
-        st.metric(label="Total Baris Data Diproses", value=f"{total_processed:,}")
+        try: conn.close()
+        except Exception: pass
 
-
-# --- Tampilan Streamlit ---
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.header("Upload Satuan (Single File)")
-    uploaded_file = st.file_uploader(
-        "Pilih satu file (CSV/XLSX)",
-        type=['csv', 'xlsx'],
-        accept_multiple_files=False,
-        key='single_upload'
-    )
-    if uploaded_file and st.button("Proses Upload Satuan", key='btn_single'):
-        with st.spinner(f"Memproses {uploaded_file.name}..."):
-            main_upload_processor([uploaded_file], is_bulk=False)
-
-with col2:
-    st.header("Upload Bulk (Multi-file)")
-    uploaded_files_bulk = st.file_uploader(
-        "Pilih banyak file (CSV/XLSX)",
-        type=['csv', 'xlsx'],
-        accept_multiple_files=True,
-        key='bulk_upload'
-    )
-    if uploaded_files_bulk and st.button(f"Proses Upload Bulk ({len(uploaded_files_bulk)} file)", key='btn_bulk'):
-        with st.spinner(f"Memproses {len(uploaded_files_bulk)} file..."):
-            main_upload_processor(uploaded_files_bulk, is_bulk=True)
-
-st.divider()
-
-# Contoh struktur kolom untuk referensi
-st.subheader("Struktur Data yang Diharapkan")
-st.markdown("""
-Pastikan file CSV/XLSX Anda memiliki kolom-kolom berikut (tidak harus berurutan):
-- `No`
-- `Kode Saham`
-- `Nama Perusahaan`
-- `Remarks`
-- `Sebelumnya`
-- `Open Price`
-- `Tanggal Perdagangan Terakhir` (Penting: Digunakan sebagai Primary Key bersama Kode Saham)
-- `First Trade`
-- `Tertinggi`, `Terendah`, `Penutupan`, `Selisih`
-- `Volume`, `Nilai`, `Frekuensi`, `Index Individual`
-- `Offer`, `Offer Volume`, `Bid`, `Bid Volume`
-- `Listed Shares`, `Tradeble Shares`, `Weight For Index`
-- `Foreign Sell`, `Foreign Buy` (Data pergerakan asing)
-- `Non Regular Volume`, `Non Regular Value`, `Non Regular Frequency`
-""")
+# Footer
+st.markdown("---")
+st.caption("Jika struktur header file Anda berbeda, kabari saya — kita bisa tambahkan mapping khusus.")
