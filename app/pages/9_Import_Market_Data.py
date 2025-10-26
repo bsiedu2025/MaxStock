@@ -14,70 +14,26 @@ import mysql.connector
 from mysql.connector import pooling
 from mysql.connector.errors import IntegrityError
 
-# Asumsi: db_utils.py dan fungsi get_pool() tersedia di path
+# -------------------------------------------------------------------------
+# PERBAIKAN: Mengimpor fungsi koneksi DB dari db_utils.py
+# Asumsi: db_utils.py berada di path yang bisa diimpor (misalnya di root folder app)
+# Jika db_utils.py tidak bisa diimpor langsung, ganti baris ini:
 try:
-    # Memuat utilitas DB dari db_utils.py atau dari 7_Import_KSEI_Bulanan.py
-    # Karena saya tidak dapat memuat db_utils.py secara langsung, saya akan mendefinisikan
-    # fungsi dasar koneksi DB di sini untuk contoh yang self-contained, mengikuti pola 7_Import_KSEI_Bulanan.py.
-    # Namun, idealnya Anda harus mengimportnya dari db_utils atau menggunakan yang sudah ada.
+    # Coba impor langsung fungsi get_pool dari db_utils.py
+    # Ganti 'db_utils' dengan nama modul/file yang benar jika berbeda
+    from db_utils import get_pool 
     
-    # -------------------------------------------------------------------------
-    # HACK: Definisikan ulang fungsi get_pool() jika tidak bisa diimport
-    # GANTI INI DENGAN IMPORT YANG SESUAI JIKA MENGGUNAKAN STRUKTUR ASLI
-    # -------------------------------------------------------------------------
-    def _get_db_params():
-        # Ambil konfigurasi DB dari Streamlit secrets atau environment variables
-        return {
-            "host": os.getenv("DB_HOST", st.secrets.get("DB_HOST", "")),
-            "port": int(os.getenv("DB_PORT", st.secrets.get("DB_PORT", 3306))),
-            "database": os.getenv("DB_NAME", st.secrets.get("DB_NAME", "")),
-            "user": os.getenv("DB_USER", st.secrets.get("DB_USER", "")),
-            "password": os.getenv("DB_PASSWORD", st.secrets.get("DB_PASSWORD", "")),
-            "ssl_ca_str": os.getenv("DB_SSL_CA", st.secrets.get("DB_SSL_CA", "")),
-        }
-
-    @st.cache_resource
-    def get_pool():
-        params = _get_db_params()
-        
-        # Penanganan SSL CA seperti di 7_Import_KSEI_Bulanan.py
-        ssl_ca_file = None
-        ssl_kwargs = {}
-        if params["ssl_ca_str"] and "BEGIN CERTIFICATE" in params["ssl_ca_str"]:
-            # Simpan sertifikat ke file sementara
-            try:
-                temp_dir = tempfile.gettempdir()
-                ssl_ca_file = os.path.join(temp_dir, "db_ca.pem")
-                with open(ssl_ca_file, "w") as f:
-                    f.write(params["ssl_ca_str"])
-                
-                # Tambahkan SSL kwargs
-                ssl_kwargs = {
-                    "ssl_ca": ssl_ca_file,
-                    "ssl_verify_cert": True, # Diperlukan saat menggunakan ssl_ca
-                }
-            except Exception as e:
-                st.error(f"Gagal menyiapkan sertifikat SSL: {e}")
-                
-        try:
-            pool = mysql.connector.pooling.MySQLConnectionPool(
-                pool_name="mypool",
-                pool_size=5,
-                **params,
-                **ssl_kwargs
-            )
-            return pool, ssl_ca_file # Kembalikan file CA untuk dihapus nanti
-        except Exception as e:
-            st.error(f"Gagal membuat koneksi pool: {e}")
-            return None, None
-    # -------------------------------------------------------------------------
-
-    # Ambil pool dan ssl_ca_file (untuk dihapus nanti)
+    # Ambil pool dan ssl_ca_file (get_pool di db_utils.py harus mengembalikan tuple (pool, ssl_ca_file))
     db_pool, ssl_ca_file = get_pool()
+except ImportError:
+    st.error("🚨 Gagal mengimpor fungsi 'get_pool' dari 'db_utils.py'. Pastikan file ada dan dapat diakses.")
+    db_pool = None
+    ssl_ca_file = None
 except Exception as e:
     db_pool = None
     ssl_ca_file = None
-    st.error(f"Gagal menginisialisasi koneksi database. Pastikan 'db_utils.py' atau konfigurasi DB sudah benar: {e}")
+    st.error(f"🚨 Gagal menginisialisasi koneksi database. Cek konfigurasi DB di st.secrets atau 'db_utils.py': {e}")
+# -------------------------------------------------------------------------
 
 
 st.set_page_config(page_title="📥 Import Data Harian", page_icon="📈", layout="wide")
@@ -201,7 +157,6 @@ def _import_file_to_db(df: pd.DataFrame, conn: mysql.connector.MySQLConnection, 
             # Catat jumlah baris yang benar-benar terinsert
             # MySQL connector hanya mengembalikan 0 untuk INSERT IGNORE yang diabaikan.
             # Kita akan mengandalkan cur.rowcount untuk jumlah baris yang diproses (terinsert/diabaikan)
-            # Karena sulit mendapatkan count IGNORED, kita hanya laporkan total baris yang dicoba.
             inserted_total += cur.rowcount
             
             conn.commit()
@@ -212,7 +167,8 @@ def _import_file_to_db(df: pd.DataFrame, conn: mysql.connector.MySQLConnection, 
         
         # Karena kita tidak bisa mendapatkan rowcount yang sukses untuk INSERT IGNORE dengan mudah, 
         # kita laporkan total baris yang diproses.
-        st.success(f"Selesai. Total baris dalam file: {total_rows:,}. Baris yang diimpor/diperbarui: {inserted_total:,}. Baris duplikat diabaikan.")
+        # Catatan: inserted_total menunjukkan jumlah baris yang dicoba insert/diupdate, bukan baris baru saja.
+        st.success(f"Selesai. Total baris dalam file: {total_rows:,}. Baris yang diproses/dicoba insert: {inserted_total:,}. Baris duplikat diabaikan.")
         return total_rows
         
     except Exception as e:
@@ -240,8 +196,14 @@ def main_upload_processor(uploaded_files: List[st.runtime.uploaded_file_manager.
 
             # 1. Baca File
             try:
+                # Perbaikan: Tambahkan penanganan encoding yang lebih baik, terutama untuk CSV
                 if file_name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8')
+                    # Coba encoding umum, lalu fallback
+                    try:
+                        df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8')
+                    except UnicodeDecodeError:
+                        uploaded_file.seek(0) # Reset pointer file
+                        df = pd.read_csv(uploaded_file, sep=',', encoding='latin1')
                 elif file_name.endswith('.xlsx') or file_name.endswith('.xls'):
                     df = pd.read_excel(uploaded_file)
                 else:
