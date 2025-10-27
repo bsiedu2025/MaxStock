@@ -16,7 +16,7 @@ st.title("📊 Foreign Flow & Top Movers")
 with st.expander("ℹ️ Cara pakai & definisi", expanded=False):
     st.markdown(
         """
-**Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (diakumulasi dari rentang tanggal yang dipilih).
+**Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (akumulasi di rentang tanggal yang dipilih).
 
 **Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT) → cepat.  
 **Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, window function) → lebih berat.
@@ -123,7 +123,8 @@ def get_date_bounds(conn) -> Tuple[date, date]:
 
 # ───────────────────────── Helpers tampilan ─────────────────────────
 THEME_COLOR = "#3AA6A0"
-TABLE_HEIGHT = 430  # px
+TABLE_HEIGHT = 430       # tinggi konten tabel (tanpa header)
+HEADER_HEIGHT = 48       # tinggi header DIKUNCI supaya kiri/kanan simetris
 
 def fmt_id(x, dec=0):
     """Format angka Indonesia: . ribuan, , desimal."""
@@ -164,7 +165,7 @@ def humanize_header(c: str) -> str:
 def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_perusahaan", height=TABLE_HEIGHT):
     """
     Render tabel HTML simetris:
-      - header bold putih background #3AA6A0, CENTER + WRAP
+      - header bold putih background #3AA6A0, CENTER + WRAP (tinggi header DIKUNCI)
       - zebra rows, sticky header
       - tooltip nama_perusahaan saat hover di kolom kode_saham
       - lebar kolom konsisten & tinggi sama kiri/kanan
@@ -172,16 +173,16 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
     d = df_fmt.copy()
     d = d[cols_to_show].reset_index(drop=True)
 
-    # Lebar kolom fixed biar simetris (total ~100%)
+    # Lebar kolom fixed (total 100%) agar simetris
     widths = {
-        # ranking (5 kolom)
+        # ranking (5 kolom) → 18 + 22 + 22 + 28 + 10 = 100
         "kode_saham": "18%",
         "cum_net_foreign": "22%",
         "total_value": "22%",
         "avg_liq": "28%",
         "avg_spread_bps": "10%",
-        # movers (5 kolom)
-        "ret_1d": "18%", "nilai": "26%", "volume": "26%", "spread_bps": "12%",
+        # movers (5 kolom) → 18 + 22 + 22 + 26 + 12 = 100
+        "ret_1d": "18%", "nilai": "22%", "volume": "22%", "spread_bps": "12%",
     }
 
     ths = "".join(
@@ -211,18 +212,21 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         height:{height}px; overflow:auto;
         border:1px solid #e9ecef; border-radius:10px;
         box-shadow:0 1px 2px rgba(0,0,0,0.05);
-        box-sizing:border-box;
-        background:#fff;
+        box-sizing:border-box; background:#fff;
       }}
       table.tbl {{ border-collapse:collapse; width:100%; table-layout:fixed; }}
       table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; }}
-      table.tbl th {{
+      table.tbl thead th {{
         position:sticky; top:0; z-index:1;
         background:{THEME_COLOR}; color:#fff; font-weight:700;
-        text-align:center;
+        text-align:center; height:{HEADER_HEIGHT}px;  /* Kunci tinggi header */
+        vertical-align:middle;
       }}
       table.tbl th .th-wrap {{
-        white-space:normal; word-break:break-word; line-height:1.2;
+        display:flex; align-items:center; justify-content:center;
+        white-space:normal; word-break:break-word; line-height:1.1;
+        height:{HEADER_HEIGHT - 8}px;        /* jaga konten header */
+        overflow:hidden;
       }}
       table.tbl td {{ white-space:nowrap; }}
       table.tbl td.right {{ text-align:right; }}
@@ -241,7 +245,7 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
       </table>
     </div>
     """
-    st_html(html, height=height+48, scrolling=False)
+    st_html(html, height=height + HEADER_HEIGHT, scrolling=False)
 
 # ───────────────────────── Data fetchers ─────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
@@ -461,4 +465,4 @@ with mc2:
                        file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Header tabel: huruf kapital, underscore → spasi, center & wrap. Tooltip nama perusahaan muncul saat hover di kolom kode.")
+st.caption("Header tabel dikunci tingginya agar kiri/kanan benar-benar simetris. Tooltip perusahaan muncul saat hover di kolom kode.")
