@@ -32,20 +32,16 @@ st.caption(f"DB aktif: **{get_db_name()}**")
 
 # ───────────────────── Helper koneksi aman ─────────────────────
 def _ensure_alive(conn):
-    try:
-        conn.reconnect(attempts=2, delay=1)
-    except Exception:
-        pass
+    try: conn.reconnect(attempts=2, delay=1)
+    except Exception: pass
 
 def _safe_close(conn):
     try:
         if hasattr(conn, "is_connected"):
-            if conn.is_connected():
-                conn.close()
+            if conn.is_connected(): conn.close()
         else:
             conn.close()
-    except Exception:
-        pass
+    except Exception: pass
 
 # ──────────────────────── DB PREP (views) ───────────────────────
 DDL_V_DAILY_FAST = """
@@ -124,10 +120,9 @@ def get_date_bounds(conn) -> Tuple[date, date]:
 # ───────────────────────── Helpers tampilan ─────────────────────────
 THEME_COLOR = "#3AA6A0"
 TABLE_HEIGHT = 430       # tinggi konten tabel (tanpa header)
-HEADER_HEIGHT = 48       # tinggi header DIKUNCI untuk simetri
+HEADER_HEIGHT = 56       # tinggi header DIKUNCI (wrap & center tapi tetap sama)
 
 def fmt_id(x, dec=0):
-    """Format angka Indonesia: . ribuan, , desimal."""
     try:
         if x is None or pd.isna(x): return ""
         s = f"{float(x):,.{dec}f}"
@@ -159,21 +154,20 @@ def html_escape(s):
             .replace(">","&gt;").replace('"',"&quot;"))
 
 def humanize_header(c: str) -> str:
-    """UBAH header: underscore → spasi, uppercase."""
     return c.replace("_", " ").upper()
 
 def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_perusahaan", height=TABLE_HEIGHT):
     """
-    Render tabel HTML simetris:
-      • header putih bold #3AA6A0, CENTER, NOWRAP (lebih rapat)
-      • tidak ada scroll horizontal (ellipsis), jadi tinggi kiri/kanan identik
-      • tooltip nama_perusahaan saat hover KODE SAHAM
-      • lebar kolom konsisten & header height dikunci
+    Tabel HTML simetris:
+      - header wrap + center (uppercase, underscore→spasi), tinggi fixed
+      - scrollbar HORIZONAL dihilangkan (struktur div bersarang)
+      - tooltip perusahaan saat hover kolom kode_saham
+      - kolom fixed width sehingga kiri/kanan identik
     """
     d = df_fmt.copy()
     d = d[cols_to_show].reset_index(drop=True)
 
-    # Lebar kolom (persis 100%) → lebih lebar untuk KODE SAHAM & CUM NET FOREIGN agar 1 baris
+    # Lebar kolom (100% pas, supaya tidak memicu scroll X)
     widths = {
         # ranking (5 kolom) → 16 + 24 + 24 + 26 + 10 = 100
         "kode_saham": "16%",
@@ -206,35 +200,30 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         trs.append("<tr>" + "".join(tds) + "</tr>")
     body = "\n".join(trs)
 
+    # Gunakan outer→inner div untuk paksa scroll Y saja (tanpa scroll X)
     html = f"""
     <style>
-      .tbl-wrap {{
-        height:{height}px; 
-        overflow-y:auto;           /* hanya vertical → simetris */
-        overflow-x:hidden;         /* HILANGKAN SCROLL HORIZONTAL */
+      .tbl-outer {{
         border:1px solid #e9ecef; border-radius:10px;
         box-shadow:0 1px 2px rgba(0,0,0,0.05);
-        box-sizing:border-box; background:#fff;
+        background:#fff; width:100%; overflow:hidden; /* kunci: tanpa scroll X */
+        box-sizing:border-box;
+      }}
+      .tbl-scroll {{
+        height:{height}px; overflow-y:auto; overflow-x:hidden;  /* hanya vertical */
       }}
       table.tbl {{ border-collapse:collapse; width:100%; table-layout:fixed; }}
       table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; }}
       table.tbl thead th {{
         position:sticky; top:0; z-index:1;
         background:{THEME_COLOR}; color:#fff; font-weight:700;
-        text-align:center; height:{HEADER_HEIGHT}px; 
-        vertical-align:middle;
+        text-align:center; height:{HEADER_HEIGHT}px; vertical-align:middle;
       }}
-      /* Header lebih rapat & satu baris */
       table.tbl th .th-wrap {{
         display:flex; align-items:center; justify-content:center;
-        white-space:nowrap;            /* jaga 1 baris */
-        line-height:1.0;
-        height:{HEADER_HEIGHT - 12}px;
-        overflow:hidden; text-overflow:ellipsis;
-        font-size:12px;                /* sedikit lebih kecil agar muat */
-        letter-spacing:0.2px;
+        white-space:normal; word-break:break-word; text-align:center;
+        line-height:1.15; padding:2px 4px;
       }}
-      /* Sel: hilangkan overflow horizontal → ellipsis */
       table.tbl td {{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
       table.tbl td.num {{ text-align:right; }}
       table.tbl td.txt {{ text-align:left;  }}
@@ -242,14 +231,16 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
       table.tbl tr:nth-child(even) {{ background:#f7fbfb; }}
       table.tbl tr:hover {{ background:#e8f4f3; }}
     </style>
-    <div class="tbl-wrap">
-      <table class="tbl">
-        <colgroup>
-          {''.join(f'<col style="width:{widths.get(c,"20%")}">' for c in cols_to_show)}
-        </colgroup>
-        <thead><tr>{ths}</tr></thead>
-        <tbody>{body}</tbody>
-      </table>
+    <div class="tbl-outer">
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup>
+            {''.join(f'<col style="width:{widths.get(c,"20%")}">' for c in cols_to_show)}
+          </colgroup>
+          <thead><tr>{ths}</tr></thead>
+          <tbody>{body}</tbody>
+        </table>
+      </div>
     </div>
     """
     st_html(html, height=height + HEADER_HEIGHT, scrolling=False)
@@ -466,4 +457,4 @@ with mc2:
                        file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Top Net Buy/Sell sekarang simetris: tidak ada scroll horizontal, header dikunci & dirapikan.")
+st.caption("Header wrap + center, tanpa scroll horizontal. Tinggi header dikunci supaya Top Net Buy/Sell benar-benar simetris.")
