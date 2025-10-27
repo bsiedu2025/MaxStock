@@ -18,8 +18,8 @@ with st.expander("ℹ️ Cara pakai & definisi", expanded=False):
         """
 **Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (akumulasi di rentang tanggal yang dipilih).
 
-**Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT) → cepat.  
-**Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, window function) → lebih berat.
+**Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT).  
+**Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari).
 
 **Spread (bps)** = `(offer - bid) / ((offer + bid)/2) * 10,000`.
         """
@@ -124,7 +124,7 @@ def get_date_bounds(conn) -> Tuple[date, date]:
 # ───────────────────────── Helpers tampilan ─────────────────────────
 THEME_COLOR = "#3AA6A0"
 TABLE_HEIGHT = 430       # tinggi konten tabel (tanpa header)
-HEADER_HEIGHT = 48       # tinggi header DIKUNCI supaya kiri/kanan simetris
+HEADER_HEIGHT = 48       # tinggi header DIKUNCI untuk simetri
 
 def fmt_id(x, dec=0):
     """Format angka Indonesia: . ribuan, , desimal."""
@@ -165,21 +165,21 @@ def humanize_header(c: str) -> str:
 def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_perusahaan", height=TABLE_HEIGHT):
     """
     Render tabel HTML simetris:
-      - header bold putih background #3AA6A0, CENTER + WRAP (tinggi header DIKUNCI)
-      - zebra rows, sticky header
-      - tooltip nama_perusahaan saat hover di kolom kode_saham
-      - lebar kolom konsisten & tinggi sama kiri/kanan
+      • header putih bold #3AA6A0, CENTER, NOWRAP (lebih rapat)
+      • tidak ada scroll horizontal (ellipsis), jadi tinggi kiri/kanan identik
+      • tooltip nama_perusahaan saat hover KODE SAHAM
+      • lebar kolom konsisten & header height dikunci
     """
     d = df_fmt.copy()
     d = d[cols_to_show].reset_index(drop=True)
 
-    # Lebar kolom fixed (total 100%) agar simetris
+    # Lebar kolom (persis 100%) → lebih lebar untuk KODE SAHAM & CUM NET FOREIGN agar 1 baris
     widths = {
-        # ranking (5 kolom) → 18 + 22 + 22 + 28 + 10 = 100
-        "kode_saham": "18%",
-        "cum_net_foreign": "22%",
-        "total_value": "22%",
-        "avg_liq": "28%",
+        # ranking (5 kolom) → 16 + 24 + 24 + 26 + 10 = 100
+        "kode_saham": "16%",
+        "cum_net_foreign": "24%",
+        "total_value": "24%",
+        "avg_liq": "26%",
         "avg_spread_bps": "10%",
         # movers (5 kolom) → 18 + 22 + 22 + 26 + 12 = 100
         "ret_1d": "18%", "nilai": "22%", "volume": "22%", "spread_bps": "12%",
@@ -201,15 +201,17 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
                     tip = html_escape(df_fmt.loc[i, tooltip_col])
                 tds.append(f'<td class="code" title="{tip}">{val}</td>')
             else:
-                align = "right" if c in ("cum_net_foreign","total_value","avg_liq","avg_spread_bps","nilai","volume","spread_bps") else "left"
-                tds.append(f'<td class="{align}">{val}</td>')
+                cls = "num" if c in ("cum_net_foreign","total_value","avg_liq","avg_spread_bps","nilai","volume","spread_bps") else "txt"
+                tds.append(f'<td class="{cls}">{val}</td>')
         trs.append("<tr>" + "".join(tds) + "</tr>")
     body = "\n".join(trs)
 
     html = f"""
     <style>
       .tbl-wrap {{
-        height:{height}px; overflow:auto;
+        height:{height}px; 
+        overflow-y:auto;           /* hanya vertical → simetris */
+        overflow-x:hidden;         /* HILANGKAN SCROLL HORIZONTAL */
         border:1px solid #e9ecef; border-radius:10px;
         box-shadow:0 1px 2px rgba(0,0,0,0.05);
         box-sizing:border-box; background:#fff;
@@ -219,19 +221,24 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
       table.tbl thead th {{
         position:sticky; top:0; z-index:1;
         background:{THEME_COLOR}; color:#fff; font-weight:700;
-        text-align:center; height:{HEADER_HEIGHT}px;  /* Kunci tinggi header */
+        text-align:center; height:{HEADER_HEIGHT}px; 
         vertical-align:middle;
       }}
+      /* Header lebih rapat & satu baris */
       table.tbl th .th-wrap {{
         display:flex; align-items:center; justify-content:center;
-        white-space:normal; word-break:break-word; line-height:1.1;
-        height:{HEADER_HEIGHT - 8}px;        /* jaga konten header */
-        overflow:hidden;
+        white-space:nowrap;            /* jaga 1 baris */
+        line-height:1.0;
+        height:{HEADER_HEIGHT - 12}px;
+        overflow:hidden; text-overflow:ellipsis;
+        font-size:12px;                /* sedikit lebih kecil agar muat */
+        letter-spacing:0.2px;
       }}
-      table.tbl td {{ white-space:nowrap; }}
-      table.tbl td.right {{ text-align:right; }}
-      table.tbl td.left  {{ text-align:left;  }}
-      table.tbl td.code  {{ text-align:left; font-weight:600; }}
+      /* Sel: hilangkan overflow horizontal → ellipsis */
+      table.tbl td {{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+      table.tbl td.num {{ text-align:right; }}
+      table.tbl td.txt {{ text-align:left;  }}
+      table.tbl td.code{{ text-align:left; font-weight:600; }}
       table.tbl tr:nth-child(even) {{ background:#f7fbfb; }}
       table.tbl tr:hover {{ background:#e8f4f3; }}
     </style>
@@ -250,7 +257,6 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
 # ───────────────────────── Data fetchers ─────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
-    """FAST MODE: tanpa window, filter likuiditas = AVG(nilai) pada periode."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -279,7 +285,6 @@ def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
-    """AKURAT: ADVT20 via view window function."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -310,7 +315,6 @@ def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[f
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_top_movers_fast(trade_dt: date, min_value_today: Optional[float], max_spread: Optional[float], topn: int):
-    """Movers 1D (cepat, tanpa ADVT20)."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -341,7 +345,6 @@ _ensure_alive(conn_for_bounds); ensure_views(conn_for_bounds)
 min_d, max_d = get_date_bounds(conn_for_bounds)
 _safe_close(conn_for_bounds)
 
-# Quick range
 quick = st.radio(
     "Rentang cepat",
     ["1 Minggu", "1 Bulan", "3 Bulan", "6 Bulan", "1 Tahun", "Semua", "Custom"],
@@ -371,7 +374,6 @@ if start_date > end_date:
     st.error("Tanggal Mulai tidak boleh lebih besar dari Tanggal Akhir.")
     st.stop()
 
-# Filter lain
 top_bar = st.columns([1,1,1,1])
 with top_bar[0]:
     fast_mode = st.toggle("⚡ Mode cepat", value=True, help="Avg nilai periode sebagai proxy ADVT.")
@@ -400,7 +402,6 @@ else:
 df_buy  = df_rank.sort_values("cum_net_foreign", ascending=False).head(topn).reset_index(drop=True)
 df_sell = df_rank.sort_values("cum_net_foreign", ascending=True ).head(topn).reset_index(drop=True)
 
-# Format Indonesia
 fmt_cols_rank = {
     "cum_net_foreign": ("num", 0),
     "total_value":     ("num", 0),
@@ -414,14 +415,14 @@ cols_rank = ["kode_saham","cum_net_foreign","total_value","avg_liq","avg_spread_
 
 c1, c2 = st.columns(2, gap="large")
 with c1:
-    render_table_html(df_buy_fmt, cols_rank)   # kiri
+    render_table_html(df_buy_fmt, cols_rank)
     st.download_button("⬇️ Export CSV - Top Net Buy",
                        data=to_csv_bytes(df_buy),
                        file_name=f"net_buy_{start_date}_{end_date}.csv")
 
 with c2:
     st.subheader("🟥 Top Net **Sell Asing** (Akumulasi)")
-    render_table_html(df_sell_fmt, cols_rank)  # kanan
+    render_table_html(df_sell_fmt, cols_rank)
     st.download_button("⬇️ Export CSV - Top Net Sell",
                        data=to_csv_bytes(df_sell),
                        file_name=f"net_sell_{start_date}_{end_date}.csv")
@@ -465,4 +466,4 @@ with mc2:
                        file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Header tabel dikunci tingginya agar kiri/kanan benar-benar simetris. Tooltip perusahaan muncul saat hover di kolom kode.")
+st.caption("Top Net Buy/Sell sekarang simetris: tidak ada scroll horizontal, header dikunci & dirapikan.")
