@@ -89,7 +89,6 @@ def render_table(df_fmt: pd.DataFrame, cols, tooltip_col="nama_perusahaan", heig
 
     widths = {"kode_saham":"14%","nama_perusahaan":"26%","nilai":"16%","volume":"16%",
               "net_foreign_value":"16%","spread_bps":"12%","ratio":"10%","zscore":"10%"}
-    # avgN akan tidak ada di dict -> fallback ke 20%
     thead = "".join(
         f'<th style="width:{widths.get(c,"20%")}"><div class="th-wrap">{esc(H(c))}</div></th>'
         for c in cols
@@ -162,7 +161,7 @@ def fetch_unusual(trd: date, metric: str, win_n: int, min_avg: float, min_ratio:
     """
     con = get_db_connection(); _alive(con)
     avg_alias = f"avg{win_n}"
-    std_alias = f"std{win_n}"
+    std_alias  = f"std{win_n}"
 
     # 1) VIEW path (cepat, MySQL 8.0) — hanya untuk win_n == 20
     if win_n == 20:
@@ -191,36 +190,47 @@ def fetch_unusual(trd: date, metric: str, win_n: int, min_avg: float, min_ratio:
         except Exception:
             pass
 
-    # 2) Fallback: subquery avg/std Nd (kompatibel 5.7)
+    # 2) Fallback: subquery avg/std Nd (kompatibel 5.7) — gunakan derived table supaya alias bisa dipakai
     try:
         met_plain = _metric_plain(metric, alias_prefix="d")
         inner = _metric_plain(metric, alias_prefix="m")
-        avgstd = f"""
-          (SELECT AVG(vv) FROM (
-             SELECT {inner} AS vv FROM data_harian m
-             WHERE m.kode_saham=d.kode_saham AND m.trade_date<d.trade_date
-             ORDER BY m.trade_date DESC LIMIT {int(win_n)}
-          ) t) AS {avg_alias},
-          (SELECT STDDEV_POP(vv) FROM (
-             SELECT {inner} AS vv FROM data_harian m
-             WHERE m.kode_saham=d.kode_saham AND m.trade_date<d.trade_date
-             ORDER BY m.trade_date DESC LIMIT {int(win_n)}
-          ) t2) AS {std_alias}
+        avg_expr = f"""
+           (SELECT AVG(vv) FROM (
+              SELECT {inner} AS vv FROM data_harian m
+              WHERE m.kode_saham=d.kode_saham AND m.trade_date<d.trade_date
+              ORDER BY m.trade_date DESC LIMIT {int(win_n)}
+            ) t)
         """
+        std_expr = f"""
+           (SELECT STDDEV_POP(vv) FROM (
+              SELECT {inner} AS vv FROM data_harian m
+              WHERE m.kode_saham=d.kode_saham AND m.trade_date<d.trade_date
+              ORDER BY m.trade_date DESC LIMIT {int(win_n)}
+            ) t2)
+        """
+
         sql_fb = f"""
         SELECT
-          d.trade_date, d.kode_saham, d.nama_perusahaan,
-          {met_plain} AS metric_now,
-          d.nilai, d.volume,
-          (d.foreign_buy-d.foreign_sell) AS net_foreign_value,
-          CASE WHEN d.bid IS NOT NULL AND d.offer IS NOT NULL AND (d.bid+d.offer)<>0
-               THEN (d.offer-d.bid)/((d.offer+d.bid)/2)*10000 END AS spread_bps,
-          {avgstd},
-          ({met_plain}/NULLIF({avg_alias},0))         AS ratio,
-          (({met_plain}-{avg_alias})/NULLIF({std_alias},0)) AS zscore
-        FROM data_harian d
-        WHERE d.trade_date=%s
-        HAVING {avg_alias} IS NOT NULL AND {avg_alias} >= %s AND (ratio >= %s OR zscore >= %s)
+          trade_date, kode_saham, nama_perusahaan, metric_now,
+          nilai, volume, net_foreign_value, spread_bps,
+          {avg_alias}, {std_alias},
+          (metric_now/NULLIF({avg_alias},0))         AS ratio,
+          ((metric_now-{avg_alias})/NULLIF({std_alias},0)) AS zscore
+        FROM (
+            SELECT
+              d.trade_date, d.kode_saham, d.nama_perusahaan,
+              {met_plain} AS metric_now,
+              d.nilai, d.volume,
+              (d.foreign_buy-d.foreign_sell) AS net_foreign_value,
+              CASE WHEN d.bid IS NOT NULL AND d.offer IS NOT NULL AND (d.bid+d.offer)<>0
+                   THEN (d.offer-d.bid)/((d.offer+d.bid)/2)*10000 END AS spread_bps,
+              {avg_expr} AS {avg_alias},
+              {std_expr} AS {std_alias}
+            FROM data_harian d
+            WHERE d.trade_date=%s
+        ) base
+        HAVING {avg_alias} IS NOT NULL AND {avg_alias} >= %s
+           AND ( ratio >= %s OR zscore >= %s )
         ORDER BY ratio DESC
         LIMIT %s
         """
@@ -290,7 +300,7 @@ with lh1:
 with lh2:
     win_n = st.selectbox("Rolling window (hari)", options=[30,20,10,7,5], index=1)  # default 20
 
-avg_label_text = f"Min AVG {win_n}D — Rp"  # label dinamis
+avg_label_text = f"Min AVG {win_n}D — Rp"
 
 c1,c2,c3,c4 = st.columns(4)
 with c1: min_avg = st.number_input(avg_label_text, min_value=0, step=100_000_000, value=1_000_000_000)
@@ -300,9 +310,8 @@ with c4: topn = st.number_input("Top N", min_value=5, max_value=200, step=5, val
 
 st.markdown("---")
 
-tabs = st.tabs(["🟩 Nilai (Value) Spike", "🟦 Volume Spike", "🟧 Net Foreign Spike", "🟥 Spread Spike"])
+tabs = st.tabs(["🟩 Nilai (Value) Spike)", "🟦 Volume Spike", "🟧 Net Foreign Spike", "🟥 Spread Spike"])
 
-# helper untuk nama kolom AVG dinamis
 def avg_col_name(win_n: int) -> str:
     return f"avg{win_n}"
 
