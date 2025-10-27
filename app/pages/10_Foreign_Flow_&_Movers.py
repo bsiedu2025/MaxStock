@@ -3,7 +3,6 @@
 
 from datetime import date, timedelta
 from typing import Tuple, Optional
-
 import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html as st_html
@@ -118,9 +117,9 @@ def get_date_bounds(conn) -> Tuple[date, date]:
     return row[0], row[1]
 
 # ───────────────────────── Helpers tampilan ─────────────────────────
-THEME_COLOR = "#3AA6A0"
-TABLE_HEIGHT = 430       # tinggi konten tabel (tanpa header)
-HEADER_HEIGHT = 56       # tinggi header DIKUNCI (wrap & center tapi tetap sama)
+THEME_COLOR     = "#3AA6A0"
+TABLE_HEIGHT    = 430     # tinggi konten tabel (tanpa header)
+HEADER_HEIGHT   = 56      # header fixed height → wrap + center tetap simetris
 
 def fmt_id(x, dec=0):
     try:
@@ -160,22 +159,21 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
     """
     Tabel HTML simetris:
       - header wrap + center (uppercase, underscore→spasi), tinggi fixed
-      - scrollbar HORIZONAL dihilangkan (struktur div bersarang)
+      - scrollbar horizontal dihilangkan; gunakan gutter stabil agar lebar tidak berubah
       - tooltip perusahaan saat hover kolom kode_saham
-      - kolom fixed width sehingga kiri/kanan identik
+      - kolom fixed width → kiri/kanan identik
     """
     d = df_fmt.copy()
     d = d[cols_to_show].reset_index(drop=True)
 
-    # Lebar kolom (100% pas, supaya tidak memicu scroll X)
+    # Width persis 100% → 18/22/22/28/10 untuk ranking
     widths = {
-        # ranking (5 kolom) → 16 + 24 + 24 + 26 + 10 = 100
-        "kode_saham": "16%",
-        "cum_net_foreign": "24%",
-        "total_value": "24%",
-        "avg_liq": "26%",
+        "kode_saham": "18%",
+        "cum_net_foreign": "22%",
+        "total_value": "22%",
+        "avg_liq": "28%",
         "avg_spread_bps": "10%",
-        # movers (5 kolom) → 18 + 22 + 22 + 26 + 12 = 100
+        # movers (5 kolom)
         "ret_1d": "18%", "nilai": "22%", "volume": "22%", "spread_bps": "12%",
     }
 
@@ -200,17 +198,19 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         trs.append("<tr>" + "".join(tds) + "</tr>")
     body = "\n".join(trs)
 
-    # Gunakan outer→inner div untuk paksa scroll Y saja (tanpa scroll X)
     html = f"""
     <style>
       .tbl-outer {{
         border:1px solid #e9ecef; border-radius:10px;
         box-shadow:0 1px 2px rgba(0,0,0,0.05);
-        background:#fff; width:100%; overflow:hidden; /* kunci: tanpa scroll X */
+        background:#fff; width:100%; overflow:hidden;
         box-sizing:border-box;
       }}
       .tbl-scroll {{
-        height:{height}px; overflow-y:auto; overflow-x:hidden;  /* hanya vertical */
+        height:{height}px;
+        overflow-y:auto; overflow-x:hidden;
+        /* Kunci space scrollbar supaya kiri/kanan tidak berubah lebarnya */
+        scrollbar-gutter: stable both-edges;
       }}
       table.tbl {{ border-collapse:collapse; width:100%; table-layout:fixed; }}
       table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; }}
@@ -219,10 +219,13 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         background:{THEME_COLOR}; color:#fff; font-weight:700;
         text-align:center; height:{HEADER_HEIGHT}px; vertical-align:middle;
       }}
+      /* Header wrap di SPASI (tidak pecah huruf) + center */
       table.tbl th .th-wrap {{
         display:flex; align-items:center; justify-content:center;
-        white-space:normal; word-break:break-word; text-align:center;
-        line-height:1.15; padding:2px 4px;
+        white-space:normal;           /* bisa multi-line */
+        word-break:keep-all;          /* jangan pecah huruf */
+        overflow-wrap:anywhere;       /* pecah di spasi/titik */
+        text-align:center; line-height:1.15; padding:2px 4px;
       }}
       table.tbl td {{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
       table.tbl td.num {{ text-align:right; }}
@@ -457,4 +460,4 @@ with mc2:
                        file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Header wrap + center, tanpa scroll horizontal. Tinggi header dikunci supaya Top Net Buy/Sell benar-benar simetris.")
+st.caption("Header kembali wrap & center. Scrollbar vertical stabil (scrollbar-gutter), sehingga tabel kiri/kanan benar-benar simetris.")
