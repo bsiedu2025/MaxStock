@@ -6,6 +6,7 @@ from typing import Tuple, Optional
 import pandas as pd
 import streamlit as st
 from db_utils import get_db_connection, get_db_name, check_secrets
+from streamlit.components.v1 import html as st_html
 
 # ─────────────────────────── UI SETUP ───────────────────────────
 st.set_page_config(page_title="📊 Foreign Flow & Movers", page_icon="📊", layout="wide")
@@ -333,23 +334,40 @@ c1, c2 = st.columns(2)
 
 def render_table(df_display: pd.DataFrame, df_source_for_tooltip: pd.DataFrame, title_right=False):
     if tooltip_mode:
-        # Render dengan Styler agar ada tooltip per baris di kolom kode_saham
+        # Render via HTML supaya bisa pakai tooltip + kontrol tinggi
         disp = df_display.copy()
-        # siapkan tooltips hanya untuk kolom kode_saham
+        # siapkan tooltips: sama shape, isi hanya untuk kolom 'kode_saham'
         tooltips = pd.DataFrame("", index=disp.index, columns=disp.columns)
-        # sumber nama_perusahaan ada di df_source_for_tooltip (yang belum drop)
-        tooltips["kode_saham"] = df_source_for_tooltip.loc[disp.index, "nama_perusahaan"]
+        # pastikan index sinkron
+        src = df_source_for_tooltip.loc[disp.index]
+        tooltips["kode_saham"] = src["nama_perusahaan"]
+
         styler = (
             disp.style
-            .set_table_styles([{'selector': 'th, td', 'props': [('text-align','left')]}])
-            .set_properties(**{'white-space':'nowrap'})
+            .set_table_styles(
+                [
+                    {"selector": "th, td", "props": [("text-align", "left"), ("white-space", "nowrap")]},
+                    {"selector": "thead th", "props": [("position","sticky"), ("top","0"), ("background","#fff"), ("z-index","1")]},
+                    {"selector": "table", "props": [("table-layout","fixed"), ("width","100%")]}
+                ]
+            )
             .set_tooltips(tooltips)
+            .hide(axis="index")
         )
-        st.write(styler, height=TABLE_HEIGHT)
+
+        html = styler.to_html()
+        # bungkus dalam div dengan tinggi tetap agar simetris
+        wrapper = f"""
+        <div style="height:{TABLE_HEIGHT}px; overflow:auto; border:1px solid #e9ecef; border-radius:0.5rem;">
+            {html}
+        </div>
+        """
+        st_html(wrapper, height=TABLE_HEIGHT+40, scrolling=False)
     else:
         # st.dataframe biasa → tampilkan nama_perusahaan sebagai kolom
         st.dataframe(
-            df_display[COLS_DISPLAY if "nama_perusahaan" not in df_display.columns else ["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
+            df_display[COLS_DISPLAY if "nama_perusahaan" not in df_display.columns
+                       else ["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
             use_container_width=True, hide_index=True, height=TABLE_HEIGHT,
             column_config=COLUMN_CONFIG
         )
