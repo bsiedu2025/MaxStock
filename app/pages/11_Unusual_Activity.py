@@ -205,54 +205,23 @@ def render_table(df_fmt: pd.DataFrame, cols, tooltip_col="nama_perusahaan", heig
 # ─────────────────────────────────────────────
 # SQL BUILDERS (fallback without VIEW/window)
 # ─────────────────────────────────────────────
-def _metric_now_expr(alias: str, metric: str) -> str:
-    """Return expression for today's metric value."""
+def _metric_plain(metric: str, alias_prefix: str = "d") -> str:
+    """Plain expression for metric using alias prefix ('d' for current row)."""
     if metric == "nilai":
-        base = "d.nilai"
-    elif metric == "volume":
-        base = "d.volume"
-    elif metric == "abs_nf":
-        base = "ABS(d.foreign_buy - d.foreign_sell)"
-    elif metric == "spread":
-        base = (
-            "CASE WHEN d.bid IS NOT NULL AND d.offer IS NOT NULL AND (d.bid+d.offer)<>0 "
-            "THEN (d.offer-d.bid)/((d.offer+d.bid)/2)*10000 END"
+        return f"{alias_prefix}.nilai"
+    if metric == "volume":
+        return f"{alias_prefix}.volume"
+    if metric == "abs_nf":
+        # v_daily_metrics punya net_foreign_value; data_harian punya foreign_buy/sell
+        # gunakan foreign_buy-sell untuk data_harian, net_foreign_value untuk view path
+        return f"ABS({alias_prefix}.net_foreign_value)" if alias_prefix == "dvm" else f"ABS({alias_prefix}.foreign_buy - {alias_prefix}.foreign_sell)"
+    if metric == "spread":
+        return (
+            f"CASE WHEN {alias_prefix}.bid IS NOT NULL AND {alias_prefix}.offer IS NOT NULL "
+            f"AND ({alias_prefix}.bid+{alias_prefix}.offer)<>0 "
+            f"THEN ({alias_prefix}.offer-{alias_prefix}.bid)/(({alias_prefix}.offer+{alias_prefix}.bid)/2)*10000 END"
         )
-    else:
-        raise ValueError("unknown metric")
-    return f"{base} AS {alias}"
-
-
-def _avgstd_20d_sub(metric: str) -> str:
-    """Return two subqueries (avg20, std20) using last 20 rows BEFORE today (ex-today)."""
-    if metric == "nilai":
-        inner = "m.nilai"
-    elif metric == "volume":
-        inner = "m.volume"
-    elif metric == "abs_nf":
-        inner = "ABS(m.foreign_buy - m.foreign_sell)"
-    elif metric == "spread":
-        inner = (
-            "CASE WHEN m.bid IS NOT NULL AND m.offer IS NOT NULL AND (m.bid+m.offer)<>0 "
-            "THEN (m.offer-m.bid)/((m.offer+m.bid)/2)*10000 END"
-        )
-    else:
-        raise ValueError("unknown metric")
-
-    return f"""
-      (SELECT AVG(vv) FROM (
-         SELECT {inner} AS vv
-         FROM data_harian m
-         WHERE m.kode_saham=d.kode_saham AND m.trade_date < d.trade_date
-         ORDER BY m.trade_date DESC LIMIT 20
-      ) t) AS avg20,
-      (SELECT STDDEV_POP(vv) FROM (
-         SELECT {inner} AS vv
-         FROM data_harian m
-         WHERE m.kode_saham=d.kode_saham AND m.trade_date < d.trade_date
-         ORDER BY m.trade_date DESC LIMIT 20
-      ) t2) AS std20
-    """
+    raise ValueError("unknown metric")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -264,31 +233,27 @@ def fetch_unusual(trd: date, metric: str, min_avg20: float, min_ratio: float, mi
     con = get_db_connection()
     _alive(con)
 
-    # 1) Attempt VIEW path
+    # 1) Attempt VIEW path (v_daily_metrics alias dvm; v_ua_stats_20d alias s)
     try:
-        sel_now = {
-            "nilai": "d.nilai AS metric_now",
-            "volume": "d.volume AS metric_now",
-            "abs_nf": "ABS(d.net_foreign_value) AS metric_now",
-            "spread": "d.spread_bps AS metric_now",
-        }[metric]
-
+        met_plain_view = _metric_plain(metric, alias_prefix="dvm")
         met_key = {"nilai": "nilai", "volume": "vol", "abs_nf": "abs_nf", "spread": "spread"}[metric]
 
         sql_view = f"""
         SELECT
-          d.trade_date, d.kode_saham,
-          ANY_VALUE(d.nama_perusahaan) AS nama_perusahaan,
-          {sel_now},
-          d.nilai, d.volume, d.net_foreign_value, d.spread_bps,
+          dvm.trade_date, dvm.kode_saham,
+          ANY_VALUE(dvm.nama_perusahaan) AS nama_perusahaan,
+          {met_plain_view} AS metric_now,
+          dvm.nilai, dvm.volume, dvm.net_foreign_value, dvm.spread_bps,
           s.avg20_{met_key}_excl AS avg20,
-          s.std20_{met_key}_excl AS std20
-        FROM v_daily_metrics d
+          s.std20_{met_key}_excl AS std20,
+          ({met_plain_view} / NULLIF(s.avg20_{met_key}_excl,0))             AS ratio,
+          (({met_plain_view} - s.avg20_{met_key}_excl)/NULLIF(s.std20_{met_key}_excl,0)) AS zscore
+        FROM v_daily_metrics dvm
         JOIN v_ua_stats_20d s
-          ON s.trade_date=d.trade_date AND s.kode_saham=d.kode_saham
-        WHERE d.trade_date=%s AND s.avg20_{met_key}_excl IS NOT NULL AND s.avg20_{met_key}_excl >= %s
-        HAVING (metric_now/NULLIF(avg20,0)) >= %s OR ((metric_now-avg20)/NULLIF(std20,0)) >= %s
-        ORDER BY (metric_now/NULLIF(avg20,0)) DESC
+          ON s.trade_date=dvm.trade_date AND s.kode_saham=dvm.kode_saham
+        WHERE dvm.trade_date=%s AND s.avg20_{met_key}_excl IS NOT NULL AND s.avg20_{met_key}_excl >= %s
+        HAVING (ratio >= %s OR zscore >= %s)
+        ORDER BY ratio DESC
         LIMIT %s
         """
         df = pd.read_sql(sql_view, con, params=[trd, min_avg20, min_ratio, min_z, int(topn)])
@@ -298,24 +263,45 @@ def fetch_unusual(trd: date, metric: str, min_avg20: float, min_ratio: float, mi
         # Fall through to portable version
         pass
 
-    # 2) Fallback portable path (no VIEW, no window functions)
+    # 2) Fallback portable path (no VIEW, no window functions) on data_harian (alias d)
     try:
-        metric_now = _metric_now_expr("metric_now", metric)
-        avgstd = _avgstd_20d_sub(metric)
+        met_plain = _metric_plain(metric, alias_prefix="d")
+        # subquery avg/std 20D sebelum tanggal trd
+        def avgstd_sub(inner: str) -> str:
+            return f"""
+              (SELECT AVG(vv) FROM (
+                 SELECT {inner} AS vv
+                 FROM data_harian m
+                 WHERE m.kode_saham=d.kode_saham AND m.trade_date < d.trade_date
+                 ORDER BY m.trade_date DESC LIMIT 20
+              ) t) AS avg20,
+              (SELECT STDDEV_POP(vv) FROM (
+                 SELECT {inner} AS vv
+                 FROM data_harian m
+                 WHERE m.kode_saham=d.kode_saham AND m.trade_date < d.trade_date
+                 ORDER BY m.trade_date DESC LIMIT 20
+              ) t2) AS std20
+            """
+
+        inner_expr = _metric_plain(metric, alias_prefix="m")
+        avgstd = avgstd_sub(inner_expr)
+
         sql_fb = f"""
         SELECT
           d.trade_date, d.kode_saham, d.nama_perusahaan,
-          {metric_now},
+          {met_plain} AS metric_now,
           d.nilai, d.volume,
           (d.foreign_buy - d.foreign_sell) AS net_foreign_value,
           CASE WHEN d.bid IS NOT NULL AND d.offer IS NOT NULL AND (d.bid+d.offer)<>0
                THEN (d.offer-d.bid)/((d.offer+d.bid)/2)*10000 END AS spread_bps,
-          {avgstd}
+          {avgstd},
+          ({met_plain} / NULLIF(avg20,0))             AS ratio,
+          (({met_plain} - avg20)/NULLIF(std20,0))     AS zscore
         FROM data_harian d
         WHERE d.trade_date=%s
         HAVING avg20 IS NOT NULL AND avg20 >= %s
-           AND ( (metric_now/NULLIF(avg20,0)) >= %s OR ((metric_now-avg20)/NULLIF(std20,0)) >= %s )
-        ORDER BY (metric_now/NULLIF(avg20,0)) DESC
+           AND ( ratio >= %s OR zscore >= %s )
+        ORDER BY ratio DESC
         LIMIT %s
         """
         df = pd.read_sql(sql_fb, con, params=[trd, min_avg20, min_ratio, min_z, int(topn)])
@@ -323,7 +309,6 @@ def fetch_unusual(trd: date, metric: str, min_avg20: float, min_ratio: float, mi
         return df
     except Exception as e:
         _close(con)
-        # show real error to help debugging on UI
         st.error(f"Query UA gagal: {type(e).__name__}: {e}")
         return pd.DataFrame()
 
@@ -426,7 +411,7 @@ with tabs[1]:
         render_table(df_fmt, cols)
         st.download_button(
             "⬇️ Export CSV - Volume Spike",
-            data=to_csv_bytes(df_show),
+            data=to_csv_bytes[df_show] if False else to_csv_bytes(df_show),
             file_name=f"ua_volume_{the_date}.csv",
         )
 
@@ -439,7 +424,6 @@ with tabs[2]:
         st.info("Tidak ada spike sesuai filter.")
     else:
         df_show = df.rename(columns={"metric_now": "net_foreign_value"})
-        # metric pada query adalah ABS(net_foreign); tetap beri nama yang jelas.
         df_fmt = format_df_id(
             df_show,
             {
@@ -511,7 +495,7 @@ with tabs[3]:
 
 st.markdown("---")
 st.caption(
-    "Fallback otomatis: jika VIEW / window function tersedia akan dipakai; "
-    "kalau tidak, halaman memakai subquery 20D sehingga kompatibel di MySQL 5.7+. "
-    "Pastikan index (trade_date, kode_saham) & (kode_saham, trade_date) sudah dibuat untuk performa."
+    "Fallback otomatis: jika VIEW/window function tersedia akan dipakai; "
+    "kalau tidak, dipakai subquery 20D (kompatibel MySQL 5.7+). "
+    "Pastikan index (trade_date, kode_saham) & (kode_saham, trade_date) dibuat untuk performa."
 )
