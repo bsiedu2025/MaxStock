@@ -1,5 +1,5 @@
 # app/pages/10_Foreign_Flow_&_Movers.py
-# Foreign Flow & Top Movers Dashboard (FAST MODE + Quick Range + Nice UI)
+# Foreign Flow & Top Movers Dashboard (FAST MODE + Quick Range + Symmetric UI)
 
 from datetime import date, timedelta
 from typing import Tuple, Optional
@@ -18,10 +18,10 @@ with st.expander("ℹ️ Cara pakai & definisi", expanded=False):
         """
 **Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (diakumulasi dari rentang tanggal yang dipilih).
 
-**Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT) → super cepat.  
+**Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT) → cepat.  
 **Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, window function) → lebih berat.
 
-**Spread (bps)** = `(offer - bid) / ((offer + bid)/2) * 10,000` (semakin kecil semakin rapat).
+**Spread (bps)** = `(offer - bid) / ((offer + bid)/2) * 10,000`.
         """
     )
 
@@ -157,17 +157,22 @@ def html_escape(s):
             .replace("&","&amp;").replace("<","&lt;")
             .replace(">","&gt;").replace('"',"&quot;"))
 
+def humanize_header(c: str) -> str:
+    """UBAH header: underscore → spasi, uppercase."""
+    return c.replace("_", " ").upper()
+
 def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_perusahaan", height=TABLE_HEIGHT):
     """
-    Render tabel HTML dengan:
-      - header bold putih background #3AA6A0
+    Render tabel HTML simetris:
+      - header bold putih background #3AA6A0, CENTER + WRAP
       - zebra rows, sticky header
-      - tooltip nama_perusahaan saat hover kolom kode_saham
-      - lebar kolom konsisten & tinggi simetris
+      - tooltip nama_perusahaan saat hover di kolom kode_saham
+      - lebar kolom konsisten & tinggi sama kiri/kanan
     """
     d = df_fmt.copy()
     d = d[cols_to_show].reset_index(drop=True)
 
+    # Lebar kolom fixed biar simetris (total ~100%)
     widths = {
         # ranking (5 kolom)
         "kode_saham": "18%",
@@ -179,7 +184,10 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         "ret_1d": "18%", "nilai": "26%", "volume": "26%", "spread_bps": "12%",
     }
 
-    ths = "".join(f'<th style="width:{widths.get(c,"20%")}">{html_escape(c)}</th>' for c in cols_to_show)
+    ths = "".join(
+        f'<th style="width:{widths.get(c,"20%")}"><div class="th-wrap">{html_escape(humanize_header(c))}</div></th>'
+        for c in cols_to_show
+    )
 
     trs = []
     for i, row in d.iterrows():
@@ -203,13 +211,20 @@ def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_peru
         height:{height}px; overflow:auto;
         border:1px solid #e9ecef; border-radius:10px;
         box-shadow:0 1px 2px rgba(0,0,0,0.05);
+        box-sizing:border-box;
+        background:#fff;
       }}
       table.tbl {{ border-collapse:collapse; width:100%; table-layout:fixed; }}
-      table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; white-space:nowrap; }}
+      table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; }}
       table.tbl th {{
         position:sticky; top:0; z-index:1;
-        background:{THEME_COLOR}; color:#fff; font-weight:700; text-align:left;
+        background:{THEME_COLOR}; color:#fff; font-weight:700;
+        text-align:center;
       }}
+      table.tbl th .th-wrap {{
+        white-space:normal; word-break:break-word; line-height:1.2;
+      }}
+      table.tbl td {{ white-space:nowrap; }}
       table.tbl td.right {{ text-align:right; }}
       table.tbl td.left  {{ text-align:left;  }}
       table.tbl td.code  {{ text-align:left; font-weight:600; }}
@@ -393,7 +408,7 @@ df_sell_fmt = df_format_id(df_sell, fmt_cols_rank)
 
 cols_rank = ["kode_saham","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]
 
-c1, c2 = st.columns(2)
+c1, c2 = st.columns(2, gap="large")
 with c1:
     render_table_html(df_buy_fmt, cols_rank)   # kiri
     st.download_button("⬇️ Export CSV - Top Net Buy",
@@ -430,7 +445,7 @@ losers_fmt  = df_format_id(losers,  fmt_cols_mov)
 
 cols_movers = ["kode_saham","ret_1d","nilai","volume","spread_bps"]
 
-mc1, mc2 = st.columns(2)
+mc1, mc2 = st.columns(2, gap="large")
 with mc1:
     st.markdown(f"**Top Gainer — {movers_date}**")
     render_table_html(gainers_fmt, cols_movers)
@@ -446,4 +461,4 @@ with mc2:
                        file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Mode cepat: super ngebut untuk scanning harian. Tooltip muncul saat hover di kolom kode saham.")
+st.caption("Header tabel: huruf kapital, underscore → spasi, center & wrap. Tooltip nama perusahaan muncul saat hover di kolom kode.")
