@@ -1,11 +1,5 @@
 # app/pages/10_Foreign_Flow_&_Movers.py
-# Foreign Flow & Top Movers Dashboard (FAST MODE + ID formatting)
-# - Range tanggal
-# - Mode CEPA T (avg nilai periode) / Mode AKURAT (ADVT20)
-# - Ranking Net Buy/Sell Asing
-# - Top Gainer/Loser (1D)
-# - Export CSV
-
+# Foreign Flow & Top Movers Dashboard (FAST MODE + ID formatting + Quick Range + Tooltip)
 from datetime import date, timedelta
 from typing import Tuple, Optional
 
@@ -22,13 +16,10 @@ with st.expander("ℹ️ Cara pakai & definisi", expanded=False):
         """
 **Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (diakumulasi dari rentang tanggal yang dipilih).
 
-**Likuiditas:**
-- **Mode cepat** → pakai **avg nilai** pada **periode terpilih** (proxy ADVT).
-- **Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, butuh window function).
+**Mode cepat** → pakai **avg nilai** pada **periode terpilih** (proxy ADVT, tanpa window) ⇒ sangat cepat.  
+**Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, pakai window function) ⇒ lebih berat.
 
-**Spread (bps):** `(offer - bid) / ((offer + bid)/2) * 10,000` (semakin kecil semakin rapat).
-
-Tips: Untuk performa, gunakan *Mode cepat* (default). *Mode akurat* cocok saat filtering sangat presisi diperlukan.
+**Spread (bps)** = `(offer - bid) / ((offer + bid)/2) * 10,000` (semakin kecil semakin rapat).
         """
     )
 
@@ -39,20 +30,16 @@ st.caption(f"DB aktif: **{get_db_name()}**")
 
 # ───────────────────── Helper koneksi aman ─────────────────────
 def _ensure_alive(conn):
-    try:
-        conn.reconnect(attempts=2, delay=1)
-    except Exception:
-        pass
+    try: conn.reconnect(attempts=2, delay=1)
+    except Exception: pass
 
 def _safe_close(conn):
     try:
         if hasattr(conn, "is_connected"):
-            if conn.is_connected():
-                conn.close()
+            if conn.is_connected(): conn.close()
         else:
             conn.close()
-    except Exception:
-        pass
+    except Exception: pass
 
 # ──────────────────────── DB PREP (views) ───────────────────────
 DDL_V_DAILY_FAST = """
@@ -69,7 +56,6 @@ SELECT
 FROM data_harian;
 """
 
-# View akurat yang pakai window ADVT20 (lebih berat)
 DDL_V_DAILY_METRICS = """
 CREATE OR REPLACE VIEW v_daily_metrics AS
 SELECT
@@ -108,12 +94,11 @@ def ensure_views(conn):
     cur = conn.cursor()
     try:
         cur.execute(DDL_V_DAILY_FAST)
-        # view akurat dipakai hanya jika user pilih "Mode akurat"
         cur.execute(DDL_V_DAILY_METRICS)
         cur.execute(DDL_V_ROLLING_20D)
         conn.commit()
     except Exception as e:
-        st.warning("Gagal membuat VIEW (mungkin hak akses terbatas). Mode cepat tetap bisa jalan.")
+        st.warning("Gagal membuat VIEW (mungkin hak akses terbatas). Mode cepat tetap jalan.")
         st.caption(f"Detail: {e}")
     finally:
         try: cur.close()
@@ -132,7 +117,6 @@ def get_date_bounds(conn) -> Tuple[date, date]:
 
 # ───────────────────────── Helpers ─────────────────────────
 def fmt_id(x, dec=0):
-    """Format angka gaya Indonesia: . ribuan, , desimal."""
     try:
         if x is None or pd.isna(x): return ""
         s = f"{float(x):,.{dec}f}"
@@ -151,26 +135,30 @@ def df_format_id(df: pd.DataFrame, formats: dict) -> pd.DataFrame:
     df = df.copy()
     for col, (kind, dec) in formats.items():
         if col in df.columns:
-            if kind == "num":
-                df[col] = df[col].map(lambda v: fmt_id(v, dec))
-            elif kind == "pct":
-                df[col] = df[col].map(lambda v: fmt_pct(v, dec))
+            if kind == "num": df[col] = df[col].map(lambda v: fmt_id(v, dec))
+            elif kind == "pct": df[col] = df[col].map(lambda v: fmt_pct(v, dec))
     return df
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
+# Konfigurasi kolom dan tinggi tabel agar simetris
+TABLE_HEIGHT = 420
+COLS_DISPLAY = ["kode_saham", "cum_net_foreign", "total_value", "avg_liq", "avg_spread_bps"]
+COLUMN_CONFIG = {
+    "kode_saham":      st.column_config.TextColumn("kode_saham", width="small"),
+    "cum_net_foreign": st.column_config.TextColumn("cum_net_foreign", width="medium"),
+    "total_value":     st.column_config.TextColumn("total_value", width="medium"),
+    "avg_liq":         st.column_config.TextColumn("avg_liq", width="medium"),
+    "avg_spread_bps":  st.column_config.TextColumn("avg_spread_bps", width="small"),
+}
+
 # ───────────────────────── Data fetchers ─────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
-    """
-    FAST MODE: pakai v_daily_fast (tanpa window).
-    Filter likuiditas = AVG(nilai) di periode.
-    """
     conn = get_db_connection()
     try:
-        _ensure_alive(conn)
-        ensure_views(conn)
+        _ensure_alive(conn); ensure_views(conn)
         sql = """
         SELECT
           kode_saham,
@@ -186,27 +174,19 @@ def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[
         """
         params = [start, end]
         if min_avg_value and min_avg_value > 0:
-            sql += " AND AVG(nilai) >= %s"
-            params.append(min_avg_value)
+            sql += " AND AVG(nilai) >= %s"; params.append(min_avg_value)
         if max_spread and max_spread > 0:
-            sql += " AND (AVG(spread_bps) <= %s OR AVG(spread_bps) IS NULL)"
-            params.append(max_spread)
-        sql += " ORDER BY cum_net_foreign DESC LIMIT %s"
-        params.append(int(topn))
-        df = pd.read_sql(sql, conn, params=params)
-        return df
+            sql += " AND (AVG(spread_bps) <= %s OR AVG(spread_bps) IS NULL)"; params.append(max_spread)
+        sql += " ORDER BY cum_net_foreign DESC LIMIT %s"; params.append(int(topn))
+        return pd.read_sql(sql, conn, params=params)
     finally:
         _safe_close(conn)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
-    """
-    AKURAT: pakai ADVT20 (v_rolling_20d) → lebih berat.
-    """
     conn = get_db_connection()
     try:
-        _ensure_alive(conn)
-        ensure_views(conn)
+        _ensure_alive(conn); ensure_views(conn)
         sql = """
         SELECT
           d.kode_saham,
@@ -224,25 +204,19 @@ def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[f
         """
         params = [start, end]
         if min_advt and min_advt > 0:
-            sql += " AND AVG(r.advt_20) >= %s"
-            params.append(min_advt)
+            sql += " AND AVG(r.advt_20) >= %s"; params.append(min_advt)
         if max_spread and max_spread > 0:
-            sql += " AND (AVG(d.spread_bps) <= %s OR AVG(d.spread_bps) IS NULL)"
-            params.append(max_spread)
-        sql += " ORDER BY cum_net_foreign DESC LIMIT %s"
-        params.append(int(topn))
-        df = pd.read_sql(sql, conn, params=params)
-        return df
+            sql += " AND (AVG(d.spread_bps) <= %s OR AVG(d.spread_bps) IS NULL)"; params.append(max_spread)
+        sql += " ORDER BY cum_net_foreign DESC LIMIT %s"; params.append(int(topn))
+        return pd.read_sql(sql, conn, params=params)
     finally:
         _safe_close(conn)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_top_movers_fast(trade_dt: date, min_value_today: Optional[float], max_spread: Optional[float], topn: int):
-    """Movers 1D (cepat, tanpa ADVT20)."""
     conn = get_db_connection()
     try:
-        _ensure_alive(conn)
-        ensure_views(conn)
+        _ensure_alive(conn); ensure_views(conn)
         sql = """
         SELECT
           kode_saham, nama_perusahaan,
@@ -254,11 +228,9 @@ def fetch_top_movers_fast(trade_dt: date, min_value_today: Optional[float], max_
         """
         params = [trade_dt]
         if min_value_today and min_value_today > 0:
-            sql += " AND nilai >= %s"
-            params.append(min_value_today)
+            sql += " AND nilai >= %s"; params.append(min_value_today)
         if max_spread and max_spread > 0:
-            sql += " AND (spread_bps <= %s OR spread_bps IS NULL)"
-            params.append(max_spread)
+            sql += " AND (spread_bps <= %s OR spread_bps IS NULL)"; params.append(max_spread)
         df_all = pd.read_sql(sql, conn, params=params)
         df_gainer = df_all.sort_values(by="ret_1d", ascending=False).head(int(topn)).reset_index(drop=True)
         df_loser  = df_all.sort_values(by="ret_1d", ascending=True ).head(int(topn)).reset_index(drop=True)
@@ -266,45 +238,66 @@ def fetch_top_movers_fast(trade_dt: date, min_value_today: Optional[float], max_
     finally:
         _safe_close(conn)
 
-# ───────────────────────────── Sidebar ─────────────────────────────
+# ───────────────────────────── Range & Filters ─────────────────────────────
 conn_for_bounds = get_db_connection()
-_ensure_alive(conn_for_bounds)
-ensure_views(conn_for_bounds)
+_ensure_alive(conn_for_bounds); ensure_views(conn_for_bounds)
 min_d, max_d = get_date_bounds(conn_for_bounds)
 _safe_close(conn_for_bounds)
 
-c_mode = st.columns([1,2,2])
-with c_mode[0]:
-    fast_mode = st.toggle("⚡ Mode cepat", value=True, help="Gunakan avg nilai periode sebagai proxy ADVT (tanpa window).")
+# Quick range
+quick = st.radio(
+    "Rentang cepat",
+    ["1 Minggu", "1 Bulan", "3 Bulan", "6 Bulan", "1 Tahun", "Semua", "Custom"],
+    horizontal=True,
+)
 
-colA, colB = st.columns([1,1])
-with colA:
-    start_date = st.date_input("Tanggal Mulai", value=max(min_d, max_d - timedelta(days=29)), min_value=min_d, max_value=max_d)
-with colB:
-    end_date   = st.date_input("Tanggal Akhir", value=max_d, min_value=min_d, max_value=max_d)
+def quick_to_range(q: str) -> Tuple[date, date]:
+    end = max_d
+    if q == "1 Minggu":  return (max_d - timedelta(days=6), end)
+    if q == "1 Bulan":   return (max_d - timedelta(days=30), end)
+    if q == "3 Bulan":   return (max_d - timedelta(days=91), end)
+    if q == "6 Bulan":   return (max_d - timedelta(days=182), end)
+    if q == "1 Tahun":   return (max_d - timedelta(days=365), end)
+    if q == "Semua":     return (min_d, end)
+    # Custom → dibawah pakai input manual
+    return None, None
+
+if quick != "Custom":
+    start_date, end_date = quick_to_range(quick)
+else:
+    colA, colB = st.columns([1,1])
+    with colA:
+        start_date = st.date_input("Tanggal Mulai", value=max(min_d, max_d - timedelta(days=29)), min_value=min_d, max_value=max_d, key="start_custom")
+    with colB:
+        end_date   = st.date_input("Tanggal Akhir", value=max_d, min_value=min_d, max_value=max_d, key="end_custom")
 
 if start_date > end_date:
     st.error("Tanggal Mulai tidak boleh lebih besar dari Tanggal Akhir.")
     st.stop()
 
-fcol1, fcol2, fcol3 = st.columns([1,1,1])
-with fcol1:
+# Filter lain
+top_bar = st.columns([1,1,1,1])
+with top_bar[0]:
+    fast_mode = st.toggle("⚡ Mode cepat", value=True, help="Avg nilai periode sebagai proxy ADVT.")
+with top_bar[1]:
     if fast_mode:
         min_liq = st.number_input("Min **Avg Nilai (periode)** — Rp", min_value=0, step=100_000_000, value=1_000_000_000)
     else:
         min_liq = st.number_input("Min **ADVT20** — Rp", min_value=0, step=100_000_000, value=1_000_000_000)
-with fcol2:
+with top_bar[2]:
     max_spread_bps = st.number_input("Max Spread (bps)", min_value=0, step=5, value=50)
-with fcol3:
+with top_bar[3]:
     topn = st.number_input("Top N", min_value=5, max_value=100, step=5, value=20)
+
+tooltip_mode = st.toggle("💡 Tooltip nama perusahaan saat hover kode", value=True)
 
 st.markdown("---")
 
 # ───────────────────────────── Foreign Flow ─────────────────────────────
 st.subheader("🟩 Top Net **Buy Asing** (Akumulasi)")
+
 if fast_mode:
     df_rank = fetch_net_foreign_rank_fast(start_date, end_date, min_liq, max_spread_bps, topn*2)
-    # rename untuk UI
     df_rank = df_rank.rename(columns={"avg_value_period":"avg_liq"})
 else:
     df_rank = fetch_net_foreign_rank_accurate(start_date, end_date, min_liq, max_spread_bps, topn*2)
@@ -323,20 +316,51 @@ fmt_cols_rank = {
 df_buy_fmt  = df_format_id(df_buy,  fmt_cols_rank)
 df_sell_fmt = df_format_id(df_sell, fmt_cols_rank)
 
+# Untuk simetri: gunakan kolom & lebar yang sama + tinggi sama
+def _build_display(df_fmt: pd.DataFrame) -> pd.DataFrame:
+    d = df_fmt.copy()
+    # kolom yang ditampilkan
+    d = d[["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]]
+    # kalau tooltip mode, sembunyikan nama_perusahaan dari tabel, tapi tetap dipakai tooltip
+    if tooltip_mode:
+        d = d.drop(columns=["nama_perusahaan"])
+    return d
+
+left_df  = _build_display(df_buy_fmt)
+right_df = _build_display(df_sell_fmt)
+
 c1, c2 = st.columns(2)
+
+def render_table(df_display: pd.DataFrame, df_source_for_tooltip: pd.DataFrame, title_right=False):
+    if tooltip_mode:
+        # Render dengan Styler agar ada tooltip per baris di kolom kode_saham
+        disp = df_display.copy()
+        # siapkan tooltips hanya untuk kolom kode_saham
+        tooltips = pd.DataFrame("", index=disp.index, columns=disp.columns)
+        # sumber nama_perusahaan ada di df_source_for_tooltip (yang belum drop)
+        tooltips["kode_saham"] = df_source_for_tooltip.loc[disp.index, "nama_perusahaan"]
+        styler = (
+            disp.style
+            .set_table_styles([{'selector': 'th, td', 'props': [('text-align','left')]}])
+            .set_properties(**{'white-space':'nowrap'})
+            .set_tooltips(tooltips)
+        )
+        st.write(styler, height=TABLE_HEIGHT)
+    else:
+        # st.dataframe biasa → tampilkan nama_perusahaan sebagai kolom
+        st.dataframe(
+            df_display[COLS_DISPLAY if "nama_perusahaan" not in df_display.columns else ["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
+            use_container_width=True, hide_index=True, height=TABLE_HEIGHT,
+            column_config=COLUMN_CONFIG
+        )
+
 with c1:
-    st.dataframe(
-        df_buy_fmt[["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
-        use_container_width=True, hide_index=True,
-    )
+    render_table(left_df, df_buy_fmt)
     st.download_button("⬇️ Export CSV - Top Net Buy", data=to_csv_bytes(df_buy), file_name=f"net_buy_{start_date}_{end_date}.csv")
 
 with c2:
     st.subheader("🟥 Top Net **Sell Asing** (Akumulasi)")
-    st.dataframe(
-        df_sell_fmt[["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
-        use_container_width=True, hide_index=True,
-    )
+    render_table(right_df, df_sell_fmt, title_right=True)
     st.download_button("⬇️ Export CSV - Top Net Sell", data=to_csv_bytes(df_sell), file_name=f"net_sell_{start_date}_{end_date}.csv")
 
 st.markdown("---")
@@ -347,7 +371,6 @@ mcol1, _ = st.columns([1,3])
 with mcol1:
     movers_date = st.date_input("Tanggal untuk Movers (1D)", value=end_date, min_value=min_d, max_value=max_d, key="movers_date")
 
-# Untuk mode cepat, pakai min nilai **hari itu** sebagai filter; akurat bisa dibuatkan kalau perlu.
 min_value_today = st.number_input("Min Nilai (hari itu) — Rp", min_value=0, step=100_000_000, value=500_000_000)
 
 gainers, losers = fetch_top_movers_fast(movers_date, min_value_today, max_spread_bps, topn)
@@ -364,19 +387,17 @@ losers_fmt  = df_format_id(losers,  fmt_cols_mov)
 mc1, mc2 = st.columns(2)
 with mc1:
     st.markdown(f"**Top Gainer — {movers_date}**")
-    st.dataframe(
-        gainers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]],
-        use_container_width=True, hide_index=True
-    )
+    gdisp = gainers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]].copy()
+    if tooltip_mode: gdisp = gdisp.drop(columns=["nama_perusahaan"])
+    render_table(gdisp, gainers_fmt)
     st.download_button("⬇️ Export CSV - Top Gainer", data=to_csv_bytes(gainers), file_name=f"top_gainer_{movers_date}.csv")
 
 with mc2:
     st.markdown(f"**Top Loser — {movers_date}**")
-    st.dataframe(
-        losers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]],
-        use_container_width=True, hide_index=True
-    )
+    ldisp = losers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]].copy()
+    if tooltip_mode: ldisp = ldisp.drop(columns=["nama_perusahaan"])
+    render_table(ldisp, losers_fmt)
     st.download_button("⬇️ Export CSV - Top Loser", data=to_csv_bytes(losers), file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Mode cepat: super ngebut untuk scanning harian. Mode akurat tersedia bila perlu ADVT20.")
+st.caption("Mode cepat: super ngebut untuk scanning harian. Aktifkan tooltip untuk melihat nama perusahaan saat hover kode.")
