@@ -1,5 +1,5 @@
 # app/pages/11_Unusual_Activity.py
-# Unusual Activity Scanner (rolling 20D ex-today) with automatic fallback (no VIEW required)
+# Unusual Activity Scanner (rolling 20D ex-today) with automatic fallback (works on MySQL 5.7/8.0)
 
 from datetime import date, timedelta
 from typing import Tuple
@@ -123,6 +123,8 @@ def render_table(df_fmt: pd.DataFrame, cols, tooltip_col="nama_perusahaan", heig
                  word-break:break-word; text-align:center; line-height:1.15; padding:2px 4px; }}
       td {{ white-space:nowrap; }} td.num{{text-align:right;}} td.txt{{text-align:left;}} td.code{{font-weight:600;}}
       tr:nth-child(even){{background:#f7fbfb;}} tr:hover{{background:#e8f4f3;}}
+      .chips {{ display:flex; gap:.5rem; flex-wrap:wrap; }}
+      .chip {{ background:#e8f4f3; padding:.2rem .5rem; border-radius:999px; font-size:.85rem; }}
     </style>
     <div class="ua-box"><div class="ua-scroll">
       <table class="ua">
@@ -220,6 +222,80 @@ def fetch_unusual(trd: date, metric: str, min_avg20: float, min_ratio: float, mi
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────
+# SUMMARY / HINTS
+# ─────────────────────────────────────────────
+def render_summary(df: pd.DataFrame, metric: str):
+    """Tampilkan ringkasan kecil per tab."""
+    if df.empty:
+        return
+    # gunakan df numerik (belum diformat)
+    n = len(df)
+    max_ratio = float(df["ratio"].astype(float).max())
+    max_z = float(df["zscore"].astype(float).max())
+    top_codes = ", ".join(df["kode_saham"].head(5).tolist())
+
+    if metric == "nilai":
+        total = float(df["nilai"].astype(float).sum())
+        total_label = "Total Nilai (Rp)"
+        total_str = fmt_id(total, 0)
+    elif metric == "volume":
+        total = float(df["volume"].astype(float).sum())
+        total_label = "Total Volume"
+        total_str = fmt_id(total, 0)
+    elif metric == "abs_nf":
+        total = float(df["net_foreign_value"].abs().astype(float).sum())
+        total_label = "Total |Net Foreign| (Rp)"
+        total_str = fmt_id(total, 0)
+    else:  # spread
+        total = float(df["spread_bps"].astype(float).mean())
+        total_label = "Rata-rata Spread (bps)"
+        total_str = fmt_id(total, 2)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Jumlah Emiten", f"{n}")
+    c2.metric(total_label, total_str)
+    c3.metric("Max Ratio (x)", fmt_id(max_ratio, 2))
+    c4.metric("Max Z-score", fmt_id(max_z, 2))
+    st.markdown(
+        f"<div class='chips'><span class='chip'>Top codes:</span>"
+        + "".join(f"<span class='chip'>{esc(k)}</span>" for k in df['kode_saham'].head(5))
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+def render_empty_hint(metric: str):
+    """Jelaskan kenapa kosong & tips adjust filter."""
+    bullets = [
+        "Threshold **Min Ratio** dan/atau **Min Z-score** terlalu tinggi.",
+        "Filter **Min ADVT/AVG 20D** terlalu besar sehingga emiten illiquid tersaring.",
+        "Data untuk tanggal ini belum lengkap/tersedia di tabel `data_harian`.",
+        "Saham belum punya **20 hari historis** sebelum tanggal ini → `avg20/std20` jadi `NULL`.",
+    ]
+    if metric == "spread":
+        bullets.append("Kolom **bid/offer** kosong untuk banyak saham pada tanggal tsb.")
+    st.info("Tidak ada spike sesuai filter.")
+    st.write("**Kemungkinan penyebab:**")
+    st.write("\n".join(f"- {b}" for b in bullets))
+    st.write("**Saran cepat:** turunkan `Min Ratio`/`Min Z-score` atau kecilkan `Min ADVT/AVG 20D`.")
+
+with st.expander("📘 Cara membaca & catatan", expanded=False):
+    st.markdown("""
+**Definisi singkat**
+- **RATIO** = nilai metrik hari ini ÷ **AVG20** (rata-rata 20 hari terakhir *sebelum* hari ini).
+- **Z-SCORE** = (nilai metrik hari ini − **AVG20**) ÷ **STD20**.
+- **AVG20/STD20** dihitung **ex-today** (tidak memasukkan hari ini).
+- **Min ADVT/AVG 20D** menyaring saham dengan nilai/volume rata-rata 20 hari kecil/illiquid.
+
+**Kapan sinyal dianggap menarik?**
+- Umumnya **RATIO ≥ 2x** *atau* **Z-SCORE ≥ 2** sudah cukup ekstrem.
+- Untuk **Spread Spike**, fokus pada **average spread** yang tiba-tiba besar (eksekusi makin mahal).
+
+**Tips**
+- Mulai dengan `Min Ratio = 2` dan `Min Z-score = 2`, lalu sesuaikan.
+- Jika tab kosong, kurangi threshold atau ganti tanggal. Pastikan data punya ≥20 hari historis sebelumnya.
+    """)
+
+# ─────────────────────────────────────────────
 # CONTROLS
 # ─────────────────────────────────────────────
 MIN_D, MAX_D = _date_bounds()
@@ -241,12 +317,13 @@ tabs = st.tabs(["🟩 Nilai (Value) Spike", "🟦 Volume Spike", "🟧 Net Forei
 # TAB 1: VALUE
 # ─────────────────────────────────────────────
 with tabs[0]:
-    df = fetch_unusual(the_date, "nilai", min_avg20, min_ratio, min_z, topn)
-    if df.empty:
-        st.info("Tidak ada spike sesuai filter.")
+    df_raw = fetch_unusual(the_date, "nilai", min_avg20, min_ratio, min_z, topn)
+    if df_raw.empty:
+        render_empty_hint("nilai")
     else:
-        # HINDARI DUPLIKAT: drop kolom nilai asli sebelum rename
-        df_show = df.drop(columns=["nilai"], errors="ignore").rename(columns={"metric_now":"nilai"})
+        # HINDARI DUPLIKAT: drop kolom asli sebelum rename
+        df_show = df_raw.drop(columns=["nilai"], errors="ignore").rename(columns={"metric_now":"nilai"})
+        render_summary(df_show, "nilai")
         df_fmt = format_df_id(df_show, {
             "nilai":("num",0),"avg20":("num",0),"ratio":("num",2),"zscore":("num",2),
             "volume":("num",0),"net_foreign_value":("num",0),"spread_bps":("num",2)
@@ -261,11 +338,12 @@ with tabs[0]:
 # TAB 2: VOLUME
 # ─────────────────────────────────────────────
 with tabs[1]:
-    df = fetch_unusual(the_date, "volume", min_avg20, min_ratio, min_z, topn)
-    if df.empty:
-        st.info("Tidak ada spike sesuai filter.")
+    df_raw = fetch_unusual(the_date, "volume", min_avg20, min_ratio, min_z, topn)
+    if df_raw.empty:
+        render_empty_hint("volume")
     else:
-        df_show = df.drop(columns=["volume"], errors="ignore").rename(columns={"metric_now":"volume"})
+        df_show = df_raw.drop(columns=["volume"], errors="ignore").rename(columns={"metric_now":"volume"})
+        render_summary(df_show, "volume")
         df_fmt = format_df_id(df_show, {
             "volume":("num",0),"avg20":("num",0),"ratio":("num",2),"zscore":("num",2),
             "nilai":("num",0),"net_foreign_value":("num",0),"spread_bps":("num",2)
@@ -280,11 +358,12 @@ with tabs[1]:
 # TAB 3: NET FOREIGN (ABS)
 # ─────────────────────────────────────────────
 with tabs[2]:
-    df = fetch_unusual(the_date, "abs_nf", min_avg20, min_ratio, min_z, topn)
-    if df.empty:
-        st.info("Tidak ada spike sesuai filter.")
+    df_raw = fetch_unusual(the_date, "abs_nf", min_avg20, min_ratio, min_z, topn)
+    if df_raw.empty:
+        render_empty_hint("abs_nf")
     else:
-        df_show = df.drop(columns=["net_foreign_value"], errors="ignore").rename(columns={"metric_now":"net_foreign_value"})
+        df_show = df_raw.drop(columns=["net_foreign_value"], errors="ignore").rename(columns={"metric_now":"net_foreign_value"})
+        render_summary(df_show, "abs_nf")
         df_fmt = format_df_id(df_show, {
             "net_foreign_value":("num",0),"avg20":("num",0),"ratio":("num",2),"zscore":("num",2),
             "nilai":("num",0),"volume":("num",0),"spread_bps":("num",2)
@@ -299,11 +378,12 @@ with tabs[2]:
 # TAB 4: SPREAD
 # ─────────────────────────────────────────────
 with tabs[3]:
-    df = fetch_unusual(the_date, "spread", min_avg20, min_ratio, min_z, topn)
-    if df.empty:
-        st.info("Tidak ada spike sesuai filter.")
+    df_raw = fetch_unusual(the_date, "spread", min_avg20, min_ratio, min_z, topn)
+    if df_raw.empty:
+        render_empty_hint("spread")
     else:
-        df_show = df.drop(columns=["spread_bps"], errors="ignore").rename(columns={"metric_now":"spread_bps"})
+        df_show = df_raw.drop(columns=["spread_bps"], errors="ignore").rename(columns={"metric_now":"spread_bps"})
+        render_summary(df_show, "spread")
         df_fmt = format_df_id(df_show, {
             "spread_bps":("num",2),"avg20":("num",2),"ratio":("num",2),"zscore":("num",2),
             "nilai":("num",0),"volume":("num",0),"net_foreign_value":("num",0)
