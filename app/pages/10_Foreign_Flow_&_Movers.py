@@ -1,12 +1,13 @@
 # app/pages/10_Foreign_Flow_&_Movers.py
-# Foreign Flow & Top Movers Dashboard (FAST MODE + ID formatting + Quick Range + Tooltip)
+# Foreign Flow & Top Movers Dashboard (FAST MODE + Quick Range + Nice UI)
+
 from datetime import date, timedelta
 from typing import Tuple, Optional
 
 import pandas as pd
 import streamlit as st
-from db_utils import get_db_connection, get_db_name, check_secrets
 from streamlit.components.v1 import html as st_html
+from db_utils import get_db_connection, get_db_name, check_secrets
 
 # ─────────────────────────── UI SETUP ───────────────────────────
 st.set_page_config(page_title="📊 Foreign Flow & Movers", page_icon="📊", layout="wide")
@@ -17,8 +18,8 @@ with st.expander("ℹ️ Cara pakai & definisi", expanded=False):
         """
 **Foreign Flow:** `net_foreign = foreign_buy - foreign_sell` (diakumulasi dari rentang tanggal yang dipilih).
 
-**Mode cepat** → pakai **avg nilai** pada **periode terpilih** (proxy ADVT, tanpa window) ⇒ sangat cepat.  
-**Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, pakai window function) ⇒ lebih berat.
+**Mode cepat (default)** → pakai **rata-rata nilai transaksi pada periode terpilih** (proxy ADVT) → super cepat.  
+**Mode akurat** → pakai **ADVT20** (rata-rata nilai 20 hari, window function) → lebih berat.
 
 **Spread (bps)** = `(offer - bid) / ((offer + bid)/2) * 10,000` (semakin kecil semakin rapat).
         """
@@ -31,16 +32,20 @@ st.caption(f"DB aktif: **{get_db_name()}**")
 
 # ───────────────────── Helper koneksi aman ─────────────────────
 def _ensure_alive(conn):
-    try: conn.reconnect(attempts=2, delay=1)
-    except Exception: pass
+    try:
+        conn.reconnect(attempts=2, delay=1)
+    except Exception:
+        pass
 
 def _safe_close(conn):
     try:
         if hasattr(conn, "is_connected"):
-            if conn.is_connected(): conn.close()
+            if conn.is_connected():
+                conn.close()
         else:
             conn.close()
-    except Exception: pass
+    except Exception:
+        pass
 
 # ──────────────────────── DB PREP (views) ───────────────────────
 DDL_V_DAILY_FAST = """
@@ -116,8 +121,12 @@ def get_date_bounds(conn) -> Tuple[date, date]:
         return today - timedelta(days=30), today
     return row[0], row[1]
 
-# ───────────────────────── Helpers ─────────────────────────
+# ───────────────────────── Helpers tampilan ─────────────────────────
+THEME_COLOR = "#3AA6A0"
+TABLE_HEIGHT = 430  # px
+
 def fmt_id(x, dec=0):
+    """Format angka Indonesia: . ribuan, , desimal."""
     try:
         if x is None or pd.isna(x): return ""
         s = f"{float(x):,.{dec}f}"
@@ -143,20 +152,86 @@ def df_format_id(df: pd.DataFrame, formats: dict) -> pd.DataFrame:
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
-# Konfigurasi kolom dan tinggi tabel agar simetris
-TABLE_HEIGHT = 420
-COLS_DISPLAY = ["kode_saham", "cum_net_foreign", "total_value", "avg_liq", "avg_spread_bps"]
-COLUMN_CONFIG = {
-    "kode_saham":      st.column_config.TextColumn("kode_saham", width="small"),
-    "cum_net_foreign": st.column_config.TextColumn("cum_net_foreign", width="medium"),
-    "total_value":     st.column_config.TextColumn("total_value", width="medium"),
-    "avg_liq":         st.column_config.TextColumn("avg_liq", width="medium"),
-    "avg_spread_bps":  st.column_config.TextColumn("avg_spread_bps", width="small"),
-}
+def html_escape(s):
+    return ("" if s is None else str(s)
+            .replace("&","&amp;").replace("<","&lt;")
+            .replace(">","&gt;").replace('"',"&quot;"))
+
+def render_table_html(df_fmt: pd.DataFrame, cols_to_show, tooltip_col="nama_perusahaan", height=TABLE_HEIGHT):
+    """
+    Render tabel HTML dengan:
+      - header bold putih background #3AA6A0
+      - zebra rows, sticky header
+      - tooltip nama_perusahaan saat hover kolom kode_saham
+      - lebar kolom konsisten & tinggi simetris
+    """
+    d = df_fmt.copy()
+    d = d[cols_to_show].reset_index(drop=True)
+
+    widths = {
+        # ranking (5 kolom)
+        "kode_saham": "18%",
+        "cum_net_foreign": "22%",
+        "total_value": "22%",
+        "avg_liq": "28%",
+        "avg_spread_bps": "10%",
+        # movers (5 kolom)
+        "ret_1d": "18%", "nilai": "26%", "volume": "26%", "spread_bps": "12%",
+    }
+
+    ths = "".join(f'<th style="width:{widths.get(c,"20%")}">{html_escape(c)}</th>' for c in cols_to_show)
+
+    trs = []
+    for i, row in d.iterrows():
+        tds = []
+        for c in cols_to_show:
+            val = "" if pd.isna(row[c]) else html_escape(row[c])
+            if c == "kode_saham":
+                tip = ""
+                if tooltip_col in df_fmt.columns and i < len(df_fmt):
+                    tip = html_escape(df_fmt.loc[i, tooltip_col])
+                tds.append(f'<td class="code" title="{tip}">{val}</td>')
+            else:
+                align = "right" if c in ("cum_net_foreign","total_value","avg_liq","avg_spread_bps","nilai","volume","spread_bps") else "left"
+                tds.append(f'<td class="{align}">{val}</td>')
+        trs.append("<tr>" + "".join(tds) + "</tr>")
+    body = "\n".join(trs)
+
+    html = f"""
+    <style>
+      .tbl-wrap {{
+        height:{height}px; overflow:auto;
+        border:1px solid #e9ecef; border-radius:10px;
+        box-shadow:0 1px 2px rgba(0,0,0,0.05);
+      }}
+      table.tbl {{ border-collapse:collapse; width:100%; table-layout:fixed; }}
+      table.tbl th, table.tbl td {{ padding:8px 10px; font-size:13px; white-space:nowrap; }}
+      table.tbl th {{
+        position:sticky; top:0; z-index:1;
+        background:{THEME_COLOR}; color:#fff; font-weight:700; text-align:left;
+      }}
+      table.tbl td.right {{ text-align:right; }}
+      table.tbl td.left  {{ text-align:left;  }}
+      table.tbl td.code  {{ text-align:left; font-weight:600; }}
+      table.tbl tr:nth-child(even) {{ background:#f7fbfb; }}
+      table.tbl tr:hover {{ background:#e8f4f3; }}
+    </style>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <colgroup>
+          {''.join(f'<col style="width:{widths.get(c,"20%")}">' for c in cols_to_show)}
+        </colgroup>
+        <thead><tr>{ths}</tr></thead>
+        <tbody>{body}</tbody>
+      </table>
+    </div>
+    """
+    st_html(html, height=height+48, scrolling=False)
 
 # ───────────────────────── Data fetchers ─────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
+    """FAST MODE: tanpa window, filter likuiditas = AVG(nilai) pada periode."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -185,6 +260,7 @@ def fetch_net_foreign_rank_fast(start: date, end: date, min_avg_value: Optional[
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[float], max_spread: Optional[float], topn: int) -> pd.DataFrame:
+    """AKURAT: ADVT20 via view window function."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -215,6 +291,7 @@ def fetch_net_foreign_rank_accurate(start: date, end: date, min_advt: Optional[f
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_top_movers_fast(trade_dt: date, min_value_today: Optional[float], max_spread: Optional[float], topn: int):
+    """Movers 1D (cepat, tanpa ADVT20)."""
     conn = get_db_connection()
     try:
         _ensure_alive(conn); ensure_views(conn)
@@ -260,7 +337,6 @@ def quick_to_range(q: str) -> Tuple[date, date]:
     if q == "6 Bulan":   return (max_d - timedelta(days=182), end)
     if q == "1 Tahun":   return (max_d - timedelta(days=365), end)
     if q == "Semua":     return (min_d, end)
-    # Custom → dibawah pakai input manual
     return None, None
 
 if quick != "Custom":
@@ -290,8 +366,6 @@ with top_bar[2]:
 with top_bar[3]:
     topn = st.number_input("Top N", min_value=5, max_value=100, step=5, value=20)
 
-tooltip_mode = st.toggle("💡 Tooltip nama perusahaan saat hover kode", value=True)
-
 st.markdown("---")
 
 # ───────────────────────────── Foreign Flow ─────────────────────────────
@@ -317,69 +391,21 @@ fmt_cols_rank = {
 df_buy_fmt  = df_format_id(df_buy,  fmt_cols_rank)
 df_sell_fmt = df_format_id(df_sell, fmt_cols_rank)
 
-# Untuk simetri: gunakan kolom & lebar yang sama + tinggi sama
-def _build_display(df_fmt: pd.DataFrame) -> pd.DataFrame:
-    d = df_fmt.copy()
-    # kolom yang ditampilkan
-    d = d[["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]]
-    # kalau tooltip mode, sembunyikan nama_perusahaan dari tabel, tapi tetap dipakai tooltip
-    if tooltip_mode:
-        d = d.drop(columns=["nama_perusahaan"])
-    return d
-
-left_df  = _build_display(df_buy_fmt)
-right_df = _build_display(df_sell_fmt)
+cols_rank = ["kode_saham","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]
 
 c1, c2 = st.columns(2)
-
-def render_table(df_display: pd.DataFrame, df_source_for_tooltip: pd.DataFrame, title_right=False):
-    if tooltip_mode:
-        # Render via HTML supaya bisa pakai tooltip + kontrol tinggi
-        disp = df_display.copy()
-        # siapkan tooltips: sama shape, isi hanya untuk kolom 'kode_saham'
-        tooltips = pd.DataFrame("", index=disp.index, columns=disp.columns)
-        # pastikan index sinkron
-        src = df_source_for_tooltip.loc[disp.index]
-        tooltips["kode_saham"] = src["nama_perusahaan"]
-
-        styler = (
-            disp.style
-            .set_table_styles(
-                [
-                    {"selector": "th, td", "props": [("text-align", "left"), ("white-space", "nowrap")]},
-                    {"selector": "thead th", "props": [("position","sticky"), ("top","0"), ("background","#fff"), ("z-index","1")]},
-                    {"selector": "table", "props": [("table-layout","fixed"), ("width","100%")]}
-                ]
-            )
-            .set_tooltips(tooltips)
-            .hide(axis="index")
-        )
-
-        html = styler.to_html()
-        # bungkus dalam div dengan tinggi tetap agar simetris
-        wrapper = f"""
-        <div style="height:{TABLE_HEIGHT}px; overflow:auto; border:1px solid #e9ecef; border-radius:0.5rem;">
-            {html}
-        </div>
-        """
-        st_html(wrapper, height=TABLE_HEIGHT+40, scrolling=False)
-    else:
-        # st.dataframe biasa → tampilkan nama_perusahaan sebagai kolom
-        st.dataframe(
-            df_display[COLS_DISPLAY if "nama_perusahaan" not in df_display.columns
-                       else ["kode_saham","nama_perusahaan","cum_net_foreign","total_value","avg_liq","avg_spread_bps"]],
-            use_container_width=True, hide_index=True, height=TABLE_HEIGHT,
-            column_config=COLUMN_CONFIG
-        )
-
 with c1:
-    render_table(left_df, df_buy_fmt)
-    st.download_button("⬇️ Export CSV - Top Net Buy", data=to_csv_bytes(df_buy), file_name=f"net_buy_{start_date}_{end_date}.csv")
+    render_table_html(df_buy_fmt, cols_rank)   # kiri
+    st.download_button("⬇️ Export CSV - Top Net Buy",
+                       data=to_csv_bytes(df_buy),
+                       file_name=f"net_buy_{start_date}_{end_date}.csv")
 
 with c2:
     st.subheader("🟥 Top Net **Sell Asing** (Akumulasi)")
-    render_table(right_df, df_sell_fmt, title_right=True)
-    st.download_button("⬇️ Export CSV - Top Net Sell", data=to_csv_bytes(df_sell), file_name=f"net_sell_{start_date}_{end_date}.csv")
+    render_table_html(df_sell_fmt, cols_rank)  # kanan
+    st.download_button("⬇️ Export CSV - Top Net Sell",
+                       data=to_csv_bytes(df_sell),
+                       file_name=f"net_sell_{start_date}_{end_date}.csv")
 
 st.markdown("---")
 
@@ -402,20 +428,22 @@ fmt_cols_mov = {
 gainers_fmt = df_format_id(gainers, fmt_cols_mov)
 losers_fmt  = df_format_id(losers,  fmt_cols_mov)
 
+cols_movers = ["kode_saham","ret_1d","nilai","volume","spread_bps"]
+
 mc1, mc2 = st.columns(2)
 with mc1:
     st.markdown(f"**Top Gainer — {movers_date}**")
-    gdisp = gainers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]].copy()
-    if tooltip_mode: gdisp = gdisp.drop(columns=["nama_perusahaan"])
-    render_table(gdisp, gainers_fmt)
-    st.download_button("⬇️ Export CSV - Top Gainer", data=to_csv_bytes(gainers), file_name=f"top_gainer_{movers_date}.csv")
+    render_table_html(gainers_fmt, cols_movers)
+    st.download_button("⬇️ Export CSV - Top Gainer",
+                       data=to_csv_bytes(gainers),
+                       file_name=f"top_gainer_{movers_date}.csv")
 
 with mc2:
     st.markdown(f"**Top Loser — {movers_date}**")
-    ldisp = losers_fmt[["kode_saham","nama_perusahaan","ret_1d","nilai","volume","spread_bps"]].copy()
-    if tooltip_mode: ldisp = ldisp.drop(columns=["nama_perusahaan"])
-    render_table(ldisp, losers_fmt)
-    st.download_button("⬇️ Export CSV - Top Loser", data=to_csv_bytes(losers), file_name=f"top_loser_{movers_date}.csv")
+    render_table_html(losers_fmt, cols_movers)
+    st.download_button("⬇️ Export CSV - Top Loser",
+                       data=to_csv_bytes(losers),
+                       file_name=f"top_loser_{movers_date}.csv")
 
 st.markdown("---")
-st.caption("Mode cepat: super ngebut untuk scanning harian. Aktifkan tooltip untuk melihat nama perusahaan saat hover kode.")
+st.caption("Mode cepat: super ngebut untuk scanning harian. Tooltip muncul saat hover di kolom kode saham.")
