@@ -89,8 +89,9 @@ def _make_pool(cfg: Dict[str, Any]) -> pooling.MySQLConnectionPool:
     )
     # Hapus field None agar tidak dipass ke driver
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=20, **kwargs)
-    #return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=20, pool_reset_session=True, **kwargs)
+    #return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=20, **kwargs)
+    return pooling.MySQLConnectionPool(pool_name="ms_pool", pool_size=20, pool_reset_session=True, **kwargs)
+    #return pooling.MySQLConnectionPool(pool_name="ms_pool_v2", pool_size=20, pool_reset_session=True, **kwargs)
 
 @st.cache_resource
 def _get_pool() -> pooling.MySQLConnectionPool:
