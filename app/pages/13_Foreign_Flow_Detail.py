@@ -1,5 +1,5 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus (robust to missing columns)
+# Daily Stock Movement – Foreign Flow Focus (robust to missing columns / melt-safe)
 
 from datetime import date, timedelta
 import pandas as pd
@@ -59,7 +59,6 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
     """
     con = get_db_connection(); _alive(con)
     try:
-        # cek kolom yang tersedia
         cols_df = pd.read_sql(
             "SELECT LOWER(column_name) AS col FROM information_schema.columns "
             "WHERE table_schema = DATABASE() AND table_name = 'data_harian'",
@@ -67,7 +66,6 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
         )
         avail = set(cols_df["col"].tolist())
 
-        # base + optional
         base_cols = ["trade_date", "kode_saham"]
         if "nama_perusahaan" in avail:
             base_cols.append("nama_perusahaan")
@@ -80,9 +78,9 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
             "spread_bps",
             "close_price",
         ]
+
         select_cols = [c for c in base_cols + optional if c in avail]
         if "trade_date" not in select_cols or "kode_saham" not in select_cols:
-            # safety guard — tabel harus punya dua kolom ini
             raise RuntimeError("Kolom minimal 'trade_date' dan 'kode_saham' harus ada di data_harian")
 
         sql = f"""
@@ -99,7 +97,6 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
         for c in (wanted - set(df.columns.str.lower())):
             df[c] = np.nan
 
-        # rapikan urutan kolom (tidak wajib)
         ordered = base_cols + [c for c in optional if c in df.columns]
         df = df[[c for c in ordered if c in df.columns]]
         return df
@@ -111,8 +108,9 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     # Net Foreign Value
     if "net_foreign_value" not in df.columns or df["net_foreign_value"].isna().all():
         if {"foreign_buy","foreign_sell"}.issubset(df.columns):
-            df["net_foreign_value"] = (pd.to_numeric(df["foreign_buy"], errors="coerce").fillna(0)
-                                       - pd.to_numeric(df["foreign_sell"], errors="coerce").fillna(0))
+            df["foreign_buy"]  = pd.to_numeric(df.get("foreign_buy"), errors="coerce")
+            df["foreign_sell"] = pd.to_numeric(df.get("foreign_sell"), errors="coerce")
+            df["net_foreign_value"] = df["foreign_buy"].fillna(0) - df["foreign_sell"].fillna(0)
         else:
             df["net_foreign_value"] = np.nan
 
@@ -215,6 +213,7 @@ if max_sell_day is not None and pd.notna(max_sell_day["net_foreign_value"]):
 st.markdown("---")
 
 # ---------- Charts ----------
+
 # 1) Price + Net Foreign bar (dual-axis)
 if show_price and "close_price" in df.columns and df["close_price"].notna().any():
     fig1 = go.Figure()
@@ -258,14 +257,30 @@ else:
     fig2b.update_layout(height=360, xaxis_title=None, yaxis_title="Cum. Net Foreign")
     st.plotly_chart(fig2b, use_container_width=True)
 
-# 3) Buy vs Sell (stacked)
-if {"foreign_buy","foreign_sell"}.issubset(df.columns):
-    df_bs = df.melt(id_vars=["trade_date"], value_vars=["foreign_buy","foreign_sell"],
-                    var_name="jenis", value_name="nilai")
-    fig3 = px.bar(df_bs, x="trade_date", y="nilai", color="jenis", title="Foreign Buy vs Sell (Rp)",
-                  color_discrete_map={"foreign_buy":"#0d6efd","foreign_sell":"#DC3545"})
-    fig3.update_layout(barmode="stack", height=360, xaxis_title=None, yaxis_title="Rp", legend_title=None)
-    st.plotly_chart(fig3, use_container_width=True)
+# 3) Buy vs Sell (stacked) — SAFE MELT
+has_buy_sell_cols = set(["foreign_buy","foreign_sell"]).issubset(df.columns)
+has_non_nan = False
+if has_buy_sell_cols:
+    sub = df[["trade_date","foreign_buy","foreign_sell"]].copy()
+    sub["foreign_buy"]  = pd.to_numeric(sub["foreign_buy"], errors="coerce")
+    sub["foreign_sell"] = pd.to_numeric(sub["foreign_sell"], errors="coerce")
+    has_non_nan = sub[["foreign_buy","foreign_sell"]].notna().any().any()
+
+if has_buy_sell_cols and has_non_nan:
+    try:
+        df_bs = sub.melt(id_vars=["trade_date"],
+                         value_vars=["foreign_buy","foreign_sell"],
+                         var_name="jenis", value_name="nilai")
+        fig3 = px.bar(df_bs, x="trade_date", y="nilai", color="jenis",
+                      title="Foreign Buy vs Sell (Rp)",
+                      color_discrete_map={"foreign_buy":"#0d6efd","foreign_sell":"#DC3545"})
+        fig3.update_layout(barmode="stack", height=360, xaxis_title=None, yaxis_title="Rp",
+                           legend_title=None)
+        st.plotly_chart(fig3, use_container_width=True)
+    except Exception:
+        st.info("Data Foreign Buy/Sell tidak dapat ditampilkan (struktur kolom tidak konsisten).")
+else:
+    st.info("Data Foreign Buy/Sell tidak tersedia untuk rentang ini.")
 
 # 4) Nilai vs ADV + Ratio
 fig4 = go.Figure()
@@ -325,4 +340,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Note: Jika kolom seperti `close_price`, `bid/offer`, `freq` tidak ada pada sumber data, grafik yang bergantung pada kolom tersebut otomatis disesuaikan.")
+st.caption("💡 Jika kolom seperti `foreign_buy/sell`, `close_price`, `bid/offer` tidak ada pada sumber data, grafik yang bergantung pada kolom tersebut otomatis disesuaikan.")
