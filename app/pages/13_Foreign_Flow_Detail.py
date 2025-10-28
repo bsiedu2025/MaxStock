@@ -1,5 +1,6 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus (robust to missing columns / melt-safe)
+# Daily Stock Movement – Foreign Flow Focus
+# v2: ADV preset (All/1Y/6M/3M/1M), Indonesian short currency, Top metrics
 
 from datetime import date, timedelta
 import pandas as pd
@@ -53,10 +54,7 @@ def date_bounds() -> tuple[date, date]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
-    """
-    Ambil kolom inti secara dinamis: hanya SELECT kolom yang memang ada.
-    Kolom yang tidak ada akan ditambahkan sebagai NaN agar downstream aman.
-    """
+    """Dynamic SELECT: hanya ambil kolom yang memang ada; sisanya dibuat NaN."""
     con = get_db_connection(); _alive(con)
     try:
         cols_df = pd.read_sql(
@@ -91,7 +89,6 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
         """
         df = pd.read_sql(sql, con, params=[kode, start, end])
 
-        # tambahkan kolom yang belum ada agar downstream seragam
         wanted = set(["nama_perusahaan","nilai","volume","freq","foreign_buy","foreign_sell",
                       "net_foreign_value","bid","offer","spread_bps","close_price"])
         for c in (wanted - set(df.columns.str.lower())):
@@ -134,12 +131,49 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     return df
 
-def add_rolling(df: pd.DataFrame, adv_n: int = 20) -> pd.DataFrame:
+def idr_short(x: float) -> str:
+    """Format ringkas Indonesia: Ribu/Juta/Miliar/Triliun."""
+    try:
+        n = float(x)
+    except Exception:
+        return "-"
+    a = abs(n)
+    units = [("Triliun", 1e12), ("Miliar", 1e9), ("Juta", 1e6), ("Ribu", 1e3)]
+    for nama, v in units:
+        if a >= v:
+            val = n / v
+            s = f"{val:,.2f}".replace(",", ".")
+            return f"{s} {nama}"
+    s = f"{n:,.0f}".replace(",", ".")
+    return s
+
+def fmt_pct(v: float) -> str:
+    if v is None or pd.isna(v): return "-"
+    return f"{v:,.2f}%".replace(",", ".")
+
+def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
+    """Hitung ADV & ratio berdasarkan preset periode."""
     df = df.sort_values("trade_date").copy()
-    df["adv"] = df["nilai"].rolling(adv_n, min_periods=1).mean()
-    df["vol_avg"] = df["volume"].rolling(adv_n, min_periods=1).mean()
+    nilai = pd.to_numeric(df["nilai"], errors="coerce")
+
+    mode_to_win = {
+        "1 Bulan": 20,
+        "3 Bulan": 60,
+        "6 Bulan": 120,
+        "1 Tahun": 252,
+    }
+    if adv_mode == "All (Default)":
+        df["adv"] = nilai.expanding().mean()
+        adv_label = "All"
+    else:
+        win = mode_to_win.get(adv_mode, 20)
+        df["adv"] = nilai.rolling(win, min_periods=1).mean()
+        adv_label = adv_mode
+
+    df["vol_avg"] = pd.to_numeric(df.get("volume"), errors="coerce").rolling(20, min_periods=1).mean()
     df["ratio"] = df["nilai"] / df["adv"]
     df["cum_nf"] = df["net_foreign_value"].cumsum()
+    df.attrs["adv_label"] = adv_label
     return df
 
 def format_money(v, dec=0):
@@ -162,7 +196,11 @@ with c3:
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
-    adv_n = st.selectbox("ADV window (hari)", options=[5,7,10,20,30], index=3)
+    adv_mode = st.selectbox(
+        "ADV window (hari)",
+        options=["All (Default)", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan"],
+        index=0
+    )
 with c5:
     show_price = st.checkbox("Tampilkan harga (jika ada close_price)", value=True)
 with c6:
@@ -177,43 +215,72 @@ if df_raw.empty:
     st.warning("Data kosong untuk rentang ini.")
     st.stop()
 
-df = add_rolling(ensure_metrics(df_raw), adv_n=adv_n)
+df = add_rolling(ensure_metrics(df_raw), adv_mode=adv_mode)
 
-# ---------- Insight Cards ----------
+# ---------- Header & KPI ringkas ----------
 nama = df["nama_perusahaan"].dropna().iloc[-1] if "nama_perusahaan" in df.columns and df["nama_perusahaan"].notna().any() else "-"
+st.subheader(f"{kode} — {nama}")
+
 total_buy = df["foreign_buy"].sum(skipna=True) if "foreign_buy" in df.columns else np.nan
 total_sell = df["foreign_sell"].sum(skipna=True) if "foreign_sell" in df.columns else np.nan
 total_nf = df["net_foreign_value"].sum(skipna=True)
+
+m1, m2, m3, m4, m5 = st.columns([1,1,1,1,1])
+m1.metric("Total Net Foreign", idr_short(total_nf))
+m2.metric("Total Foreign Buy", idr_short(total_buy) if pd.notna(total_buy) else "-")
+m3.metric("Total Foreign Sell", idr_short(total_sell) if pd.notna(total_sell) else "-")
+
 pos_days = (df["net_foreign_value"] > 0).sum()
 pct_pos = 100 * pos_days / len(df)
-
-max_buy_day = df.loc[df["net_foreign_value"].idxmax()] if df["net_foreign_value"].notna().any() else None
-max_sell_day = df.loc[df["net_foreign_value"].idxmin()] if df["net_foreign_value"].notna().any() else None
-max_ratio = df["ratio"].max(skipna=True)
-
-st.subheader(f"{kode} — {nama}")
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Total Net Foreign", format_money(total_nf))
-m2.metric("Total Foreign Buy", format_money(total_buy) if pd.notna(total_buy) else "-")
-m3.metric("Total Foreign Sell", format_money(total_sell) if pd.notna(total_sell) else "-")
 m4.metric("% Hari Net Buy", f"{pct_pos:.0f}%")
+
+max_ratio = df["ratio"].max(skipna=True)
 m5.metric("Max Ratio (nilai/ADV)", f"{max_ratio:.2f}x" if pd.notna(max_ratio) else "-")
 
-if max_buy_day is not None and pd.notna(max_buy_day["net_foreign_value"]):
+# highlight biggest buy/sell
+if df["net_foreign_value"].notna().any():
+    max_buy_day = df.loc[df["net_foreign_value"].idxmax()]
+    max_sell_day = df.loc[df["net_foreign_value"].idxmin()]
     st.caption(
         f"🔎 Hari Net Buy terbesar: **{max_buy_day['trade_date'].date()}** "
-        f"({format_money(max_buy_day['net_foreign_value'])})"
+        f"({idr_short(max_buy_day['net_foreign_value'])})"
     )
-if max_sell_day is not None and pd.notna(max_sell_day["net_foreign_value"]):
     st.caption(
         f"🔎 Hari Net Sell terbesar: **{max_sell_day['trade_date'].date()}** "
-        f"({format_money(max_sell_day['net_foreign_value'])})"
+        f"({idr_short(max_sell_day['net_foreign_value'])})"
     )
+
+# ---------- Ringkasan Metrik (harga/volume) ----------
+if show_price and "close_price" in df.columns and df["close_price"].notna().any():
+    close = pd.to_numeric(df["close_price"], errors="coerce")
+    last_close = close.dropna().iloc[-1]
+    prev_close = close.dropna().iloc[-2] if close.dropna().shape[0] >= 2 else np.nan
+    chg_val = last_close - prev_close if pd.notna(prev_close) else np.nan
+    chg_pct = (chg_val / prev_close * 100) if pd.notna(prev_close) and prev_close != 0 else np.nan
+    high_p = close.max(skipna=True)
+    low_p  = close.min(skipna=True)
+    sma5   = close.rolling(5, min_periods=1).mean().dropna().iloc[-1]
+
+    vol_last = pd.to_numeric(df.get("volume"), errors="coerce").dropna()
+    vol_last = vol_last.iloc[-1] if len(vol_last) else np.nan
+    vol_jt   = vol_last / 1e6 if pd.notna(vol_last) else np.nan
+
+    st.markdown("### Ringkasan Metrik")
+    a,b,c = st.columns(3)
+    with a:
+        st.metric("Harga Terakhir (IDR)", format_money(last_close))
+        delta_text = f"{format_money(chg_val)}  ({fmt_pct(chg_pct)})" if pd.notna(chg_val) else "-"
+        st.metric("Perubahan Harga", format_money(chg_val) if pd.notna(chg_val) else "-", delta=fmt_pct(chg_pct) if pd.notna(chg_pct) else None)
+    with b:
+        st.metric("Tertinggi (Periode Filter)", format_money(high_p))
+        st.metric("Terendah (Periode Filter)", format_money(low_p))
+    with c:
+        st.metric("Vol. Hari Terakhir (Jt Lbr)", format_money(vol_jt, 2) if pd.notna(vol_jt) else "-")
+        st.metric("SMA 5 Hari (IDR)", format_money(sma5))
 
 st.markdown("---")
 
 # ---------- Charts ----------
-
 # 1) Price + Net Foreign bar (dual-axis)
 if show_price and "close_price" in df.columns and df["close_price"].notna().any():
     fig1 = go.Figure()
@@ -283,13 +350,14 @@ else:
     st.info("Data Foreign Buy/Sell tidak tersedia untuk rentang ini.")
 
 # 4) Nilai vs ADV + Ratio
+adv_label = df.attrs.get("adv_label", "ADV")
 fig4 = go.Figure()
 fig4.add_bar(x=df["trade_date"], y=df["nilai"], name="Nilai (Rp)", marker_color="rgba(13,110,253,.6)")
-fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["adv"], name=f"ADV({adv_n})", line=dict(color="#495057", width=2)))
+fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["adv"], name=f"ADV ({adv_label})", line=dict(color="#495057", width=2)))
 fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2",
                           line=dict(color="#20c997", width=2)))
 fig4.update_layout(
-    title=f"Nilai vs ADV({adv_n}) + Ratio",
+    title=f"Nilai vs ADV ({adv_label}) + Ratio",
     xaxis_title=None,
     yaxis=dict(title="Rp"),
     yaxis2=dict(title="Ratio (x)", overlaying="y", side="right"),
@@ -302,8 +370,8 @@ st.plotly_chart(fig4, use_container_width=True)
 if "volume" in df.columns:
     fig5 = go.Figure()
     fig5.add_bar(x=df["trade_date"], y=df["volume"], name="Volume", marker_color="rgba(32,201,151,.6)")
-    fig5.add_trace(go.Scatter(x=df["trade_date"], y=df["vol_avg"], name=f"Vol AVG({adv_n})", line=dict(color="#198754", width=2)))
-    fig5.update_layout(title=f"Volume vs AVG({adv_n})", xaxis_title=None, yaxis_title="Lembar", height=360,
+    fig5.add_trace(go.Scatter(x=df["trade_date"], y=df["vol_avg"], name=f"Vol AVG(20)", line=dict(color="#198754", width=2)))
+    fig5.update_layout(title=f"Volume vs AVG(20)", xaxis_title=None, yaxis_title="Lembar", height=360,
                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig5, use_container_width=True)
 
@@ -340,4 +408,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Jika kolom seperti `foreign_buy/sell`, `close_price`, `bid/offer` tidak ada pada sumber data, grafik yang bergantung pada kolom tersebut otomatis disesuaikan.")
+st.caption("💡 Kolom yang tidak tersedia (mis. close_price, bid/offer, foreign_buy/sell) akan otomatis disembunyikan dari grafik/metrik.")
