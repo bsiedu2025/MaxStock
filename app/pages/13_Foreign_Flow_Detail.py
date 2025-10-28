@@ -411,20 +411,45 @@ if price_series is not None and price_series.notna().any():
     signal_line = macd_line.ewm(span=9, adjust=False, min_periods=1).mean()
     hist = macd_line - signal_line
 
+    # Crossover detection
+    delta = macd_line - signal_line
+    prev_delta = delta.shift(1)
+    bull_idx = (prev_delta <= 0) & (delta > 0)
+    bear_idx = (prev_delta >= 0) & (delta < 0)
+
+    x_bull = sub_m.loc[bull_idx, "trade_date"]
+    y_bull = macd_line[bull_idx]
+    x_bear = sub_m.loc[bear_idx, "trade_date"]
+    y_bear = macd_line[bear_idx]
+
     figM = go.Figure()
     colorsM = np.where(hist >= 0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
     figM.add_bar(x=sub_m["trade_date"], y=hist, name="Histogram", marker_color=colorsM)
+
     figM.add_trace(go.Scatter(x=sub_m["trade_date"], y=macd_line,  name="MACD",   line=dict(width=2, color="#0d6efd")))
     figM.add_trace(go.Scatter(x=sub_m["trade_date"], y=signal_line, name="Signal", line=dict(width=2, color="#fd7e14")))
+
+    # Arrow markers on crossovers
+    figM.add_trace(go.Scatter(
+        x=x_bull, y=y_bull, mode="markers", name="Bullish crossover",
+        marker=dict(symbol="triangle-up", size=12, color="#22c55e"),
+        hovertemplate="%{x|%Y-%m-%d}<br>MACD: %{y:.2f}<extra>Bullish crossover</extra>"
+    ))
+    figM.add_trace(go.Scatter(
+        x=x_bear, y=y_bear, mode="markers", name="Bearish crossover",
+        marker=dict(symbol="triangle-down", size=12, color="#ef4444"),
+        hovertemplate="%{x|%Y-%m-%d}<br>MACD: %{y:.2f}<extra>Bearish crossover</extra>"
+    ))
+
     figM.add_hline(y=0, line_color="#adb5bd", line_width=1)
-    figM.update_layout(title="MACD (12,26,9)", xaxis_title=None, yaxis_title="MACD",
-                       height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    figM.update_layout(title="MACD (12,26,9) + Crossovers", xaxis_title=None, yaxis_title="MACD",
+                       height=320, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     _apply_time_axis(figM, sub_m["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(figM, use_container_width=True)
 
     # Status ringkas
     try:
-        delta_val = float(macd_line.iloc[-1] - signal_line.iloc[-1])
+        delta_val = float(delta.iloc[-1])
         status = "Bullish" if delta_val > 0 else "Bearish"
         st.caption(f"📉 MACD status: **{status}** (MACD - Signal = {delta_val:.2f}).")
     except Exception:
