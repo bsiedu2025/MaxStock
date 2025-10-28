@@ -1,6 +1,6 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus
-# v2.2: Ringkasan Metrik pakai kolom: sebelumnya, open_price, first_trade, tertinggi, terendah, penutupan, selisih, volume
+# v3.0: + Candlestick (OHLC) + MA5/MA20, Ringkasan Metrik dari kolom harga
 
 from datetime import date, timedelta
 import pandas as pd
@@ -67,17 +67,17 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
         if "nama_perusahaan" in avail:
             base_cols.append("nama_perusahaan")
 
-        # ==== penting: kolom harga yang lo sebut ====
+        # kolom harga untuk metrik & candlestick
         price_cols = [
             "sebelumnya", "open_price", "first_trade",
             "tertinggi", "terendah", "penutupan", "selisih"
         ]
-        # ==== foreign & transaksi ====
+        # transaksi & foreign
         optional = [
             "nilai", "volume", "freq",
             "foreign_buy", "foreign_sell", "net_foreign_value",
             "bid", "offer", "spread_bps",
-            "close_price"  # fallback lama kalau masih ada
+            "close_price"  # fallback lama
         ]
         select_cols = [c for c in base_cols + price_cols + optional if c in avail]
         if "trade_date" not in select_cols or "kode_saham" not in select_cols:
@@ -232,8 +232,7 @@ if df["net_foreign_value"].notna().any():
     st.caption(f"🔎 Hari Net Sell terbesar: **{max_sell_day['trade_date'].date()}** ({idr_short(max_sell_day['net_foreign_value'])})")
 
 # ---------- Ringkasan Metrik (pakai kolom harga dari tabel) ----------
-# Prioritas seri harga utama untuk chart & SMA:
-# penutupan > close_price (fallback)
+# Seri close utama: penutupan > close_price
 price_series = None
 if "penutupan" in df.columns and df["penutupan"].notna().any():
     price_series = pd.to_numeric(df["penutupan"], errors="coerce")
@@ -242,10 +241,9 @@ elif "close_price" in df.columns and df["close_price"].notna().any():
 
 last_close = price_series.dropna().iloc[-1] if price_series is not None and price_series.notna().any() else np.nan
 
-# Perubahan harga: pakai kolom 'selisih' kalau ada; kalau tidak, hitung penutupan - sebelumnya
+# Perubahan harga
 if "selisih" in df.columns and df["selisih"].notna().any():
     change_val = pd.to_numeric(df["selisih"], errors="coerce").dropna().iloc[-1]
-    # Persen: coba bagi 'sebelumnya' kalau ada
     if "sebelumnya" in df.columns and pd.notna(df["sebelumnya"].iloc[-1]) and df["sebelumnya"].iloc[-1] != 0:
         change_pct = change_val / float(df["sebelumnya"].iloc[-1]) * 100
     else:
@@ -283,7 +281,54 @@ with c:
 
 st.markdown("---")
 
-# ---------- Charts ----------
+# ---------- NEW: Candlestick (OHLC) ----------
+if show_price:
+    # tentukan open / high / low / close untuk candlestick
+    open_series = None
+    if "open_price" in df.columns and df["open_price"].notna().any():
+        open_series = pd.to_numeric(df["open_price"], errors="coerce")
+    elif "first_trade" in df.columns and df["first_trade"].notna().any():
+        open_series = pd.to_numeric(df["first_trade"], errors="coerce")
+    elif price_series is not None:
+        open_series = price_series.copy()  # fallback terakhir
+
+    high_series = pd.to_numeric(df["tertinggi"], errors="coerce") if "tertinggi" in df.columns else None
+    low_series  = pd.to_numeric(df["terendah"],  errors="coerce") if "terendah"  in df.columns else None
+    close_series = price_series  # sudah diset di atas
+
+    has_ohlc = (
+        open_series is not None and close_series is not None and
+        high_series is not None and low_series is not None and
+        open_series.notna().any() and close_series.notna().any() and
+        high_series.notna().any() and low_series.notna().any()
+    )
+
+    if has_ohlc:
+        figC = go.Figure()
+        figC.add_trace(go.Candlestick(
+            x=df["trade_date"],
+            open=open_series, high=high_series, low=low_series, close=close_series,
+            increasing_line_color="#33B766", decreasing_line_color="#DC3545",
+            name="OHLC"
+        ))
+        # Overlay MA5 & MA20 jika ada close
+        ma5  = close_series.rolling(5,  min_periods=1).mean()
+        ma20 = close_series.rolling(20, min_periods=1).mean()
+        figC.add_trace(go.Scatter(x=df["trade_date"], y=ma5,  name="MA 5",  line=dict(color="#0d6efd", width=1.8)))
+        figC.add_trace(go.Scatter(x=df["trade_date"], y=ma20, name="MA 20", line=dict(color="#6c757d", width=1.8)))
+        figC.update_layout(
+            title="Candlestick (OHLC) + MA5/MA20",
+            xaxis_title=None,
+            yaxis_title="Harga (IDR)",
+            xaxis_rangeslider_visible=False,
+            height=460,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(figC, use_container_width=True)
+    else:
+        st.info("Candlestick belum bisa ditampilkan karena kolom OHLC tidak lengkap pada rentang ini.")
+
+# ---------- Charts sebelumnya ----------
 # 1) Close vs Net Foreign
 if show_price and price_series is not None and price_series.notna().any():
     fig1 = go.Figure()
@@ -408,4 +453,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Ringkasan Metrik memakai kolom: sebelumnya, open_price, first_trade, tertinggi, terendah, penutupan, selisih, volume. Jika ada yang belum tersedia, metriknya ditampilkan '-'.")
+st.caption("💡 Candlestick memakai kolom: open_price/first_trade, tertinggi, terendah, penutupan (fallback close_price). Jika kolom tidak lengkap, candlestick disembunyikan.")
