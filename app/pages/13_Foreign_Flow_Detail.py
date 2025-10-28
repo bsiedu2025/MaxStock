@@ -30,7 +30,10 @@ st.markdown(
     .stSelectbox > label, .stDateInput > label, .stRadio > label { font-weight: 600; }
     /* inline checks */
     .checks-row { display:flex; align-items:center; gap: 1.25rem; }
+    .checks-row { display:flex; align-items:center; gap: 1.25rem; }
     .checks-row div[data-testid='stCheckbox'] { margin-bottom: 0 !important; }
+    /* sticky filter bar */
+    .sticky-filter { position: sticky; top: 0; z-index: 1000; background: rgba(255,255,255,.92); backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding: .5rem .25rem .75rem .25rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -238,6 +241,7 @@ if "show_spread" not in st.session_state:
 
 # === FILTER ROW (one line) ===
 with st.container():
+    st.markdown("<div class='sticky-filter'>", unsafe_allow_html=True)
     f1, f2, f3 = st.columns([1.3, 1.0, 1.6])
     with f1:
         st.selectbox("Pilih saham", options=codes, key="kode_saham")
@@ -258,6 +262,7 @@ with st.container():
                 st.rerun()
             except Exception:
                 st.experimental_rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 kode = st.session_state.get("kode_saham")
 if not kode:
