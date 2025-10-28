@@ -238,15 +238,26 @@ if "show_spread" not in st.session_state:
 
 # === FILTER ROW (one line) ===
 with st.container():
-    f1, f2, f3, f4 = st.columns([1.3, 1.0, 1.6, 1.1])
+    f1, f2, f3 = st.columns([1.3, 1.0, 1.6])
     with f1:
         st.selectbox("Pilih saham", options=codes, key="kode_saham")
     with f2:
         st.selectbox("ADV window (hari)", ["All (Default)", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan"], key="adv_mode")
     with f3:
-        st.date_input("Rentang tanggal", key="date_range", min_value=min_d, max_value=max_d)
-    with f4:
-        st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
+        dr = st.date_input(
+            "Rentang tanggal",
+            value=st.session_state.get("date_range", (max(min_d, max_d - relativedelta(years=1)), max_d)),
+            min_value=min_d,
+            max_value=max_d,
+        )
+        # jika user edit manual → switch ke Custom
+        if isinstance(dr, tuple) and dr != st.session_state.get("date_range"):
+            st.session_state["date_range"] = dr
+            st.session_state["range_choice"] = "Custom"
+            try:
+                st.rerun()
+            except Exception:
+                st.experimental_rerun()
 
 kode = st.session_state.get("kode_saham")
 if not kode:
@@ -290,13 +301,16 @@ with st.container():
     _apply_quick(st.session_state.get("range_choice", "1 Tahun"))
 
 # feature toggles (row 3, compact, one line)
-st.markdown("<div class='checks-row'>", unsafe_allow_html=True)
-colA, colB = st.columns([1,1])
-with colA:
-    st.checkbox("Tampilkan harga (jika tersedia)", key="show_price")
-with colB:
-    st.checkbox("Tampilkan spread (bps) jika tersedia", key="show_spread")
-st.markdown("</div>", unsafe_allow_html=True)
+with st.container():
+    st.markdown("<div class='checks-row'>", unsafe_allow_html=True)
+    cA, cB, cC = st.columns([1,1,1])
+    with cA:
+        st.checkbox("Tampilkan harga (jika tersedia)", key="show_price")
+    with cB:
+        st.checkbox("Tampilkan spread (bps) jika tersedia", key="show_spread")
+    with cC:
+        st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------- Data ----------
 start, end = st.session_state["date_range"]
