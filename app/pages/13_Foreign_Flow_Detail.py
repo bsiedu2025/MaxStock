@@ -393,7 +393,50 @@ if show_price:
             figC.add_trace(go.Candlestick(x=df_cdl["trade_date"], open=open_c, high=high_c, low=low_c, close=close_c, increasing_line_color="#33B766", decreasing_line_color="#DC3545", name="OHLC"))
             figC.add_trace(go.Scatter(x=df_cdl["trade_date"], y=ma5,  name="MA 5",  line=dict(color="#0d6efd", width=1.8)))
             figC.add_trace(go.Scatter(x=df_cdl["trade_date"], y=ma20, name="MA 20", line=dict(color="#6c757d", width=1.8)))
-            figC.update_layout(title="Candlestick (OHLC) + MA5/MA20", xaxis_title=None, yaxis_title="Harga (IDR)", xaxis_rangeslider_visible=False, height=460, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            figC.update_layout(
+                title="Candlestick (OHLC) + MA5/MA20",
+                xaxis_title=None,
+                yaxis_title="Harga (IDR)",
+                xaxis_rangeslider_visible=False,
+                height=460,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+
+            # === MACD cross markers on candlestick ===
+            try:
+                # Recompute MACD on available close series
+                close_m = close_series.dropna()
+                trade_m = df.loc[close_series.notna(), "trade_date"].reset_index(drop=True)
+                ema_fast = close_m.ewm(span=12, adjust=False, min_periods=1).mean()
+                ema_slow = close_m.ewm(span=26, adjust=False, min_periods=1).mean()
+                macd_line_c = ema_fast - ema_slow
+                signal_line_c = macd_line_c.ewm(span=9, adjust=False, min_periods=1).mean()
+                delta_c = macd_line_c - signal_line_c
+                prev_delta_c = delta_c.shift(1)
+                bull_idx_c = (prev_delta_c <= 0) & (delta_c > 0)
+                bear_idx_c = (prev_delta_c >= 0) & (delta_c < 0)
+
+                # Align to candlestick subset (only rows with full OHLC)
+                t_cdl = df_cdl["trade_date"].reset_index(drop=True)
+                map_low  = pd.Series(low_c.values,  index=t_cdl)
+                map_high = pd.Series(high_c.values, index=t_cdl)
+
+                bull_dates = trade_m[bull_idx_c]
+                bear_dates = trade_m[bear_idx_c]
+                bull_dates = [d for d in bull_dates if d in map_low.index]
+                bear_dates = [d for d in bear_dates if d in map_high.index]
+
+                if len(bull_dates) > 0:
+                    yb = [float(map_low[d]) * 0.995 for d in bull_dates]
+                    figC.add_trace(go.Scatter(x=bull_dates, y=yb, mode="markers", name="Bullish cross (MACD)",
+                                              marker=dict(symbol="triangle-up", size=12, color="#22c55e")))
+                if len(bear_dates) > 0:
+                    ya = [float(map_high[d]) * 1.005 for d in bear_dates]
+                    figC.add_trace(go.Scatter(x=bear_dates, y=ya, mode="markers", name="Bearish cross (MACD)",
+                                              marker=dict(symbol="triangle-down", size=12, color="#ef4444")))
+            except Exception:
+                pass
+
             _apply_time_axis(figC, df_cdl["trade_date"], start, end, hide_non_trading)
             st.plotly_chart(figC, use_container_width=True)
     else:
@@ -447,11 +490,25 @@ if price_series is not None and price_series.notna().any():
     _apply_time_axis(figM, sub_m["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(figM, use_container_width=True)
 
-    # Status ringkas
+    # Status ringkas & alert cross terbaru
     try:
         delta_val = float(delta.iloc[-1])
         status = "Bullish" if delta_val > 0 else "Bearish"
-        st.caption(f"📉 MACD status: **{status}** (MACD - Signal = {delta_val:.2f}).")
+        # last cross detection
+        last_cross_type = None
+        last_cross_date = None
+        if bull_idx.any():
+            last_bull_date = sub_m.loc[bull_idx, "trade_date"].iloc[-1]
+            last_cross_type, last_cross_date = "Bullish", last_bull_date
+        if bear_idx.any():
+            last_bear_date = sub_m.loc[bear_idx, "trade_date"].iloc[-1]
+            if last_cross_date is None or pd.to_datetime(last_bear_date) > pd.to_datetime(last_cross_date):
+                last_cross_type, last_cross_date = "Bearish", last_bear_date
+        if last_cross_date is not None:
+            end_dt = pd.to_datetime(df["trade_date"].max())
+            days_ago = (end_dt.date() - pd.to_datetime(last_cross_date).date()).days
+            st.caption(f"⚡️ Cross terbaru: **{last_cross_type}** pada **{pd.to_datetime(last_cross_date).date()}** · {days_ago} hari lalu.")
+        st.caption(f"📉 MACD status saat ini: **{status}** (MACD - Signal = {delta_val:.2f}).")
     except Exception:
         pass
 
