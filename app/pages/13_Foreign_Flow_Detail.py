@@ -1,8 +1,9 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus
-# v3.2: Hapus tanggal tanpa data di SEMUA chart + weekend/holiday rangebreaks
+# v3.3: Toggle "Hide non-trading days" + tombol cepat range tanggal + hapus tanggal kosong di semua chart
 
 from datetime import date, timedelta
+from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -48,6 +49,19 @@ def date_bounds():
             today = date.today()
             return (today - timedelta(days=60), today)
         return (pd.to_datetime(mn).date(), pd.to_datetime(mx).date())
+    finally:
+        _close(con)
+
+@st.cache_data(ttl=300)
+def get_trade_dates(kode: str) -> pd.Series:
+    """Semua trade_date untuk saham tertentu (ascending)."""
+    con = get_db_connection(); _alive(con)
+    try:
+        q = "SELECT trade_date FROM data_harian WHERE kode_saham=%s ORDER BY trade_date"
+        df = pd.read_sql(q, con, params=[kode])
+        if df.empty:
+            return pd.Series(dtype="datetime64[ns]")
+        return pd.to_datetime(df["trade_date"])  # Series datetime
     finally:
         _close(con)
 
@@ -102,8 +116,10 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
     finally:
         _close(con)
 
-# === NEW: rangebreaks util (hapus weekend & tanggal tanpa trading) ===
-def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date):
+# === rangebreaks util (hapus weekend & tanggal tanpa trading) ===
+def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
+    if not hide_non_trading:
+        return []
     # Weekend
     rb = [dict(bounds=["sat", "mon"])]
     # Hari kerja yang tidak ada trading (libur bursa)
@@ -117,12 +133,14 @@ def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date):
             rb.append(dict(values=holidays))
     return rb
 
-# === NEW: helper untuk apply x-axis konsisten ===
-def _apply_time_axis(fig, trade_dates: pd.Series, start: date, end: date):
-    fig.update_xaxes(rangebreaks=_compute_rangebreaks(trade_dates, start, end))
+# helper untuk apply x-axis konsisten
+
+def _apply_time_axis(fig, trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
+    fig.update_xaxes(rangebreaks=_compute_rangebreaks(trade_dates, start, end, hide_non_trading))
     return fig
 
-# === metrics helper ===
+# metrics helper
+
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # Net Foreign
@@ -172,8 +190,7 @@ def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
 
     df["vol_avg"] = pd.to_numeric(df.get("volume"), errors="coerce").rolling(20, min_periods=1).mean()
     df["ratio"] = df["nilai"] / df["adv"]
-    # === FIX: cumsum aman dari NaN ===
-    df["cum_nf"] = df["net_foreign_value"].fillna(0).cumsum()
+    df["cum_nf"] = df["net_foreign_value"].fillna(0).cumsum()  # cumsum aman NaN
     df.attrs["adv_label"] = adv_label
     return df
 
@@ -204,13 +221,52 @@ def format_money(v, dec=0):
 codes = list_codes()
 min_d, max_d = date_bounds()
 
-c1, c2, c3 = st.columns([1,1,1])
-with c1:
+c0 = st.columns([1,1,1])[0]
+with c0:
     kode = st.selectbox("Pilih saham", options=codes, index=0 if codes else None)
+
+# Toggle hide non-trading days
+hide_non_trading = st.checkbox("Hide non-trading days (skip weekend & libur bursa)", value=True)
+
+# Tombol cepat range tanggal
+if "start_date" not in st.session_state or "end_date" not in st.session_state:
+    # default 1 Tahun terakhir
+    st.session_state["end_date"] = max_d
+    st.session_state["start_date"] = max(min_d, max_d - relativedelta(years=1))
+
+if kode:
+    td_series = get_trade_dates(kode)
+    td_min = td_series.min().date() if not td_series.empty else min_d
+    td_max = td_series.max().date() if not td_series.empty else max_d
+
+    cbtn = st.columns(6)
+    if cbtn[0].button("All"):
+        st.session_state["start_date"], st.session_state["end_date"] = td_min, td_max
+    if cbtn[1].button("1 Tahun"):
+        st.session_state["end_date"] = td_max
+        st.session_state["start_date"] = max(td_min, td_max - relativedelta(years=1))
+    if cbtn[2].button("6 Bulan"):
+        st.session_state["end_date"] = td_max
+        st.session_state["start_date"] = max(td_min, td_max - relativedelta(months=6))
+    if cbtn[3].button("3 Bulan"):
+        st.session_state["end_date"] = td_max
+        st.session_state["start_date"] = max(td_min, td_max - relativedelta(months=3))
+    if cbtn[4].button("1 Bulan"):
+        st.session_state["end_date"] = td_max
+        st.session_state["start_date"] = max(td_min, td_max - relativedelta(months=1))
+    if cbtn[5].button("5 Hari"):
+        st.session_state["end_date"] = td_max
+        if not td_series.empty and len(td_series) >= 5:
+            st.session_state["start_date"] = td_series.iloc[-5].date()
+        else:
+            st.session_state["start_date"] = max(td_min, td_max - timedelta(days=7))
+
+# Date inputs (boleh override manual)
+c1, c2 = st.columns([1,1])
+with c1:
+    start = st.date_input("Dari tanggal", value=st.session_state.get("start_date", max(min_d, max_d - relativedelta(years=1))), min_value=min_d, max_value=max_d, key="start_date")
 with c2:
-    start = st.date_input("Dari tanggal", value=max(min_d, max_d - timedelta(days=60)), min_value=min_d, max_value=max_d)
-with c3:
-    end = st.date_input("Sampai tanggal", value=max_d, min_value=min_d, max_value=max_d)
+    end = st.date_input("Sampai tanggal", value=st.session_state.get("end_date", max_d), min_value=min_d, max_value=max_d, key="end_date")
 
 c4, c5, c6 = st.columns([1,1,1])
 with c4:
@@ -367,7 +423,7 @@ if show_price:
                 height=460,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            _apply_time_axis(figC, df_cdl["trade_date"], start, end)
+            _apply_time_axis(figC, df_cdl["trade_date"], start, end, hide_non_trading)
             st.plotly_chart(figC, use_container_width=True)
     else:
         st.info("Candlestick belum bisa ditampilkan karena kolom OHLC tidak lengkap pada rentang ini.")
@@ -392,7 +448,7 @@ if show_price and price_series is not None and price_series.notna().any():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=420,
     )
-    _apply_time_axis(fig1, df["trade_date"], start, end)
+    _apply_time_axis(fig1, df["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig1, use_container_width=True)
 else:
     sub_nf = df[df["net_foreign_value"].notna()]
@@ -400,7 +456,7 @@ else:
                    color=(sub_nf["net_foreign_value"]>=0).map({True:"Net Buy", False:"Net Sell"}),
                    color_discrete_map={"Net Buy":"#33B766","Net Sell":"#DC3545"})
     fig1b.update_layout(height=360, xaxis_title=None, yaxis_title="Net Foreign (Rp)", legend_title=None)
-    _apply_time_axis(fig1b, sub_nf["trade_date"], start, end)
+    _apply_time_axis(fig1b, sub_nf["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig1b, use_container_width=True)
 
 # ---------- 2) Cumulative Net Foreign vs Close ----------
@@ -419,12 +475,12 @@ if show_price and price_series is not None and price_series.notna().any():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=420,
     )
-    _apply_time_axis(fig2, df["trade_date"], start, end)
+    _apply_time_axis(fig2, df["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig2, use_container_width=True)
 else:
     fig2b = px.line(df, x="trade_date", y="cum_nf", title="Kumulatif Net Foreign")
     fig2b.update_layout(height=360, xaxis_title=None, yaxis_title="Cum. Net Foreign")
-    _apply_time_axis(fig2b, df["trade_date"], start, end)
+    _apply_time_axis(fig2b, df["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig2b, use_container_width=True)
 
 # ---------- 3) Buy vs Sell (stacked) ----------
@@ -442,7 +498,7 @@ if has_buy_sell_cols:
                       title="Foreign Buy vs Sell (Rp)",
                       color_discrete_map={"foreign_buy":"#0d6efd","foreign_sell":"#DC3545"})
         fig3.update_layout(barmode="stack", height=360, xaxis_title=None, yaxis_title="Rp", legend_title=None)
-        _apply_time_axis(fig3, sub["trade_date"], start, end)
+        _apply_time_axis(fig3, sub["trade_date"], start, end, hide_non_trading)
         st.plotly_chart(fig3, use_container_width=True)
     else:
         st.info("Data Foreign Buy/Sell tidak tersedia untuk rentang ini.")
@@ -467,7 +523,7 @@ fig4.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=420,
 )
-_apply_time_axis(fig4, df["trade_date"], start, end)
+_apply_time_axis(fig4, df["trade_date"], start, end, hide_non_trading)
 st.plotly_chart(fig4, use_container_width=True)
 
 # ---------- 5) Volume vs rolling avg ----------
@@ -480,7 +536,7 @@ if "volume" in df.columns:
     fig5.add_trace(go.Scatter(x=sub_va["trade_date"], y=sub_va["vol_avg"], name="Vol AVG(20)", line=dict(color="#198754", width=2)))
     fig5.update_layout(title="Volume vs AVG(20)", xaxis_title=None, yaxis_title="Lembar", height=360,
                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    _apply_time_axis(fig5, df["trade_date"], start, end)
+    _apply_time_axis(fig5, df["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig5, use_container_width=True)
 
 # ---------- 6) Spread (bps) ----------
@@ -493,7 +549,7 @@ if show_spread and "spread_bps" in df.columns:
         if p75 is not None:
             fig6.add_hline(y=p75, line_dash="dot", line_color="#dc3545", annotation_text=f"P75 ≈ {p75:.1f}")
         fig6.update_layout(height=320, xaxis_title=None, yaxis_title="bps")
-        _apply_time_axis(fig6, sub_sp["trade_date"], start, end)
+        _apply_time_axis(fig6, sub_sp["trade_date"], start, end, hide_non_trading)
         st.plotly_chart(fig6, use_container_width=True)
 
 # ---------- 7) Distribusi Net Foreign (bukan time-axis) ----------
@@ -522,4 +578,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Semua chart pakai rangebreaks: weekend otomatis di-skip dan tanggal hari kerja tanpa trading (libur bursa) juga disembunyikan. Setiap trace sudah difilter supaya hanya tanggal dengan data yang tampil, jadi nggak ada tanggal kosong.")
+st.caption("💡 Toggle 'Hide non-trading days' untuk skip weekend & libur bursa. Gunakan tombol cepat All/1Y/6M/3M/1M/5D untuk set rentang dengan sekali klik. Semua chart hanya menampilkan tanggal yang memiliki data.")
