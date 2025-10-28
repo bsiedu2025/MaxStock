@@ -1,10 +1,9 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus
-# v3.4 UIX: layout rapi & profesional
-# - Range tanggal pakai satu widget (date range)
-# - Quick range pakai radio horizontal (pills)
-# - Hilangkan warning Session State (jangan set value & key bersamaan)
-# - Toggle Hide non-trading days tetap ada, semua chart pakai rangebreaks saat ON
+# v3.5 UIX compact: filter utama 1 baris (Saham, ADV, Rentang Tanggal)
+# - Quick range radio tetap di bawahnya
+# - Toggle Hide non-trading di ujung kanan baris filter
+# - Hindari Session State warning (pakai key saja, default via session_state)
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -23,13 +22,12 @@ st.set_page_config(page_title="📈 Pergerakan Harian (Foreign Flow)", page_icon
 st.markdown(
     """
     <style>
-    /* tighten top spacing */
     section.main > div { padding-top: .5rem; }
     /* radio as segmented pills */
     div[role='radiogroup'] { display: flex; flex-wrap: wrap; gap: .25rem .5rem; }
     div[role='radiogroup'] label { border:1px solid #e5e7eb; padding:6px 12px; border-radius:9999px; background:#fff; }
-    /* smaller captions */
-    .small-note { color:#6b7280; font-size: .85rem; }
+    /* compact labels */
+    .stSelectbox > label, .stDateInput > label, .stRadio > label { font-weight: 600; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -215,43 +213,50 @@ def format_money(v, dec=0):
     try: return f"{float(v):,.{dec}f}".replace(",", ".")
     except: return "-"
 
-# ---------- UI (rapi) ----------
+# ---------- UI (compact filter bar) ----------
 codes = list_codes()
 min_d, max_d = date_bounds()
 
-# defaults session state
+# defaults
+if "kode_saham" not in st.session_state:
+    st.session_state["kode_saham"] = (codes[0] if codes else None)
+if "adv_mode" not in st.session_state:
+    st.session_state["adv_mode"] = "All (Default)"
 if "date_range" not in st.session_state:
     st.session_state["date_range"] = (max(min_d, max_d - relativedelta(years=1)), max_d)
 if "range_choice" not in st.session_state:
     st.session_state["range_choice"] = "1 Tahun"
 if "hide_non_trading" not in st.session_state:
     st.session_state["hide_non_trading"] = True
+if "show_price" not in st.session_state:
+    st.session_state["show_price"] = True
+if "show_spread" not in st.session_state:
+    st.session_state["show_spread"] = True
 
-# === FILTER BAR ===
+# === FILTER ROW (one line) ===
 with st.container():
-    f1, f2 = st.columns([2,1])
+    f1, f2, f3, f4 = st.columns([1.3, 1.0, 1.6, 1.1])
     with f1:
-        kode = st.selectbox("Pilih saham", options=codes, index=0 if codes else None)
+        st.selectbox("Pilih saham", options=codes, key="kode_saham")
     with f2:
+        st.selectbox("ADV window (hari)", ["All (Default)", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan"], key="adv_mode")
+    with f3:
+        st.date_input("Rentang tanggal", key="date_range", min_value=min_d, max_value=max_d)
+    with f4:
         st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
 
+kode = st.session_state.get("kode_saham")
 if not kode:
     st.stop()
 
-# quick range (radio pills)
+# quick range radio (row 2)
 with st.container():
     td_series = get_trade_dates(kode)
     td_min = td_series.min().date() if not td_series.empty else min_d
     td_max = td_series.max().date() if not td_series.empty else max_d
 
-    st.radio(
-        "Range cepat",
-        ["All", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan", "5 Hari", "Custom"],
-        key="range_choice",
-        horizontal=True,
-    )
+    st.radio("Range cepat", ["All", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan", "5 Hari", "Custom"], key="range_choice", horizontal=True)
 
-    # apply quick range only when not Custom
     def _apply_quick(choice: str):
         if choice == "Custom":
             return
@@ -272,7 +277,6 @@ with st.container():
                 start = max(td_min, td_max - timedelta(days=7))
         elif choice == "All":
             start, end = td_min, td_max
-        # update only if different
         if st.session_state.get("date_range") != (start, end):
             st.session_state["date_range"] = (start, end)
             try:
@@ -282,33 +286,20 @@ with st.container():
 
     _apply_quick(st.session_state.get("range_choice", "1 Tahun"))
 
-# date range input (single widget)
-with st.container():
-    dr = st.date_input(
-        "Rentang tanggal",
-        key="date_range",
-        min_value=min_d,
-        max_value=max_d,
-    )
-    # Jika user edit manual, set quick range ke Custom
-    if isinstance(dr, tuple) and dr == st.session_state.get("date_range") and st.session_state.get("range_choice") != "Custom":
-        pass
-    else:
-        st.session_state["range_choice"] = "Custom"
-
-start, end = st.session_state["date_range"]
-
-# ADV, show flags
-with st.container():
-    c4, c5, c6 = st.columns([1,1,1])
-    with c4:
-        adv_mode = st.selectbox("ADV window (hari)", ["All (Default)", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan"], index=0)
-    with c5:
-        show_price = st.checkbox("Tampilkan harga (jika tersedia)", value=True)
-    with c6:
-        show_spread = st.checkbox("Tampilkan spread (bps) jika tersedia", value=True)
+# feature toggles (row 3, compact)
+ft1, ft2 = st.columns([1,1])
+with ft1:
+    st.checkbox("Tampilkan harga (jika tersedia)", key="show_price")
+with ft2:
+    st.checkbox("Tampilkan spread (bps) jika tersedia", key="show_spread")
 
 # ---------- Data ----------
+start, end = st.session_state["date_range"]
+adv_mode = st.session_state["adv_mode"]
+show_price = st.session_state["show_price"]
+show_spread = st.session_state["show_spread"]
+hide_non_trading = st.session_state["hide_non_trading"]
+
 df_raw = load_series(kode, start, end)
 if df_raw.empty:
     st.warning("Data kosong untuk rentang ini.")
@@ -350,44 +341,7 @@ if df["net_foreign_value"].notna().any():
     st.caption(f"🔎 Hari Net Buy terbesar: **{max_buy_day['trade_date'].date()}** ({idr_short(max_buy_day['net_foreign_value'])})")
     st.caption(f"🔎 Hari Net Sell terbesar: **{max_sell_day['trade_date'].date()}** ({idr_short(max_sell_day['net_foreign_value'])})")
 
-# derive harga
-last_close = price_series.dropna().iloc[-1] if (price_series is not None and price_series.notna().any()) else np.nan
-if "selisih" in df.columns and df["selisih"].notna().any():
-    change_val = pd.to_numeric(df["selisih"], errors="coerce").dropna().iloc[-1]
-    if "sebelumnya" in df.columns and pd.notna(df["sebelumnya"].iloc[-1]) and df["sebelumnya"].iloc[-1] != 0:
-        change_pct = change_val / float(df["sebelumnya"].iloc[-1]) * 100
-    else:
-        change_pct = np.nan
-else:
-    if "penutupan" in df.columns and "sebelumnya" in df.columns:
-        prev = pd.to_numeric(df["sebelumnya"], errors="coerce").dropna().iloc[-1] if df["sebelumnya"].notna().any() else np.nan
-        cls  = pd.to_numeric(df["penutupan"], errors="coerce").dropna().iloc[-1] if df["penutupan"].notna().any() else np.nan
-        change_val = cls - prev if pd.notna(cls) and pd.notna(prev) else np.nan
-        change_pct = (change_val / prev * 100) if pd.notna(change_val) and prev not in [0, np.nan] else np.nan
-    else:
-        change_val = np.nan
-        change_pct = np.nan
-
-high_p = pd.to_numeric(df.get("tertinggi"), errors="coerce").max(skipna=True) if "tertinggi" in df.columns else np.nan
-low_p  = pd.to_numeric(df.get("terendah"),  errors="coerce").min(skipna=True) if "terendah"  in df.columns else np.nan
-sma5   = price_series.rolling(5, min_periods=1).mean().dropna().iloc[-1] if (price_series is not None and price_series.notna().any()) else np.nan
-
-st.markdown("### Ringkasan Metrik")
-a,b,c = st.columns(3)
-with a:
-    st.metric("Harga Terakhir (IDR)", format_money(last_close) if pd.notna(last_close) else "-")
-    st.metric("Perubahan Harga", format_money(change_val) if pd.notna(change_val) else "-", delta=(fmt_pct(change_pct) if pd.notna(change_pct) else None))
-with b:
-    st.metric("Tertinggi (Periode Filter)", format_money(high_p) if pd.notna(high_p) else "-")
-    st.metric("Terendah (Periode Filter)",  format_money(low_p)  if pd.notna(low_p)  else "-")
-with c:
-    st.metric("SMA 5 Hari (IDR)", format_money(sma5) if pd.notna(sma5) else "-")
-
-st.divider()
-
 # ---------- Charts ----------
-hide_non_trading = st.session_state.get("hide_non_trading", True)
-
 # Candlestick
 if show_price:
     open_series = None
@@ -475,11 +429,11 @@ else:
 # Nilai vs ADV + Ratio
 fig4 = go.Figure()
 sub_nilai = df[df["nilai"].notna()][["trade_date","nilai"]]
-fig4.add_bar(x=sub_nilai["trade_date"], y=sub_nilai["nilai"], name="Nilai (Rp)", marker_color="rgba(13,110,253,.6)")
+fig4.add_bar(x=sub_nilai["trade_date"], y=sub_nilai["nilai"], name="Nilai (Rp)")
 sub_adv = df[df["adv"].notna()][["trade_date","adv"]]
-fig4.add_trace(go.Scatter(x=sub_adv["trade_date"], y=sub_adv["adv"],   name=f"ADV ({df.attrs.get('adv_label','ADV')})", line=dict(color="#495057", width=2)))
+fig4.add_trace(go.Scatter(x=sub_adv["trade_date"], y=sub_adv["adv"],   name=f"ADV ({df.attrs.get('adv_label','ADV')})"))
 sub_ratio = df[df["ratio"].notna()][["trade_date","ratio"]]
-fig4.add_trace(go.Scatter(x=sub_ratio["trade_date"], y=sub_ratio["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2", line=dict(color="#20c997", width=2)))
+fig4.add_trace(go.Scatter(x=sub_ratio["trade_date"], y=sub_ratio["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2"))
 fig4.update_layout(title=f"Nilai vs ADV ({df.attrs.get('adv_label','ADV')}) + Ratio", xaxis_title=None, yaxis=dict(title="Rp"), yaxis2=dict(title="Ratio (x)", overlaying="y", side="right"), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), height=420)
 _apply_time_axis(fig4, df["trade_date"], start, end, hide_non_trading)
 st.plotly_chart(fig4, use_container_width=True)
@@ -488,9 +442,9 @@ st.plotly_chart(fig4, use_container_width=True)
 if "volume" in df.columns:
     fig5 = go.Figure()
     sub_v  = df[df["volume"].notna()][["trade_date","volume"]]
-    fig5.add_bar(x=sub_v["trade_date"], y=sub_v["volume"], name="Volume", marker_color="rgba(32,201,151,.6)")
+    fig5.add_bar(x=sub_v["trade_date"], y=sub_v["volume"], name="Volume")
     sub_va = df[df["vol_avg"].notna()][["trade_date","vol_avg"]]
-    fig5.add_trace(go.Scatter(x=sub_va["trade_date"], y=sub_va["vol_avg"], name="Vol AVG(20)", line=dict(color="#198754", width=2)))
+    fig5.add_trace(go.Scatter(x=sub_va["trade_date"], y=sub_va["vol_avg"], name="Vol AVG(20)"))
     fig5.update_layout(title="Volume vs AVG(20)", xaxis_title=None, yaxis_title="Lembar", height=360, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     _apply_time_axis(fig5, df["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(fig5, use_container_width=True)
@@ -527,4 +481,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Quick range = All/1Y/6M/3M/1M/5D. Rentang tanggal bisa diubah manual (otomatis switch ke *Custom*). Toggle untuk menyembunyikan hari non-trading. Semua chart otomatis skip tanggal tanpa data.")
+st.caption("💡 Filter utama ada di satu baris (Saham, ADV, Rentang Tanggal) + toggle di kanan. Quick range All/1Y/6M/3M/1M/5D tersedia di bawahnya. Semua chart skip tanggal non-trading saat toggle diaktifkan.")
