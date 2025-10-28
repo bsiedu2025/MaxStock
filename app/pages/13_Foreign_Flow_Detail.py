@@ -33,7 +33,7 @@ st.markdown(
     .checks-row { display:flex; align-items:center; gap: 1.25rem; }
     .checks-row div[data-testid='stCheckbox'] { margin-bottom: 0 !important; }
     /* sticky filter bar */
-    .sticky-filter { position: sticky; top: 0; z-index: 1000; background: rgba(255,255,255,.92); backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding: .5rem .25rem .75rem .25rem; }
+    .sticky-filter { position: sticky; top: 0; z-index: 1000; background: rgba(255,255,255,.96); backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding: .5rem .25rem .75rem .25rem; box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04); transition: box-shadow .2s ease, background .2s ease; }
     </style>
     """,
     unsafe_allow_html=True,
