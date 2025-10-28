@@ -1,6 +1,5 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus
-# by bro GPT 😄
+# Daily Stock Movement – Foreign Flow Focus (robust to missing columns)
 
 from datetime import date, timedelta
 import pandas as pd
@@ -55,26 +54,54 @@ def date_bounds() -> tuple[date, date]:
 @st.cache_data(ttl=300, show_spinner=False)
 def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
     """
-    Ambil kolom inti; kalau net_foreign_value/spread_bps belum ada di tabel,
-    kita turunkan dari foreign_buy/sell dan bid/offer.
+    Ambil kolom inti secara dinamis: hanya SELECT kolom yang memang ada.
+    Kolom yang tidak ada akan ditambahkan sebagai NaN agar downstream aman.
     """
     con = get_db_connection(); _alive(con)
     try:
-        sql = """
-        SELECT
-          trade_date, kode_saham, nama_perusahaan,
-          nilai, volume, freq,
-          foreign_buy, foreign_sell,
-          /* kalau ada kolom turunan ini akan ikut; kalau tidak ada nanti dihitung di python */
-          net_foreign_value,
-          bid, offer,
-          spread_bps,
-          close_price
+        # cek kolom yang tersedia
+        cols_df = pd.read_sql(
+            "SELECT LOWER(column_name) AS col FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'data_harian'",
+            con
+        )
+        avail = set(cols_df["col"].tolist())
+
+        # base + optional
+        base_cols = ["trade_date", "kode_saham"]
+        if "nama_perusahaan" in avail:
+            base_cols.append("nama_perusahaan")
+
+        optional = [
+            "nilai", "volume", "freq",
+            "foreign_buy", "foreign_sell",
+            "net_foreign_value",
+            "bid", "offer",
+            "spread_bps",
+            "close_price",
+        ]
+        select_cols = [c for c in base_cols + optional if c in avail]
+        if "trade_date" not in select_cols or "kode_saham" not in select_cols:
+            # safety guard — tabel harus punya dua kolom ini
+            raise RuntimeError("Kolom minimal 'trade_date' dan 'kode_saham' harus ada di data_harian")
+
+        sql = f"""
+        SELECT {", ".join(select_cols)}
         FROM data_harian
         WHERE kode_saham=%s AND trade_date BETWEEN %s AND %s
         ORDER BY trade_date
         """
         df = pd.read_sql(sql, con, params=[kode, start, end])
+
+        # tambahkan kolom yang belum ada agar downstream seragam
+        wanted = set(["nama_perusahaan","nilai","volume","freq","foreign_buy","foreign_sell",
+                      "net_foreign_value","bid","offer","spread_bps","close_price"])
+        for c in (wanted - set(df.columns.str.lower())):
+            df[c] = np.nan
+
+        # rapikan urutan kolom (tidak wajib)
+        ordered = base_cols + [c for c in optional if c in df.columns]
+        df = df[[c for c in ordered if c in df.columns]]
         return df
     finally:
         _close(con)
@@ -84,15 +111,16 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     # Net Foreign Value
     if "net_foreign_value" not in df.columns or df["net_foreign_value"].isna().all():
         if {"foreign_buy","foreign_sell"}.issubset(df.columns):
-            df["net_foreign_value"] = (df["foreign_buy"].fillna(0) - df["foreign_sell"].fillna(0)).astype(float)
+            df["net_foreign_value"] = (pd.to_numeric(df["foreign_buy"], errors="coerce").fillna(0)
+                                       - pd.to_numeric(df["foreign_sell"], errors="coerce").fillna(0))
         else:
             df["net_foreign_value"] = np.nan
 
     # Spread bps
     if "spread_bps" not in df.columns or df["spread_bps"].isna().all():
         if {"bid","offer"}.issubset(df.columns):
-            b = df["bid"].astype(float)
-            o = df["offer"].astype(float)
+            b = pd.to_numeric(df["bid"], errors="coerce")
+            o = pd.to_numeric(df["offer"], errors="coerce")
             with np.errstate(divide="ignore", invalid="ignore"):
                 spread = (o - b) / ((o + b)/2) * 10000
             spread[(b<=0)|(o<=0)|(b.isna())|(o.isna())] = np.nan
@@ -100,7 +128,7 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df["spread_bps"] = np.nan
 
-    # Pastikan tipe numerik
+    # tipe numerik penting
     for c in ["nilai","volume","foreign_buy","foreign_sell","net_foreign_value","close_price"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -154,7 +182,7 @@ if df_raw.empty:
 df = add_rolling(ensure_metrics(df_raw), adv_n=adv_n)
 
 # ---------- Insight Cards ----------
-nama = df["nama_perusahaan"].dropna().iloc[-1] if df["nama_perusahaan"].notna().any() else "-"
+nama = df["nama_perusahaan"].dropna().iloc[-1] if "nama_perusahaan" in df.columns and df["nama_perusahaan"].notna().any() else "-"
 total_buy = df["foreign_buy"].sum(skipna=True) if "foreign_buy" in df.columns else np.nan
 total_sell = df["foreign_sell"].sum(skipna=True) if "foreign_sell" in df.columns else np.nan
 total_nf = df["net_foreign_value"].sum(skipna=True)
@@ -187,11 +215,9 @@ if max_sell_day is not None and pd.notna(max_sell_day["net_foreign_value"]):
 st.markdown("---")
 
 # ---------- Charts ----------
-
 # 1) Price + Net Foreign bar (dual-axis)
 if show_price and "close_price" in df.columns and df["close_price"].notna().any():
     fig1 = go.Figure()
-    # Bar net foreign (green/red)
     colors = np.where(df["net_foreign_value"]>=0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
     fig1.add_bar(x=df["trade_date"], y=df["net_foreign_value"], name="Net Foreign (Rp)", marker_color=colors, yaxis="y2")
     fig1.add_trace(go.Scatter(x=df["trade_date"], y=df["close_price"], name="Close", mode="lines+markers",
@@ -206,7 +232,6 @@ if show_price and "close_price" in df.columns and df["close_price"].notna().any(
     )
     st.plotly_chart(fig1, use_container_width=True)
 else:
-    # Kalau nggak ada harga, tetap tampilkan bar net foreign saja
     fig1b = px.bar(df, x="trade_date", y="net_foreign_value", title="Net Foreign Harian (Rp)",
                    color=(df["net_foreign_value"]>=0).map({True:"Net Buy", False:"Net Sell"}),
                    color_discrete_map={"Net Buy":"#33B766","Net Sell":"#DC3545"})
@@ -246,7 +271,6 @@ if {"foreign_buy","foreign_sell"}.issubset(df.columns):
 fig4 = go.Figure()
 fig4.add_bar(x=df["trade_date"], y=df["nilai"], name="Nilai (Rp)", marker_color="rgba(13,110,253,.6)")
 fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["adv"], name=f"ADV({adv_n})", line=dict(color="#495057", width=2)))
-# ratio di secondary axis
 fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2",
                           line=dict(color="#20c997", width=2)))
 fig4.update_layout(
@@ -287,11 +311,13 @@ st.markdown("---")
 
 # ---------- Raw data & Export ----------
 with st.expander("Tabel data mentah (siap export)"):
-    st.dataframe(df[[
+    cols_show = [
         "trade_date","kode_saham","nama_perusahaan","nilai","adv","ratio",
         "volume","vol_avg","foreign_buy","foreign_sell","net_foreign_value",
         "spread_bps","close_price","cum_nf"
-    ]], use_container_width=True, height=360)
+    ]
+    cols_show = [c for c in cols_show if c in df.columns]
+    st.dataframe(df[cols_show], use_container_width=True, height=360)
     st.download_button(
         "⬇️ Download CSV",
         data=df.to_csv(index=False).encode("utf-8"),
@@ -299,4 +325,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Note: Jika `close_price`/`bid-offer` tidak tersedia pada sumber data, grafik yang bergantung pada kolom tersebut otomatis disembunyikan.")
+st.caption("💡 Note: Jika kolom seperti `close_price`, `bid/offer`, `freq` tidak ada pada sumber data, grafik yang bergantung pada kolom tersebut otomatis disesuaikan.")
