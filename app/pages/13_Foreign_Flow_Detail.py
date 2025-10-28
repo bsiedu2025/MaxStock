@@ -1,6 +1,6 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus
-# v2: ADV preset (All/1Y/6M/3M/1M), Indonesian short currency, Top metrics
+# v2.1: ADV preset (All/1Y/6M/3M/1M), Indonesian short currency, Top metrics ALWAYS visible
 
 from datetime import date, timedelta
 import pandas as pd
@@ -54,7 +54,7 @@ def date_bounds() -> tuple[date, date]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
-    """Dynamic SELECT: hanya ambil kolom yang memang ada; sisanya dibuat NaN."""
+    """Dynamic SELECT: ambil kolom yang tersedia; sisanya dibuat NaN."""
     con = get_db_connection(); _alive(con)
     try:
         cols_df = pd.read_sql(
@@ -250,43 +250,47 @@ if df["net_foreign_value"].notna().any():
         f"({idr_short(max_sell_day['net_foreign_value'])})"
     )
 
-# ---------- Ringkasan Metrik (harga/volume) ----------
-if show_price and "close_price" in df.columns and df["close_price"].notna().any():
-    close = pd.to_numeric(df["close_price"], errors="coerce")
-    last_close = close.dropna().iloc[-1]
-    prev_close = close.dropna().iloc[-2] if close.dropna().shape[0] >= 2 else np.nan
-    chg_val = last_close - prev_close if pd.notna(prev_close) else np.nan
-    chg_pct = (chg_val / prev_close * 100) if pd.notna(prev_close) and prev_close != 0 else np.nan
-    high_p = close.max(skipna=True)
-    low_p  = close.min(skipna=True)
-    sma5   = close.rolling(5, min_periods=1).mean().dropna().iloc[-1]
+# ---------- Ringkasan Metrik (SELALU tampil) ----------
+close = pd.to_numeric(df.get("close_price"), errors="coerce") if "close_price" in df.columns else pd.Series(dtype=float)
+has_price = close.notna().any()
 
-    vol_last = pd.to_numeric(df.get("volume"), errors="coerce").dropna()
-    vol_last = vol_last.iloc[-1] if len(vol_last) else np.nan
-    vol_jt   = vol_last / 1e6 if pd.notna(vol_last) else np.nan
+last_close = close.dropna().iloc[-1] if has_price else np.nan
+prev_close = close.dropna().iloc[-2] if has_price and close.dropna().shape[0] >= 2 else np.nan
+chg_val = last_close - prev_close if pd.notna(prev_close) else np.nan
+chg_pct = (chg_val / prev_close * 100) if pd.notna(prev_close) and prev_close != 0 else np.nan
+high_p = close.max(skipna=True) if has_price else np.nan
+low_p  = close.min(skipna=True) if has_price else np.nan
+sma5   = close.rolling(5, min_periods=1).mean().dropna().iloc[-1] if has_price else np.nan
 
-    st.markdown("### Ringkasan Metrik")
-    a,b,c = st.columns(3)
-    with a:
-        st.metric("Harga Terakhir (IDR)", format_money(last_close))
-        delta_text = f"{format_money(chg_val)}  ({fmt_pct(chg_pct)})" if pd.notna(chg_val) else "-"
-        st.metric("Perubahan Harga", format_money(chg_val) if pd.notna(chg_val) else "-", delta=fmt_pct(chg_pct) if pd.notna(chg_pct) else None)
-    with b:
-        st.metric("Tertinggi (Periode Filter)", format_money(high_p))
-        st.metric("Terendah (Periode Filter)", format_money(low_p))
-    with c:
-        st.metric("Vol. Hari Terakhir (Jt Lbr)", format_money(vol_jt, 2) if pd.notna(vol_jt) else "-")
-        st.metric("SMA 5 Hari (IDR)", format_money(sma5))
+vol_last = pd.to_numeric(df.get("volume"), errors="coerce")
+vol_last = vol_last.dropna().iloc[-1] if vol_last.notna().any() else np.nan
+vol_jt   = vol_last / 1e6 if pd.notna(vol_last) else np.nan
+
+st.markdown("### Ringkasan Metrik")
+a,b,c = st.columns(3)
+with a:
+    st.metric("Harga Terakhir (IDR)", format_money(last_close) if pd.notna(last_close) else "-")
+    st.metric(
+        "Perubahan Harga",
+        format_money(chg_val) if pd.notna(chg_val) else "-",
+        delta=(fmt_pct(chg_pct) if pd.notna(chg_pct) else None)
+    )
+with b:
+    st.metric("Tertinggi (Periode Filter)", format_money(high_p) if pd.notna(high_p) else "-")
+    st.metric("Terendah (Periode Filter)", format_money(low_p) if pd.notna(low_p) else "-")
+with c:
+    st.metric("Vol. Hari Terakhir (Jt Lbr)", format_money(vol_jt, 2) if pd.notna(vol_jt) else "-")
+    st.metric("SMA 5 Hari (IDR)", format_money(sma5) if pd.notna(sma5) else "-")
 
 st.markdown("---")
 
 # ---------- Charts ----------
 # 1) Price + Net Foreign bar (dual-axis)
-if show_price and "close_price" in df.columns and df["close_price"].notna().any():
+if show_price and has_price:
     fig1 = go.Figure()
     colors = np.where(df["net_foreign_value"]>=0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
     fig1.add_bar(x=df["trade_date"], y=df["net_foreign_value"], name="Net Foreign (Rp)", marker_color=colors, yaxis="y2")
-    fig1.add_trace(go.Scatter(x=df["trade_date"], y=df["close_price"], name="Close", mode="lines+markers",
+    fig1.add_trace(go.Scatter(x=df["trade_date"], y=close, name="Close", mode="lines+markers",
                               line=dict(color=THEME, width=2.2)))
     fig1.update_layout(
         title="Close vs Net Foreign Harian",
@@ -305,10 +309,10 @@ else:
     st.plotly_chart(fig1b, use_container_width=True)
 
 # 2) Cumulative Net Foreign vs Price
-if show_price and "close_price" in df.columns and df["close_price"].notna().any():
+if show_price and has_price:
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=df["trade_date"], y=df["cum_nf"], name="Cum. Net Foreign", line=dict(color="#6f42c1", width=2.2)))
-    fig2.add_trace(go.Scatter(x=df["trade_date"], y=df["close_price"], name="Close", yaxis="y2",
+    fig2.add_trace(go.Scatter(x=df["trade_date"], y=close, name="Close", yaxis="y2",
                               line=dict(color=THEME, width=2), opacity=0.9))
     fig2.update_layout(
         title="Kumulatif Net Foreign vs Close",
@@ -408,4 +412,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Kolom yang tidak tersedia (mis. close_price, bid/offer, foreign_buy/sell) akan otomatis disembunyikan dari grafik/metrik.")
+st.caption("💡 Panel Ringkasan Metrik selalu tampil. Item yang datanya belum tersedia (mis. close_price) akan ditandai dengan '-'.")
