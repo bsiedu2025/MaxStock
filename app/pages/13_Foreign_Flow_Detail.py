@@ -28,6 +28,9 @@ st.markdown(
     div[role='radiogroup'] label { border:1px solid #e5e7eb; padding:6px 12px; border-radius:9999px; background:#fff; }
     /* compact labels */
     .stSelectbox > label, .stDateInput > label, .stRadio > label { font-weight: 600; }
+    /* inline checks */
+    .checks-row { display:flex; align-items:center; gap: 1.25rem; }
+    .checks-row div[data-testid='stCheckbox'] { margin-bottom: 0 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -286,12 +289,14 @@ with st.container():
 
     _apply_quick(st.session_state.get("range_choice", "1 Tahun"))
 
-# feature toggles (row 3, compact)
-ft1, ft2 = st.columns([1,1])
-with ft1:
+# feature toggles (row 3, compact, one line)
+st.markdown("<div class='checks-row'>", unsafe_allow_html=True)
+colA, colB = st.columns([1,1])
+with colA:
     st.checkbox("Tampilkan harga (jika tersedia)", key="show_price")
-with ft2:
+with colB:
     st.checkbox("Tampilkan spread (bps) jika tersedia", key="show_spread")
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------- Data ----------
 start, end = st.session_state["date_range"]
