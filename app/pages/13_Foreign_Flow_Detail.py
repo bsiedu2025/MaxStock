@@ -1,6 +1,6 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus
-# v3.1: Candlestick skip tanggal tanpa data OHLC
+# v3.2: Hapus tanggal tanpa data di SEMUA chart + weekend/holiday rangebreaks
 
 from datetime import date, timedelta
 import pandas as pd
@@ -102,6 +102,27 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
     finally:
         _close(con)
 
+# === NEW: rangebreaks util (hapus weekend & tanggal tanpa trading) ===
+def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date):
+    # Weekend
+    rb = [dict(bounds=["sat", "mon"])]
+    # Hari kerja yang tidak ada trading (libur bursa)
+    if trade_dates is not None and len(trade_dates) > 0:
+        td = pd.to_datetime(trade_dates).dt.normalize().unique()
+        td_set = set(td)
+        all_days = pd.date_range(start, end, freq="D")
+        weekdays = all_days[all_days.weekday < 5]
+        holidays = [d.to_pydatetime() for d in weekdays if d.to_datetime64() not in td_set]
+        if len(holidays) > 0:
+            rb.append(dict(values=holidays))
+    return rb
+
+# === NEW: helper untuk apply x-axis konsisten ===
+def _apply_time_axis(fig, trade_dates: pd.Series, start: date, end: date):
+    fig.update_xaxes(rangebreaks=_compute_rangebreaks(trade_dates, start, end))
+    return fig
+
+# === metrics helper ===
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # Net Foreign
@@ -131,8 +152,32 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["trade_date"] = pd.to_datetime(df["trade_date"])  # datetime index
     return df
+
+# rolling & derived
+
+def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
+    df = df.sort_values("trade_date").copy()
+    nilai = pd.to_numeric(df.get("nilai"), errors="coerce")
+
+    mode_to_win = {"1 Bulan":20, "3 Bulan":60, "6 Bulan":120, "1 Tahun":252}
+    if adv_mode == "All (Default)":
+        df["adv"] = nilai.expanding().mean()
+        adv_label = "All"
+    else:
+        win = mode_to_win.get(adv_mode, 20)
+        df["adv"] = nilai.rolling(win, min_periods=1).mean()
+        adv_label = adv_mode
+
+    df["vol_avg"] = pd.to_numeric(df.get("volume"), errors="coerce").rolling(20, min_periods=1).mean()
+    df["ratio"] = df["nilai"] / df["adv"]
+    # === FIX: cumsum aman dari NaN ===
+    df["cum_nf"] = df["net_foreign_value"].fillna(0).cumsum()
+    df.attrs["adv_label"] = adv_label
+    return df
+
+# formatting utils
 
 def idr_short(x: float) -> str:
     try:
@@ -150,25 +195,6 @@ def idr_short(x: float) -> str:
 
 def fmt_pct(v):
     return "-" if v is None or pd.isna(v) else f"{v:,.2f}%".replace(",", ".")
-
-def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
-    df = df.sort_values("trade_date").copy()
-    nilai = pd.to_numeric(df["nilai"], errors="coerce")
-
-    mode_to_win = {"1 Bulan":20, "3 Bulan":60, "6 Bulan":120, "1 Tahun":252}
-    if adv_mode == "All (Default)":
-        df["adv"] = nilai.expanding().mean()
-        adv_label = "All"
-    else:
-        win = mode_to_win.get(adv_mode, 20)
-        df["adv"] = nilai.rolling(win, min_periods=1).mean()
-        adv_label = adv_mode
-
-    df["vol_avg"] = pd.to_numeric(df.get("volume"), errors="coerce").rolling(20, min_periods=1).mean()
-    df["ratio"] = df["nilai"] / df["adv"]
-    df["cum_nf"] = df["net_foreign_value"].cumsum()
-    df.attrs["adv_label"] = adv_label
-    return df
 
 def format_money(v, dec=0):
     try: return f"{float(v):,.{dec}f}".replace(",", ".")
@@ -203,12 +229,21 @@ if df_raw.empty:
     st.warning("Data kosong untuk rentang ini.")
     st.stop()
 
+# Metrics & rolling
 df = add_rolling(ensure_metrics(df_raw), adv_mode=adv_mode)
 
-# ---------- KPIs ----------
+# ---------- Ringkasan Metrik ----------
 nama = df["nama_perusahaan"].dropna().iloc[-1] if "nama_perusahaan" in df.columns and df["nama_perusahaan"].notna().any() else "-"
 st.subheader(f"{kode} — {nama}")
 
+# Close/price series utama
+price_series = None
+if "penutupan" in df.columns and df["penutupan"].notna().any():
+    price_series = pd.to_numeric(df["penutupan"], errors="coerce")
+elif "close_price" in df.columns and df["close_price"].notna().any():
+    price_series = pd.to_numeric(df["close_price"], errors="coerce")
+
+# KPI
 total_buy = df["foreign_buy"].sum(skipna=True) if "foreign_buy" in df.columns else np.nan
 total_sell = df["foreign_sell"].sum(skipna=True) if "foreign_sell" in df.columns else np.nan
 total_nf   = df["net_foreign_value"].sum(skipna=True)
@@ -231,17 +266,8 @@ if df["net_foreign_value"].notna().any():
     st.caption(f"🔎 Hari Net Buy terbesar: **{max_buy_day['trade_date'].date()}** ({idr_short(max_buy_day['net_foreign_value'])})")
     st.caption(f"🔎 Hari Net Sell terbesar: **{max_sell_day['trade_date'].date()}** ({idr_short(max_sell_day['net_foreign_value'])})")
 
-# ---------- Ringkasan Metrik (pakai kolom harga dari tabel) ----------
-# Seri close utama: penutupan > close_price
-price_series = None
-if "penutupan" in df.columns and df["penutupan"].notna().any():
-    price_series = pd.to_numeric(df["penutupan"], errors="coerce")
-elif "close_price" in df.columns and df["close_price"].notna().any():
-    price_series = pd.to_numeric(df["close_price"], errors="coerce")
-
-last_close = price_series.dropna().iloc[-1] if price_series is not None and price_series.notna().any() else np.nan
-
-# Perubahan harga
+# Derive metrik harga
+last_close = price_series.dropna().iloc[-1] if (price_series is not None and price_series.notna().any()) else np.nan
 if "selisih" in df.columns and df["selisih"].notna().any():
     change_val = pd.to_numeric(df["selisih"], errors="coerce").dropna().iloc[-1]
     if "sebelumnya" in df.columns and pd.notna(df["sebelumnya"].iloc[-1]) and df["sebelumnya"].iloc[-1] != 0:
@@ -258,9 +284,9 @@ else:
         change_val = np.nan
         change_pct = np.nan
 
-high_p = pd.to_numeric(df["tertinggi"], errors="coerce").max(skipna=True) if "tertinggi" in df.columns else np.nan
-low_p  = pd.to_numeric(df["terendah"],  errors="coerce").min(skipna=True) if "terendah"  in df.columns else np.nan
-sma5   = price_series.rolling(5, min_periods=1).mean().dropna().iloc[-1] if price_series is not None and price_series.notna().any() else np.nan
+high_p = pd.to_numeric(df.get("tertinggi"), errors="coerce").max(skipna=True) if "tertinggi" in df.columns else np.nan
+low_p  = pd.to_numeric(df.get("terendah"),  errors="coerce").min(skipna=True) if "terendah"  in df.columns else np.nan
+sma5   = price_series.rolling(5, min_periods=1).mean().dropna().iloc[-1] if (price_series is not None and price_series.notna().any()) else np.nan
 
 vol_last = pd.to_numeric(df.get("volume"), errors="coerce")
 vol_last = vol_last.dropna().iloc[-1] if vol_last.notna().any() else np.nan
@@ -281,7 +307,7 @@ with c:
 
 st.markdown("---")
 
-# ---------- NEW: Candlestick (OHLC) ----------
+# ---------- Candlestick (OHLC) ----------
 if show_price:
     # Tentukan open / high / low / close untuk candlestick
     open_series = None
@@ -292,8 +318,8 @@ if show_price:
     elif price_series is not None:
         open_series = price_series.copy()  # fallback terakhir
 
-    high_series = pd.to_numeric(df["tertinggi"], errors="coerce") if "tertinggi" in df.columns else None
-    low_series  = pd.to_numeric(df["terendah"],  errors="coerce") if "terendah"  in df.columns else None
+    high_series = pd.to_numeric(df.get("tertinggi"), errors="coerce") if "tertinggi" in df.columns else None
+    low_series  = pd.to_numeric(df.get("terendah"),  errors="coerce") if "terendah"  in df.columns else None
     close_series = price_series  # sudah diset di atas
 
     has_ohlc = (
@@ -304,7 +330,7 @@ if show_price:
     )
 
     if has_ohlc:
-        # ==== PERUBAHAN UTAMA: filter hanya baris dengan OHLC lengkap ====
+        # filter hanya baris dengan OHLC lengkap
         mask_ohlc = (
             open_series.notna() &
             high_series.notna() &
@@ -320,7 +346,6 @@ if show_price:
         if df_cdl.empty:
             st.info("Candlestick belum bisa ditampilkan karena tidak ada baris dengan OHLC lengkap.")
         else:
-            # MA dihitung dari close yang sudah difilter biar konsisten
             ma5  = close_c.rolling(5,  min_periods=1).mean()
             ma20 = close_c.rolling(20, min_periods=1).mean()
 
@@ -342,17 +367,22 @@ if show_price:
                 height=460,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
+            _apply_time_axis(figC, df_cdl["trade_date"], start, end)
             st.plotly_chart(figC, use_container_width=True)
     else:
         st.info("Candlestick belum bisa ditampilkan karena kolom OHLC tidak lengkap pada rentang ini.")
 
-# ---------- Charts sebelumnya ----------
-# 1) Close vs Net Foreign
+# ---------- 1) Close vs Net Foreign ----------
 if show_price and price_series is not None and price_series.notna().any():
     fig1 = go.Figure()
-    colors = np.where(df["net_foreign_value"]>=0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
-    fig1.add_bar(x=df["trade_date"], y=df["net_foreign_value"], name="Net Foreign (Rp)", marker_color=colors, yaxis="y2")
-    fig1.add_trace(go.Scatter(x=df["trade_date"], y=price_series, name="Close", mode="lines+markers",
+    # bar Net Foreign: hanya tanggal yang ada nilainya
+    sub_nf = df[df["net_foreign_value"].notna()][["trade_date","net_foreign_value"]]
+    colors = np.where(sub_nf["net_foreign_value"]>=0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
+    fig1.add_bar(x=sub_nf["trade_date"], y=sub_nf["net_foreign_value"], name="Net Foreign (Rp)", marker_color=colors, yaxis="y2")
+
+    # line Close: hanya tanggal yang ada closenya
+    sub_cl = df[price_series.notna()][["trade_date"]].assign(close=price_series.dropna())
+    fig1.add_trace(go.Scatter(x=sub_cl["trade_date"], y=sub_cl["close"], name="Close", mode="lines+markers",
                               line=dict(color=THEME, width=2.2)))
     fig1.update_layout(
         title="Close vs Net Foreign Harian",
@@ -362,19 +392,24 @@ if show_price and price_series is not None and price_series.notna().any():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=420,
     )
+    _apply_time_axis(fig1, df["trade_date"], start, end)
     st.plotly_chart(fig1, use_container_width=True)
 else:
-    fig1b = px.bar(df, x="trade_date", y="net_foreign_value", title="Net Foreign Harian (Rp)",
-                   color=(df["net_foreign_value"]>=0).map({True:"Net Buy", False:"Net Sell"}),
+    sub_nf = df[df["net_foreign_value"].notna()]
+    fig1b = px.bar(sub_nf, x="trade_date", y="net_foreign_value", title="Net Foreign Harian (Rp)",
+                   color=(sub_nf["net_foreign_value"]>=0).map({True:"Net Buy", False:"Net Sell"}),
                    color_discrete_map={"Net Buy":"#33B766","Net Sell":"#DC3545"})
     fig1b.update_layout(height=360, xaxis_title=None, yaxis_title="Net Foreign (Rp)", legend_title=None)
+    _apply_time_axis(fig1b, sub_nf["trade_date"], start, end)
     st.plotly_chart(fig1b, use_container_width=True)
 
-# 2) Cumulative Net Foreign vs Close
+# ---------- 2) Cumulative Net Foreign vs Close ----------
 if show_price and price_series is not None and price_series.notna().any():
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=df["trade_date"], y=df["cum_nf"], name="Cum. Net Foreign", line=dict(color="#6f42c1", width=2.2)))
-    fig2.add_trace(go.Scatter(x=df["trade_date"], y=price_series, name="Close", yaxis="y2",
+
+    sub_cl = df[price_series.notna()][["trade_date"]].assign(close=price_series.dropna())
+    fig2.add_trace(go.Scatter(x=sub_cl["trade_date"], y=sub_cl["close"], name="Close", yaxis="y2",
                               line=dict(color=THEME, width=2), opacity=0.9))
     fig2.update_layout(
         title="Kumulatif Net Foreign vs Close",
@@ -384,68 +419,84 @@ if show_price and price_series is not None and price_series.notna().any():
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=420,
     )
+    _apply_time_axis(fig2, df["trade_date"], start, end)
     st.plotly_chart(fig2, use_container_width=True)
 else:
     fig2b = px.line(df, x="trade_date", y="cum_nf", title="Kumulatif Net Foreign")
     fig2b.update_layout(height=360, xaxis_title=None, yaxis_title="Cum. Net Foreign")
+    _apply_time_axis(fig2b, df["trade_date"], start, end)
     st.plotly_chart(fig2b, use_container_width=True)
 
-# 3) Buy vs Sell (stacked)
+# ---------- 3) Buy vs Sell (stacked) ----------
 has_buy_sell_cols = set(["foreign_buy","foreign_sell"]).issubset(df.columns)
-has_non_nan = False
 if has_buy_sell_cols:
     sub = df[["trade_date","foreign_buy","foreign_sell"]].copy()
     sub["foreign_buy"]  = pd.to_numeric(sub["foreign_buy"], errors="coerce")
     sub["foreign_sell"] = pd.to_numeric(sub["foreign_sell"], errors="coerce")
-    has_non_nan = sub[["foreign_buy","foreign_sell"]].notna().any().any()
+    sub = sub[(sub["foreign_buy"].notna()) | (sub["foreign_sell"].notna())]
 
-if has_buy_sell_cols and has_non_nan:
-    df_bs = sub.melt(id_vars=["trade_date"], value_vars=["foreign_buy","foreign_sell"],
-                     var_name="jenis", value_name="nilai")
-    fig3 = px.bar(df_bs, x="trade_date", y="nilai", color="jenis",
-                  title="Foreign Buy vs Sell (Rp)",
-                  color_discrete_map={"foreign_buy":"#0d6efd","foreign_sell":"#DC3545"})
-    fig3.update_layout(barmode="stack", height=360, xaxis_title=None, yaxis_title="Rp", legend_title=None)
-    st.plotly_chart(fig3, use_container_width=True)
+    if not sub.empty:
+        df_bs = sub.melt(id_vars=["trade_date"], value_vars=["foreign_buy","foreign_sell"],
+                         var_name="jenis", value_name="nilai")
+        fig3 = px.bar(df_bs, x="trade_date", y="nilai", color="jenis",
+                      title="Foreign Buy vs Sell (Rp)",
+                      color_discrete_map={"foreign_buy":"#0d6efd","foreign_sell":"#DC3545"})
+        fig3.update_layout(barmode="stack", height=360, xaxis_title=None, yaxis_title="Rp", legend_title=None)
+        _apply_time_axis(fig3, sub["trade_date"], start, end)
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.info("Data Foreign Buy/Sell tidak tersedia untuk rentang ini.")
 else:
     st.info("Data Foreign Buy/Sell tidak tersedia untuk rentang ini.")
 
-# 4) Nilai vs ADV + Ratio
-adv_label = df.attrs.get("adv_label", "ADV")
+# ---------- 4) Nilai vs ADV + Ratio ----------
 fig4 = go.Figure()
-fig4.add_bar(x=df["trade_date"], y=df["nilai"], name="Nilai (Rp)", marker_color="rgba(13,110,253,.6)")
-fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["adv"],   name=f"ADV ({adv_label})", line=dict(color="#495057", width=2)))
-fig4.add_trace(go.Scatter(x=df["trade_date"], y=df["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2",
+sub_nilai = df[df["nilai"].notna()][["trade_date","nilai"]]
+fig4.add_bar(x=sub_nilai["trade_date"], y=sub_nilai["nilai"], name="Nilai (Rp)", marker_color="rgba(13,110,253,.6)")
+
+sub_adv = df[df["adv"].notna()][["trade_date","adv"]]
+fig4.add_trace(go.Scatter(x=sub_adv["trade_date"], y=sub_adv["adv"],   name=f"ADV ({df.attrs.get('adv_label','ADV')})", line=dict(color="#495057", width=2)))
+
+sub_ratio = df[df["ratio"].notna()][["trade_date","ratio"]]
+fig4.add_trace(go.Scatter(x=sub_ratio["trade_date"], y=sub_ratio["ratio"], name="Ratio (Nilai/ADV)", yaxis="y2",
                           line=dict(color="#20c997", width=2)))
 fig4.update_layout(
-    title=f"Nilai vs ADV ({adv_label}) + Ratio",
+    title=f"Nilai vs ADV ({df.attrs.get('adv_label','ADV')}) + Ratio",
     xaxis_title=None, yaxis=dict(title="Rp"),
     yaxis2=dict(title="Ratio (x)", overlaying="y", side="right"),
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=420,
 )
+_apply_time_axis(fig4, df["trade_date"], start, end)
 st.plotly_chart(fig4, use_container_width=True)
 
-# 5) Volume vs rolling avg
+# ---------- 5) Volume vs rolling avg ----------
 if "volume" in df.columns:
     fig5 = go.Figure()
-    fig5.add_bar(x=df["trade_date"], y=df["volume"], name="Volume", marker_color="rgba(32,201,151,.6)")
-    fig5.add_trace(go.Scatter(x=df["trade_date"], y=df["vol_avg"], name="Vol AVG(20)", line=dict(color="#198754", width=2)))
+    sub_v  = df[df["volume"].notna()][["trade_date","volume"]]
+    fig5.add_bar(x=sub_v["trade_date"], y=sub_v["volume"], name="Volume", marker_color="rgba(32,201,151,.6)")
+
+    sub_va = df[df["vol_avg"].notna()][["trade_date","vol_avg"]]
+    fig5.add_trace(go.Scatter(x=sub_va["trade_date"], y=sub_va["vol_avg"], name="Vol AVG(20)", line=dict(color="#198754", width=2)))
     fig5.update_layout(title="Volume vs AVG(20)", xaxis_title=None, yaxis_title="Lembar", height=360,
                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    _apply_time_axis(fig5, df["trade_date"], start, end)
     st.plotly_chart(fig5, use_container_width=True)
 
-# 6) Spread (bps)
-if show_spread and "spread_bps" in df.columns and df["spread_bps"].notna().any():
-    sp = df["spread_bps"].dropna()
-    p75 = float(np.nanpercentile(sp, 75)) if len(sp) else None
-    fig6 = px.line(df, x="trade_date", y="spread_bps", title="Spread (bps)")
-    if p75 is not None:
-        fig6.add_hline(y=p75, line_dash="dot", line_color="#dc3545", annotation_text=f"P75 ≈ {p75:.1f}")
-    fig6.update_layout(height=320, xaxis_title=None, yaxis_title="bps")
-    st.plotly_chart(fig6, use_container_width=True)
+# ---------- 6) Spread (bps) ----------
+if show_spread and "spread_bps" in df.columns:
+    sub_sp = df[df["spread_bps"].notna()][["trade_date","spread_bps"]]
+    if not sub_sp.empty:
+        sp_vals = sub_sp["spread_bps"].dropna()
+        p75 = float(np.nanpercentile(sp_vals, 75)) if len(sp_vals) else None
+        fig6 = px.line(sub_sp, x="trade_date", y="spread_bps", title="Spread (bps)")
+        if p75 is not None:
+            fig6.add_hline(y=p75, line_dash="dot", line_color="#dc3545", annotation_text=f"P75 ≈ {p75:.1f}")
+        fig6.update_layout(height=320, xaxis_title=None, yaxis_title="bps")
+        _apply_time_axis(fig6, sub_sp["trade_date"], start, end)
+        st.plotly_chart(fig6, use_container_width=True)
 
-# 7) Distribusi Net Foreign
+# ---------- 7) Distribusi Net Foreign (bukan time-axis) ----------
 hist = px.histogram(df, x="net_foreign_value", nbins=30, title="Distribusi Net Foreign Harian")
 hist.update_layout(height=320, xaxis_title="Net Foreign (Rp)", yaxis_title="Jumlah Hari")
 st.plotly_chart(hist, use_container_width=True)
@@ -471,4 +522,4 @@ with st.expander("Tabel data mentah (siap export)"):
         mime="text/csv"
     )
 
-st.caption("💡 Candlestick memakai kolom: open_price/first_trade, tertinggi, terendah, penutupan (fallback close_price). Jika kolom tidak lengkap, candlestick disembunyikan. Tanggal tanpa data OHLC tidak ditampilkan di chart.")
+st.caption("💡 Semua chart pakai rangebreaks: weekend otomatis di-skip dan tanggal hari kerja tanpa trading (libur bursa) juga disembunyikan. Setiap trace sudah difilter supaya hanya tanggal dengan data yang tampil, jadi nggak ada tanggal kosong.")
