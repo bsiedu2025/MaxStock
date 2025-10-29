@@ -242,6 +242,209 @@ def get_macd_params():
     if g < 1: g = 1
     return f, s, g
 
+# --- MACD core helpers ---
+
+def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
+    close = pd.to_numeric(close, errors="coerce").dropna()
+    ema_fast = close.ewm(span=fast, adjust=False, min_periods=1).mean()
+    ema_slow = close.ewm(span=slow, adjust=False, min_periods=1).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=sig, adjust=False, min_periods=1).mean()
+    delta = macd - signal
+    return macd, signal, delta
+
+
+def macd_cross_flags(delta: pd.Series):
+    prev = delta.shift(1)
+    bull = (prev <= 0) & (delta > 0)
+    bear = (prev >= 0) & (delta < 0)
+    return bull, bear
+
+
+def scan_universe(kodes: list, start: date, end: date, fast: int, slow: int, sig: int,
+                  nf_window: int = 5, filter_nf: bool = True, only_recent_days: int | None = 15,
+                  require_above_zero: bool = False) -> pd.DataFrame:
+    rows = []
+    for kd in kodes:
+        try:
+            dfk = load_series(kd, start, end)
+            if dfk.empty:
+                continue
+            close = None
+            if "penutupan" in dfk.columns and dfk["penutupan"].notna().any():
+                close = pd.to_numeric(dfk["penutupan"], errors="coerce")
+            elif "close_price" in dfk.columns and dfk["close_price"].notna().any():
+                close = pd.to_numeric(dfk["close_price"], errors="coerce")
+            if close is None or close.dropna().empty:
+                continue
+            valid = close.notna()
+            dates = pd.to_datetime(dfk.loc[valid, "trade_date"]).reset_index(drop=True)
+            close_v = close.loc[valid].reset_index(drop=True)
+
+            macd, signal, delta = macd_series(close_v, fast, slow, sig)
+            bull, bear = macd_cross_flags(delta)
+            last_type, last_date = None, None
+            if bull.any():
+                last_bull = dates[bull].iloc[-1]
+                last_type, last_date = "Bullish", last_bull
+            if bear.any():
+                last_bear = dates[bear].iloc[-1]
+                if last_date is None or pd.to_datetime(last_bear) > pd.to_datetime(last_date):
+                    last_type, last_date = "Bearish", last_bear
+            if last_date is None:
+                continue
+            days_ago = (pd.to_datetime(end) - pd.to_datetime(last_date).normalize()).days
+
+            nf_sum = np.nan
+            nf_ok = True
+            if filter_nf and "net_foreign_value" in dfk.columns:
+                nf_ser = pd.to_numeric(dfk["net_foreign_value"], errors="coerce").fillna(0)
+                nf_sum = nf_ser.rolling(int(nf_window), min_periods=1).sum().iloc[-1]
+                nf_ok = nf_sum >= 0
+
+            macd_above = bool(macd.iloc[-1] > 0)
+            qualifies = True
+            if require_above_zero:
+                qualifies = qualifies and macd_above
+            if filter_nf:
+                qualifies = qualifies and nf_ok
+            if only_recent_days is not None:
+                qualifies = qualifies and (days_ago <= int(only_recent_days))
+
+            rows.append({
+                "kode": kd,
+                "last_cross": last_type,
+                "last_cross_date": pd.to_datetime(last_date).date(),
+                "days_ago": int(days_ago),
+                "macd_above_zero": macd_above,
+                f"NF_sum_{int(nf_window)}d": float(nf_sum) if not np.isnan(nf_sum) else np.nan,
+                "qualifies": bool(qualifies),
+                "close_last": float(close_v.iloc[-1])
+            })
+        except Exception:
+            # skip problematic code but keep scanning others
+            continue
+    return pd.DataFrame(rows)
+
+
+def backtest_macd(df_price: pd.DataFrame, fast: int, slow: int, sig: int,
+                   require_above_zero: bool = False, nf_window: int = 0, require_nf: bool = False,
+                   fee_bp: int = 0):
+    # choose close
+    close = None
+    if "penutupan" in df_price.columns and df_price["penutupan"].notna().any():
+        close = pd.to_numeric(df_price["penutupan"], errors="coerce")
+    elif "close_price" in df_price.columns and df_price["close_price"].notna().any():
+        close = pd.to_numeric(df_price["close_price"], errors="coerce")
+    if close is None or close.dropna().empty:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "trades": 0, "winrate": np.nan, "profit_factor": np.nan,
+            "max_dd_pct": np.nan, "cagr_pct": np.nan, "total_return_pct": np.nan
+        }
+    valid = close.notna()
+    dates = pd.to_datetime(df_price.loc[valid, "trade_date"]).reset_index(drop=True)
+    close_v = close.loc[valid].reset_index(drop=True)
+
+    macd, signal, delta = macd_series(close_v, fast, slow, sig)
+    bull, bear = macd_cross_flags(delta)
+
+    nf_sum = None
+    if require_nf and "net_foreign_value" in df_price.columns:
+        nf_ser = pd.to_numeric(df_price["net_foreign_value"], errors="coerce").fillna(0)
+        nf_sum_full = nf_ser.rolling(int(max(1, nf_window)), min_periods=1).sum()
+        nf_sum = nf_sum_full.loc[valid].reset_index(drop=True)
+
+    trades = []
+    in_pos, entry_price, entry_date = False, None, None
+    equity = 1.0
+    fee = float(fee_bp) / 10000.0
+    equity_curve = []
+
+    for i in range(len(close_v)):
+        d = dates.iloc[i]
+        nf_ok = True
+        if nf_sum is not None:
+            nf_ok = nf_sum.iloc[i] >= 0
+        cond_above = (macd.iloc[i] > 0) if require_above_zero else True
+
+        if (not in_pos) and bull.iloc[i] and nf_ok and cond_above:
+            in_pos = True
+            entry_price = float(close_v.iloc[i])
+            entry_date = d
+        elif in_pos and bear.iloc[i]:
+            exit_price = float(close_v.iloc[i])
+            exit_date = d
+            ret = (exit_price / entry_price - 1.0) - 2 * fee
+            equity *= (1.0 + ret)
+            trades.append({
+                "entry_date": entry_date.date(),
+                "entry_price": entry_price,
+                "exit_date": exit_date.date(),
+                "exit_price": exit_price,
+                "ret_pct": ret * 100.0
+            })
+            in_pos = False
+            entry_price = None
+            entry_date = None
+        equity_curve.append({"date": d, "equity": equity})
+
+    # close open trade at end
+    if in_pos:
+        exit_price = float(close_v.iloc[-1])
+        exit_date = dates.iloc[-1]
+        ret = (exit_price / entry_price - 1.0) - 2 * fee
+        equity *= (1.0 + ret)
+        trades.append({
+            "entry_date": entry_date.date(),
+            "entry_price": entry_price,
+            "exit_date": exit_date.date(),
+            "exit_price": exit_price,
+            "ret_pct": ret * 100.0
+        })
+        if equity_curve:
+            equity_curve[-1]["equity"] = equity
+
+    trades_df = pd.DataFrame(trades)
+    eq_df = pd.DataFrame(equity_curve)
+
+    if trades_df.empty:
+        stats = {
+            "trades": 0,
+            "winrate": np.nan,
+            "profit_factor": np.nan,
+            "max_dd_pct": np.nan,
+            "cagr_pct": np.nan,
+            "total_return_pct": (eq_df["equity"].iloc[-1] - 1.0) * 100.0 if not eq_df.empty else np.nan,
+        }
+        return trades_df, eq_df, stats
+
+    wins = trades_df[trades_df["ret_pct"] > 0]
+    losses = trades_df[trades_df["ret_pct"] <= 0]
+    pf = (wins["ret_pct"].sum() / abs(losses["ret_pct"].sum())) if not losses.empty else np.inf
+    winrate = (len(wins) / len(trades_df)) * 100.0
+
+    if not eq_df.empty:
+        ec = eq_df.set_index("date")["equity"]
+        roll_max = ec.cummax()
+        max_dd = ((ec / roll_max) - 1.0).min() * 100.0
+        days = (ec.index.max().date() - ec.index.min().date()).days if len(ec) > 1 else 0
+        cagr = ((ec.iloc[-1]) ** (365.0 / days) - 1.0) * 100.0 if days > 0 else np.nan
+        total_ret = (ec.iloc[-1] - 1.0) * 100.0
+    else:
+        max_dd = np.nan
+        cagr = np.nan
+        total_ret = np.nan
+
+    stats = {
+        "trades": int(len(trades_df)),
+        "winrate": float(winrate),
+        "profit_factor": float(pf) if not np.isinf(pf) else np.inf,
+        "max_dd_pct": float(max_dd),
+        "cagr_pct": float(cagr),
+        "total_return_pct": float(total_ret),
+    }
+    return trades_df, eq_df, stats
+
 # ---------- UI (compact filter bar) ----------
 codes = list_codes()
 min_d, max_d = date_bounds()
@@ -670,3 +873,112 @@ with st.expander("Tabel data mentah (siap export)"):
     )
 
 st.caption("💡 Filter utama ada di satu baris (Saham, ADV, Rentang Tanggal) + toggle di kanan. Quick range All/1Y/6M/3M/1M/5D tersedia di bawahnya. Semua chart skip tanggal non-trading saat toggle diaktifkan.")
+
+# ============================
+# 🔎 Scanner — MACD Cross + Net Foreign
+# ============================
+st.divider()
+with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        scan_all = st.checkbox("Scan semua kode", value=True)
+    with c2:
+        recency = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=15, step=1)
+    with c3:
+        require_above_zero = st.checkbox("Syarat MACD > 0", value=False)
+
+    d1, d2, d3 = st.columns([1,1,1])
+    with d1:
+        require_nf = st.checkbox("Syarat NF rolling ≥ 0", value=True)
+    with d2:
+        nf_window = st.number_input("Window NF (hari)", min_value=1, max_value=30, value=5, step=1)
+    with d3:
+        preset_txt = ",".join(map(str, get_macd_params()))
+        st.caption(f"Preset MACD aktif: **{preset_txt}**")
+
+    watchlist = codes
+    if not scan_all:
+        watchlist = st.multiselect("Watchlist", options=codes, default=[kode] if kode else [])
+
+    run_scan = True if (scan_all or watchlist) else False
+    if run_scan:
+        with st.spinner("Scanning..."):
+            fast, slow, sig = get_macd_params()
+            df_scan = scan_universe(watchlist, start, end, fast, slow, sig,
+                                    nf_window=int(nf_window), filter_nf=bool(require_nf),
+                                    only_recent_days=int(recency), require_above_zero=bool(require_above_zero))
+        if df_scan is None or df_scan.empty:
+            st.info("Tidak ada hasil yang memenuhi filter.")
+        else:
+            order_cols = [
+                "qualifies", "days_ago", "last_cross_date", "kode", "last_cross",
+                "macd_above_zero", f"NF_sum_{int(nf_window)}d", "close_last"
+            ]
+            show_cols = [c for c in order_cols if c in df_scan.columns]
+            st.dataframe(
+                df_scan.sort_values(["qualifies", "days_ago", "last_cross_date"], ascending=[False, True, False])[show_cols],
+                use_container_width=True, height=420
+            )
+            st.download_button(
+                "⬇️ Download hasil scan (CSV)",
+                data=df_scan.to_csv(index=False).encode("utf-8"),
+                file_name=f"scan_macd_{start}_to_{end}.csv",
+                mime="text/csv",
+            )
+    else:
+        st.info("Pilih minimal satu kode untuk discan.")
+
+# ============================
+# 🧪 Backtest — MACD Rules (simple)
+# ============================
+st.divider()
+with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=False):
+    b1, b2, b3 = st.columns([1,1,1])
+    with b1:
+        bt_symbol = st.selectbox("Kode saham", options=codes, index=(codes.index(kode) if kode in codes else 0))
+    with b2:
+        bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1)
+    with b3:
+        bt_require_above = st.checkbox("Entry hanya jika MACD > 0", value=False)
+
+    e1, e2 = st.columns([1,1])
+    with e1:
+        bt_require_nf = st.checkbox("Entry hanya jika NF rolling ≥ 0", value=False)
+    with e2:
+        bt_nf_window = st.number_input("NF window (hari)", min_value=1, max_value=30, value=5, step=1)
+
+    df_bt = load_series(bt_symbol, start, end)
+    if df_bt.empty:
+        st.info("Data kosong untuk backtest.")
+    else:
+        with st.spinner("Menjalankan backtest..."):
+            fast, slow, sig = get_macd_params()
+            trades, eq_df, stats = backtest_macd(
+                df_bt, fast, slow, sig,
+                require_above_zero=bool(bt_require_above),
+                nf_window=int(bt_nf_window), require_nf=bool(bt_require_nf),
+                fee_bp=int(bt_fee)
+            )
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Trades", int(stats.get("trades", 0)))
+        m2.metric("Win Rate", f"{stats.get('winrate', np.nan):.1f}%" if not pd.isna(stats.get('winrate', np.nan)) else "-")
+        pf_val = stats.get("profit_factor", np.nan)
+        m3.metric("Profit Factor", "∞" if isinstance(pf_val, float) and np.isinf(pf_val) else (f"{pf_val:.2f}" if not pd.isna(pf_val) else "-"))
+        m4.metric("Max DD", f"{stats.get('max_dd_pct', np.nan):.1f}%" if not pd.isna(stats.get('max_dd_pct', np.nan)) else "-")
+        m5.metric("Total Return", f"{stats.get('total_return_pct', np.nan):.1f}%" if not pd.isna(stats.get('total_return_pct', np.nan)) else "-")
+
+        if not eq_df.empty:
+            figEQ = px.line(eq_df, x="date", y="equity", title="Equity Curve (1.0 = awal)")
+            _apply_time_axis(figEQ, pd.to_datetime(eq_df["date"]), start, end, hide_non_trading)
+            st.plotly_chart(figEQ, use_container_width=True)
+
+        if not trades.empty:
+            st.dataframe(trades, use_container_width=True, height=320)
+            st.download_button(
+                "⬇️ Download trades CSV",
+                data=trades.to_csv(index=False).encode("utf-8"),
+                file_name=f"trades_{bt_symbol}_{start}_to_{end}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("Tidak ada trade pada parameter/rule ini.")
