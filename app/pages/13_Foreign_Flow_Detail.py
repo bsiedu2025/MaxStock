@@ -418,6 +418,85 @@ def backtest_macd(df_price: pd.DataFrame, fast: int, slow: int, sig: int,
         }
         return trades_df, eq_df, stats
 
+# -------- Bulk fetch for fast scanner --------
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_ohlc_bulk(codes, start, end):
+    if not codes:
+        return pd.DataFrame()
+    con = get_db_connection(); _alive(con)
+    try:
+        placeholders = ','.join(['%s'] * len(codes))
+        sql = f"""
+            SELECT kode_saham,
+                   trade_date,
+                   COALESCE(penutupan, close_price) AS close,
+                   net_foreign_value
+            FROM data_harian
+            WHERE trade_date BETWEEN %s AND %s
+              AND kode_saham IN ({placeholders})
+            ORDER BY kode_saham, trade_date
+        """
+        params = [start, end] + list(codes)
+        df = pd.read_sql(sql, con, params=params)
+        if df.empty:
+            return df
+        df['trade_date'] = pd.to_datetime(df['trade_date'])
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df['net_foreign_value'] = pd.to_numeric(df['net_foreign_value'], errors='coerce')
+        df = df.dropna(subset=['close'])
+        return df
+    finally:
+        _close(con)
+
+
+def scan_universe_fast(df_bulk: pd.DataFrame, fast: int, slow: int, sig: int,
+                       nf_window: int = 5, filter_nf: bool = True,
+                       only_recent_days: int | None = 15,
+                       require_above_zero: bool = False) -> pd.DataFrame:
+    if df_bulk is None or df_bulk.empty:
+        return pd.DataFrame()
+    out = []
+    for kd, g in df_bulk.groupby('kode_saham'):
+        g = g.sort_values('trade_date').copy()
+        close = g['close']
+        macd, signal, delta = macd_series(close, fast, slow, sig)
+        bull, bear = macd_cross_flags(delta)
+        last_type, last_date = None, None
+        if bull.any():
+            last_type, last_date = 'Bullish', g.loc[bull, 'trade_date'].iloc[-1]
+        if bear.any():
+            last_bear_date = g.loc[bear, 'trade_date'].iloc[-1]
+            if last_date is None or pd.to_datetime(last_bear_date) > pd.to_datetime(last_date):
+                last_type, last_date = 'Bearish', last_bear_date
+        if last_date is None:
+            continue
+        days_ago = (pd.to_datetime(df_bulk['trade_date'].max()).normalize() - pd.to_datetime(last_date).normalize()).days
+        nf_sum = np.nan
+        nf_ok = True
+        if filter_nf:
+            nf = g['net_foreign_value'].fillna(0.0)
+            nf_sum = float(nf.tail(int(nf_window)).sum())
+            nf_ok = nf_sum >= 0
+        macd_above = bool(macd.iloc[-1] > 0)
+        qualifies = True
+        if only_recent_days is not None:
+            qualifies &= (days_ago <= int(only_recent_days))
+        if require_above_zero:
+            qualifies &= macd_above
+        if filter_nf:
+            qualifies &= nf_ok
+        out.append({
+            'kode': kd,
+            'last_cross': last_type,
+            'last_cross_date': pd.to_datetime(last_date).date(),
+            'days_ago': int(days_ago),
+            'macd_above_zero': macd_above,
+            f'NF_sum_{int(nf_window)}d': nf_sum,
+            'qualifies': bool(qualifies),
+            'close_last': float(close.iloc[-1])
+        })
+    return pd.DataFrame(out)
+
     wins = trades_df[trades_df["ret_pct"] > 0]
     losses = trades_df[trades_df["ret_pct"] <= 0]
     pf = (wins["ret_pct"].sum() / abs(losses["ret_pct"].sum())) if not losses.empty else np.inf
@@ -896,17 +975,25 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
         preset_txt = ",".join(map(str, get_macd_params()))
         st.caption(f"Preset MACD aktif: **{preset_txt}**")
 
-    watchlist = codes
-    if not scan_all:
-        watchlist = st.multiselect("Watchlist", options=codes, default=[kode] if kode else [])
+    watchlist = codes if scan_all else st.multiselect("Watchlist", options=codes, default=[kode] if kode else [])
 
-    run_scan = True if (scan_all or watchlist) else False
+    # Tombol trigger agar tidak auto-scan & memberi kontrol user
+    run_scan = st.button("🚀 Jalankan Scan", type="primary")
+
     if run_scan:
-        with st.spinner("Scanning..."):
+        with st.spinner("Mengambil data & scanning cepat..."):
             fast, slow, sig = get_macd_params()
-            df_scan = scan_universe(watchlist, start, end, fast, slow, sig,
-                                    nf_window=int(nf_window), filter_nf=bool(require_nf),
-                                    only_recent_days=int(recency), require_above_zero=bool(require_above_zero))
+            # Warmup minimal agar EMA stabil + buffer dari recency & NF window
+            warmup_days = max(slow * 5, 150)
+            approx_days = int(warmup_days + recency + int(nf_window) + 30)
+            start_scan = max(min_d, end - timedelta(days=approx_days))
+
+            df_bulk = fetch_ohlc_bulk(watchlist, start_scan, end)
+            df_scan = scan_universe_fast(
+                df_bulk, fast, slow, sig,
+                nf_window=int(nf_window), filter_nf=bool(require_nf),
+                only_recent_days=int(recency), require_above_zero=bool(require_above_zero)
+            )
         if df_scan is None or df_scan.empty:
             st.info("Tidak ada hasil yang memenuhi filter.")
         else:
@@ -922,11 +1009,11 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
             st.download_button(
                 "⬇️ Download hasil scan (CSV)",
                 data=df_scan.to_csv(index=False).encode("utf-8"),
-                file_name=f"scan_macd_{start}_to_{end}.csv",
+                file_name=f"scan_macd_{start_scan}_to_{end}.csv",
                 mime="text/csv",
             )
     else:
-        st.info("Pilih minimal satu kode untuk discan.")
+        st.caption("Klik **Jalankan Scan** untuk mulai. Scanner menggunakan bulk query + vectorized MACD agar jauh lebih cepat.")
 
 # ============================
 # 🧪 Backtest — MACD Rules (simple)
