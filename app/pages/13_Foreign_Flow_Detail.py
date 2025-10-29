@@ -219,6 +219,29 @@ def format_money(v, dec=0):
     try: return f"{float(v):,.{dec}f}".replace(",", ".")
     except: return "-"
 
+# --- MACD params helper ---
+
+def get_macd_params():
+    preset = st.session_state.get("macd_preset", "12-26-9 (Standard)")
+    presets = {
+        "12-26-9 (Standard)": (12, 26, 9),
+        "5-35-5 (Fast)": (5, 35, 5),
+        "8-17-9": (8, 17, 9),
+        "10-30-9": (10, 30, 9),
+        "20-50-9": (20, 50, 9),
+    }
+    if preset != "Custom":
+        return presets.get(preset, (12, 26, 9))
+    # Custom
+    f = int(st.session_state.get("macd_fast", 12))
+    s = int(st.session_state.get("macd_slow", 26))
+    g = int(st.session_state.get("macd_signal", 9))
+    # guard: ensure fast < slow and >=1
+    if f < 1: f = 1
+    if s <= f: s = f + 1
+    if g < 1: g = 1
+    return f, s, g
+
 # ---------- UI (compact filter bar) ----------
 codes = list_codes()
 min_d, max_d = date_bounds()
@@ -238,6 +261,15 @@ if "show_price" not in st.session_state:
     st.session_state["show_price"] = True
 if "show_spread" not in st.session_state:
     st.session_state["show_spread"] = True
+# MACD defaults
+if "macd_preset" not in st.session_state:
+    st.session_state["macd_preset"] = "12-26-9 (Standard)"
+if "macd_fast" not in st.session_state:
+    st.session_state["macd_fast"] = 12
+if "macd_slow" not in st.session_state:
+    st.session_state["macd_slow"] = 26
+if "macd_signal" not in st.session_state:
+    st.session_state["macd_signal"] = 9
 
 # === FILTER ROW (one line) ===
 with st.container():
@@ -316,6 +348,23 @@ with st.container():
     with cC:
         st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
     st.markdown("</div>", unsafe_allow_html=True)
+
+# MACD preset row
+with st.container():
+    m1, m2, m3, m4 = st.columns([1.6, 0.8, 0.8, 0.8])
+    with m1:
+        st.selectbox(
+            "MACD preset",
+            ["12-26-9 (Standard)", "5-35-5 (Fast)", "8-17-9", "10-30-9", "20-50-9", "Custom"],
+            key="macd_preset",
+        )
+    if st.session_state.get("macd_preset") == "Custom":
+        with m2:
+            st.number_input("Fast EMA", min_value=1, max_value=200, step=1, key="macd_fast")
+        with m3:
+            st.number_input("Slow EMA", min_value=2, max_value=400, step=1, key="macd_slow")
+        with m4:
+            st.number_input("Signal", min_value=1, max_value=100, step=1, key="macd_signal")
 
 # ---------- Data ----------
 start, end = st.session_state["date_range"]
@@ -404,13 +453,14 @@ if show_price:
 
             # === MACD cross markers on candlestick ===
             try:
-                # Recompute MACD on available close series
+                # MACD params (follow preset/custom)
+                fast, slow, sig = get_macd_params()
                 close_m = close_series.dropna()
                 trade_m = df.loc[close_series.notna(), "trade_date"].reset_index(drop=True)
-                ema_fast = close_m.ewm(span=12, adjust=False, min_periods=1).mean()
-                ema_slow = close_m.ewm(span=26, adjust=False, min_periods=1).mean()
+                ema_fast = close_m.ewm(span=fast, adjust=False, min_periods=1).mean()
+                ema_slow = close_m.ewm(span=slow, adjust=False, min_periods=1).mean()
                 macd_line_c = ema_fast - ema_slow
-                signal_line_c = macd_line_c.ewm(span=9, adjust=False, min_periods=1).mean()
+                signal_line_c = macd_line_c.ewm(span=sig, adjust=False, min_periods=1).mean()
                 delta_c = macd_line_c - signal_line_c
                 prev_delta_c = delta_c.shift(1)
                 bull_idx_c = (prev_delta_c <= 0) & (delta_c > 0)
@@ -447,11 +497,12 @@ if price_series is not None and price_series.notna().any():
     sub_m = df[price_series.notna()][["trade_date"]].copy()
     close_m = price_series.dropna()
 
-    # MACD 12-26-9
-    ema_fast = close_m.ewm(span=12, adjust=False, min_periods=1).mean()
-    ema_slow = close_m.ewm(span=26, adjust=False, min_periods=1).mean()
+    # MACD params
+    fast, slow, sig = get_macd_params()
+    ema_fast = close_m.ewm(span=fast, adjust=False, min_periods=1).mean()
+    ema_slow = close_m.ewm(span=slow, adjust=False, min_periods=1).mean()
     macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=1).mean()
+    signal_line = macd_line.ewm(span=sig, adjust=False, min_periods=1).mean()
     hist = macd_line - signal_line
 
     # Crossover detection
@@ -485,7 +536,7 @@ if price_series is not None and price_series.notna().any():
     ))
 
     figM.add_hline(y=0, line_color="#adb5bd", line_width=1)
-    figM.update_layout(title="MACD (12,26,9) + Crossovers", xaxis_title=None, yaxis_title="MACD",
+    figM.update_layout(title=f"MACD ({fast},{slow},{sig}) + Crossovers", xaxis_title=None, yaxis_title="MACD",
                        height=320, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     _apply_time_axis(figM, sub_m["trade_date"], start, end, hide_non_trading)
     st.plotly_chart(figM, use_container_width=True)
