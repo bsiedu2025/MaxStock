@@ -1,13 +1,14 @@
+# -*- coding: utf-8 -*-
 # app/pages/13_Foreign_Flow_Detail.py
-# Foreign Flow Detail — Streamlit (HP-friendly + Scanner persist + Backtest popover tooltips)
-# - 📱 Mobile Mode toggle
+# Foreign Flow Detail — Streamlit
+# - Mobile Mode toggle
 # - Sticky filter bar + shadow
 # - Hide non-trading days
 # - Quick range: All, 1Y, 6M, 3M, 1M, 5D, Custom
 # - Candlestick + MA5/20 + panah MACD + alert cross
 # - MACD panel + cross markers
 # - Scanner cepat (persist di session_state) + Export + Kirim ke Backtest
-# - Backtest: SEMUA metrik dihitung di dalam backtest_macd(...), metrik cards dgn popover ℹ️
+# - Backtest: SEMUA metrik dihitung di dalam backtest_macd(...), metrik cards pakai popover info (ikon ℹ️)
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -19,69 +20,71 @@ import plotly.express as px
 import plotly.graph_objects as go
 from html import escape
 
+# === DB utils (harus ada di project lu)
 from db_utils import get_db_connection, get_db_name
 
 THEME = "#3AA6A0"
-st.set_page_config(page_title="📈 Foreign Flow Detail", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Foreign Flow Detail", page_icon="📈", layout="wide")
 
-# ======== Global CSS (sticky bar + cards + popover) ========
-st.markdown(
-    """
-    <style>
-    section.main > div { padding-top: .5rem; }
-    .sticky-filter { position: sticky; top: 0; z-index: 1000; background: rgba(255,255,255,.96);
-      backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding:.5rem .25rem .75rem .25rem;
-      box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04); }
-    .checks-row { display:flex; align-items:center; gap:1.25rem; }
-    .checks-row div[data-testid='stCheckbox']{margin-bottom:0!important}
+# === Global CSS (tanpa f-string supaya aman parse)
+st.markdown("""
+<style>
+section.main > div { padding-top: .5rem; }
+.sticky-filter { position: sticky; top: 0; z-index: 1000; background: rgba(255,255,255,.96);
+  backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding:.5rem .25rem .75rem .25rem;
+  box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04); }
+.checks-row { display:flex; align-items:center; gap:1.25rem; }
+.checks-row div[data-testid='stCheckbox']{margin-bottom:0!important}
 
-    /* Metric cards grid */
-    .mcards { display:grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap:12px; }
-    .mcard { border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#fff;
-             box-shadow: 0 1px 3px rgba(0,0,0,.06); position:relative; }
-    .mcard-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-    .mcard-label { color:#64748b; font-size:12px; font-weight:700; margin-bottom:2px; }
+/* Metric cards grid */
+.mcards { display:grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap:12px; }
+.mcard { border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#fff;
+         box-shadow: 0 1px 3px rgba(0,0,0,.06); position:relative; }
+.mcard-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.mcard-label { color:#64748b; font-size:12px; font-weight:700; margin-bottom:2px; }
 
-    /* CSS-only popover via <details> */
-    .mcard-info { position:relative; }
-    .mcard-info > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center;
-      padding:0 6px; height:18px; border-radius:9999px; border:1px solid #c7d2fe; background:#eef2ff;
-      color:#4338ca; font-size:12px; user-select:none; }
-    .mcard-info > summary::-webkit-details-marker { display:none; }
-    .mcard-info[open] > summary { background:#e0e7ff; }
-    .mcard-pop { position:absolute; top:24px; right:0; width:240px; z-index:100;
-      background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px;
-      box-shadow:0 8px 24px rgba(2,6,23,.12); color:#334155; font-size:12px; }
+/* CSS-only popover via <details> */
+.mcard-info { position:relative; }
+.mcard-info > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center;
+  padding:0 6px; height:18px; border-radius:9999px; border:1px solid #c7d2fe; background:#eef2ff;
+  color:#4338ca; font-size:12px; user-select:none; }
+.mcard-info > summary::-webkit-details-marker { display:none; }
+.mcard-info[open] > summary { background:#e0e7ff; }
+.mcard-pop { position:absolute; top:24px; right:0; width:240px; z-index:100;
+  background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px;
+  box-shadow:0 8px 24px rgba(2,6,23,.12); color:#334155; font-size:12px; }
 
-    .mcard-value { font-size:22px; font-weight:800; line-height:1.1; margin-top:2px; }
-    .metric-note { color:#64748b; font-size:12px; margin-top:6px; }
+.mcard-value { font-size:22px; font-weight:800; line-height:1.1; margin-top:2px; }
+.metric-note { color:#64748b; font-size:12px; margin-top:6px; }
 
-    /* Responsive grid */
-    @media (max-width: 980px) { .mcards { grid-template-columns: repeat(3,minmax(0,1fr)); } }
-    @media (max-width: 640px) { .mcards { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width: 980px) { .mcards { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media (max-width: 640px) { .mcards { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 
-    /* Radios like chips */
-    div[role='radiogroup']{display:flex;flex-wrap:wrap;gap:.25rem .5rem}
-    div[role='radiogroup'] label{border:1px solid #e5e7eb;padding:6px 12px;border-radius:9999px;background:#fff}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+/* Radios like chips */
+div[role='radiogroup']{display:flex;flex-wrap:wrap;gap:.25rem .5rem}
+div[role='radiogroup'] label{border:1px solid #e5e7eb;padding:6px 12px;border-radius:9999px;background:#fff}
+</style>
+""", unsafe_allow_html=True)
 
 st.title("📈 Pergerakan Harian Saham — Fokus Foreign Flow")
 st.caption(f"DB aktif: **{get_db_name()}**")
 
-# ======== DB helpers ========
+# === DB helpers
 def _alive(conn):
-    try: conn.reconnect(attempts=2, delay=1)
-    except Exception: pass
+    try:
+        conn.reconnect(attempts=2, delay=1)
+    except Exception:
+        pass
 
 def _close(conn):
     try:
         if hasattr(conn, "is_connected"):
-            if conn.is_connected(): conn.close()
-        else: conn.close()
-    except Exception: pass
+            if conn.is_connected():
+                conn.close()
+        else:
+            conn.close()
+    except Exception:
+        pass
 
 @st.cache_data(ttl=300)
 def list_codes():
@@ -97,7 +100,7 @@ def date_bounds():
     con = get_db_connection(); _alive(con)
     try:
         s = pd.read_sql("SELECT MIN(trade_date) mn, MAX(trade_date) mx FROM data_harian", con)
-        mn, mx = s.loc[0,"mn"], s.loc[0,"mx"]
+        mn, mx = s.loc[0, "mn"], s.loc[0, "mx"]
         if pd.isna(mn) or pd.isna(mx):
             today = date.today()
             return (today - timedelta(days=60), today)
@@ -111,7 +114,8 @@ def get_trade_dates(kode: str) -> pd.Series:
     try:
         q = "SELECT trade_date FROM data_harian WHERE kode_saham=%s ORDER BY trade_date"
         df = pd.read_sql(q, con, params=[kode])
-        if df.empty: return pd.Series(dtype="datetime64[ns]")
+        if df.empty:
+            return pd.Series(dtype="datetime64[ns]")
         return pd.to_datetime(df["trade_date"])
     finally:
         _close(con)
@@ -125,42 +129,37 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
             "WHERE table_schema = DATABASE() AND table_name = 'data_harian'", con
         )
         avail = set(cols["col"].tolist())
-
-        base = ["trade_date","kode_saham"]
-        if "nama_perusahaan" in avail: base.append("nama_perusahaan")
-        price_cols = ["sebelumnya","open_price","first_trade","tertinggi","terendah","penutupan","selisih"]
-        opt = ["nilai","volume","foreign_buy","foreign_sell","net_foreign_value","bid","offer","spread_bps","close_price"]
+        base = ["trade_date", "kode_saham"]
+        if "nama_perusahaan" in avail:
+            base.append("nama_perusahaan")
+        price_cols = ["sebelumnya", "open_price", "first_trade", "tertinggi", "terendah", "penutupan", "selisih"]
+        opt = ["nilai", "volume", "foreign_buy", "foreign_sell", "net_foreign_value", "bid", "offer", "spread_bps", "close_price"]
         select_cols = [c for c in base + price_cols + opt if c in avail]
-        if not {"trade_date","kode_saham"}.issubset(select_cols):
+        if not {"trade_date", "kode_saham"}.issubset(select_cols):
             raise RuntimeError("Kolom minimal trade_date & kode_saham harus ada")
-
-        sql = f"""
-            SELECT {', '.join(select_cols)}
-            FROM data_harian WHERE kode_saham=%s AND trade_date BETWEEN %s AND %s
-            ORDER BY trade_date
-        """
+        sql = "SELECT " + ", ".join(select_cols) + " FROM data_harian WHERE kode_saham=%s AND trade_date BETWEEN %s AND %s ORDER BY trade_date"
         df = pd.read_sql(sql, con, params=[kode, start, end])
-
         for c in (set(price_cols + opt + ["nama_perusahaan"]) - set(df.columns.str.lower())):
             df[c] = np.nan
-
         ordered = base + price_cols + [c for c in opt if c in df.columns]
         df = df[[c for c in ordered if c in df.columns]]
         return df
     finally:
         _close(con)
 
-# ======== Helpers & metrics ========
+# === Helpers
 def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
-    if not hide_non_trading: return []
-    rb = [dict(bounds=["sat","mon"])]
+    if not hide_non_trading:
+        return []
+    rb = [dict(bounds=["sat", "mon"])]
     if trade_dates is not None and len(trade_dates) > 0:
         td = pd.to_datetime(trade_dates).dt.normalize().unique()
         td_set = set(td)
         all_days = pd.date_range(start, end, freq="D")
         weekdays = all_days[all_days.weekday < 5]
         holidays = [d.to_pydatetime() for d in weekdays if d.to_datetime64() not in td_set]
-        if len(holidays) > 0: rb.append(dict(values=holidays))
+        if len(holidays) > 0:
+            rb.append(dict(values=holidays))
     return rb
 
 def _apply_time_axis(fig, trade_dates, start, end, hide):
@@ -170,65 +169,72 @@ def _apply_time_axis(fig, trade_dates, start, end, hide):
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "net_foreign_value" not in df.columns or df["net_foreign_value"].isna().all():
-        if {"foreign_buy","foreign_sell"}.issubset(df.columns):
+        if {"foreign_buy", "foreign_sell"}.issubset(df.columns):
             df["foreign_buy"] = pd.to_numeric(df.get("foreign_buy"), errors="coerce")
             df["foreign_sell"] = pd.to_numeric(df.get("foreign_sell"), errors="coerce")
             df["net_foreign_value"] = df["foreign_buy"].fillna(0) - df["foreign_sell"].fillna(0)
         else:
             df["net_foreign_value"] = np.nan
     if "spread_bps" not in df.columns or df["spread_bps"].isna().all():
-        if {"bid","offer"}.issubset(df.columns):
+        if {"bid", "offer"}.issubset(df.columns):
             b = pd.to_numeric(df["bid"], errors="coerce")
             o = pd.to_numeric(df["offer"], errors="coerce")
             with np.errstate(divide="ignore", invalid="ignore"):
-                sp = (o - b) / ((o + b)/2) * 10000
-            sp[(b<=0)|(o<=0)|b.isna()|o.isna()] = np.nan
+                sp = (o - b) / ((o + b) / 2) * 10000
+            sp[(b <= 0) | (o <= 0) | b.isna() | o.isna()] = np.nan
             df["spread_bps"] = sp
         else:
             df["spread_bps"] = np.nan
-    for c in ["nilai","volume","foreign_buy","foreign_sell","net_foreign_value","close_price",
-              "penutupan","sebelumnya","tertinggi","terendah","selisih","open_price","first_trade"]:
-        if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ["nilai", "volume", "foreign_buy", "foreign_sell", "net_foreign_value", "close_price",
+              "penutupan", "sebelumnya", "tertinggi", "terendah", "selisih", "open_price", "first_trade"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     return df
 
 def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
     df = df.sort_values("trade_date").copy()
     nilai = pd.to_numeric(df.get("nilai"), errors="coerce")
-    map_win = {"1 Tahun":252,"6 Bulan":120,"3 Bulan":60,"1 Bulan":20}
+    map_win = {"1 Tahun": 252, "6 Bulan": 120, "3 Bulan": 60, "1 Bulan": 20}
     if adv_mode == "All (Default)":
-        df["adv"] = nilai.expanding().mean(); df.attrs["adv_label"] = "All"
+        df["adv"] = nilai.expanding().mean()
+        df.attrs["adv_label"] = "All"
     else:
         win = map_win.get(adv_mode, 20)
-        df["adv"] = nilai.rolling(win, min_periods=1).mean(); df.attrs["adv_label"] = adv_mode
+        df["adv"] = nilai.rolling(win, min_periods=1).mean()
+        df.attrs["adv_label"] = adv_mode
     df["vol_avg"] = pd.to_numeric(df.get("volume"), errors="coerce").rolling(20, min_periods=1).mean()
     df["ratio"] = df["nilai"] / df["adv"]
     df["cum_nf"] = df["net_foreign_value"].fillna(0).cumsum()
     return df
 
 def idr_short(x: float) -> str:
-    try: n = float(x)
-    except Exception: return "-"
+    try:
+        n = float(x)
+    except Exception:
+        return "-"
     a = abs(n)
-    for nama, v in [("Triliun",1e12),("Miliar",1e9),("Juta",1e6),("Ribu",1e3)]:
-        if a >= v: return f"{n/v:,.2f}".replace(",", ".") + f" {nama}"
+    for nama, v in [("Triliun", 1e12), ("Miliar", 1e9), ("Juta", 1e6), ("Ribu", 1e3)]:
+        if a >= v:
+            return f"{n / v:,.2f}".replace(",", ".") + " " + nama
     return f"{n:,.0f}".replace(",", ".")
 
-# ======== MACD ========
+# === MACD
 def get_macd_params():
-    preset = st.session_state.get("macd_preset","12-26-9 (Standard)")
+    preset = st.session_state.get("macd_preset", "12-26-9 (Standard)")
     presets = {
-        "12-26-9 (Standard)": (12,26,9),
-        "5-35-5 (Fast)": (5,35,5),
-        "8-17-9": (8,17,9),
-        "10-30-9": (10,30,9),
-        "20-50-9": (20,50,9)
+        "12-26-9 (Standard)": (12, 26, 9),
+        "5-35-5 (Fast)": (5, 35, 5),
+        "8-17-9": (8, 17, 9),
+        "10-30-9": (10, 30, 9),
+        "20-50-9": (20, 50, 9),
     }
-    if preset != "Custom": return presets.get(preset,(12,26,9))
-    f = int(st.session_state.get("macd_fast",12))
-    s = int(st.session_state.get("macd_slow",26));  s = max(s, f+1)
-    g = int(st.session_state.get("macd_signal",9))
-    return max(f,1), s, max(g,1)
+    if preset != "Custom":
+        return presets.get(preset, (12, 26, 9))
+    f = int(st.session_state.get("macd_fast", 12))
+    s = int(st.session_state.get("macd_slow", 26)); s = max(s, f + 1)
+    g = int(st.session_state.get("macd_signal", 9))
+    return max(f, 1), s, max(g, 1)
 
 def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
     close = pd.to_numeric(close, errors="coerce").dropna()
@@ -241,12 +247,13 @@ def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
 
 def macd_cross_flags(delta: pd.Series):
     prev = delta.shift(1)
-    return (prev<=0)&(delta>0), (prev>=0)&(delta<0)
+    return (prev <= 0) & (delta > 0), (prev >= 0) & (delta < 0)
 
-# ======== Scanner (bulk) ========
+# === Bulk fetch untuk Scanner
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
-    if not codes: return pd.DataFrame()
+    if not codes:
+        return pd.DataFrame()
     con = get_db_connection(); _alive(con)
     try:
         cols = pd.read_sql(
@@ -254,31 +261,32 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
             "WHERE table_schema = DATABASE() AND table_name = 'data_harian'", con
         )
         have = set(cols["col"].tolist())
-        price_candidates = ["penutupan","close_price","closing","close"]
+        price_candidates = ["penutupan", "close_price", "closing", "close"]
         price_col = next((c for c in price_candidates if c in have), None)
         if price_col is None:
             raise RuntimeError("Butuh kolom harga penutupan (penutupan/close_price)")
         nf_expr = "net_foreign_value" if "net_foreign_value" in have else (
-            "(foreign_buy - foreign_sell)" if {"foreign_buy","foreign_sell"}.issubset(have) else "NULL"
+            "(foreign_buy - foreign_sell)" if {"foreign_buy", "foreign_sell"}.issubset(have) else "NULL"
         )
-
         parts = []
         start_param, end_param = pd.to_datetime(start), pd.to_datetime(end)
-        for i in range(0, len(codes), max(1,int(chunk_size))):
-            ch = codes[i:i+chunk_size]
-            if not ch: continue
-            placeholders = ",".join(["%s"]*len(ch))
-            sql = f"""
-              SELECT kode_saham, trade_date, {price_col} AS close, {nf_expr} AS net_foreign_value
-              FROM data_harian
-              WHERE trade_date BETWEEN %s AND %s AND kode_saham IN ({placeholders})
-              ORDER BY kode_saham, trade_date
-            """
+        for i in range(0, len(codes), max(1, int(chunk_size))):
+            ch = codes[i:i + chunk_size]
+            if not ch:
+                continue
+            placeholders = ",".join(["%s"] * len(ch))
+            sql = (
+                "SELECT kode_saham, trade_date, " + price_col + " AS close, " + nf_expr + " AS net_foreign_value "
+                "FROM data_harian WHERE trade_date BETWEEN %s AND %s AND kode_saham IN (" + placeholders + ") "
+                "ORDER BY kode_saham, trade_date"
+            )
             params = [start_param, end_param] + list(ch)
             parts.append(pd.read_sql(sql, con, params=params))
-        if not parts: return pd.DataFrame()
+        if not parts:
+            return pd.DataFrame()
         df = pd.concat(parts, ignore_index=True)
-        if df.empty: return df
+        if df.empty:
+            return df
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
         if "net_foreign_value" in df.columns:
@@ -288,7 +296,8 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
         _close(con)
 
 def scan_universe_fast(df_bulk, fast, slow, sig, nf_window=5, filter_nf=True, only_recent_days=15, require_above_zero=False):
-    if df_bulk is None or df_bulk.empty: return pd.DataFrame()
+    if df_bulk is None or df_bulk.empty:
+        return pd.DataFrame()
     out = []
     global_end = pd.to_datetime(df_bulk["trade_date"].max())
     for kd, g in df_bulk.groupby("kode_saham"):
@@ -303,7 +312,8 @@ def scan_universe_fast(df_bulk, fast, slow, sig, nf_window=5, filter_nf=True, on
             last_bear_date = g.loc[bear, "trade_date"].iloc[-1]
             if last_date is None or pd.to_datetime(last_bear_date) > pd.to_datetime(last_date):
                 last_type, last_date = "Bearish", last_bear_date
-        if last_date is None: continue
+        if last_date is None:
+            continue
         days_ago = (global_end.normalize() - pd.to_datetime(last_date).normalize()).days
         nf_sum = np.nan; nf_ok = True
         if filter_nf and "net_foreign_value" in g.columns:
@@ -311,9 +321,12 @@ def scan_universe_fast(df_bulk, fast, slow, sig, nf_window=5, filter_nf=True, on
             nf_sum = float(nf.tail(int(nf_window)).sum()); nf_ok = nf_sum >= 0
         macd_above = bool(macd.iloc[-1] > 0)
         qualifies = True
-        if only_recent_days is not None: qualifies &= days_ago <= int(only_recent_days)
-        if require_above_zero: qualifies &= macd_above
-        if filter_nf: qualifies &= nf_ok
+        if only_recent_days is not None:
+            qualifies = qualifies and days_ago <= int(only_recent_days)
+        if require_above_zero:
+            qualifies = qualifies and macd_above
+        if filter_nf:
+            qualifies = qualifies and nf_ok
         out.append({
             "kode": kd, "last_cross": last_type, "last_cross_date": pd.to_datetime(last_date).date(),
             "days_ago": int(days_ago), "macd_above_zero": macd_above, f"NF_sum_{int(nf_window)}d": nf_sum,
@@ -321,9 +334,9 @@ def scan_universe_fast(df_bulk, fast, slow, sig, nf_window=5, filter_nf=True, on
         })
     return pd.DataFrame(out)
 
-# ======== Backtest (SEMUA perhitungan metrik di sini) ========
+# === Backtest (SEMUA metrik di sini)
 def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window=0, require_nf=False, fee_bp=0):
-    # pilih close
+    # pick close
     close = None
     if "penutupan" in df_price.columns and df_price["penutupan"].notna().any():
         close = pd.to_numeric(df_price["penutupan"], errors="coerce")
@@ -331,14 +344,14 @@ def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window
         close = pd.to_numeric(df_price["close_price"], errors="coerce")
     if close is None or close.dropna().empty:
         return pd.DataFrame(), pd.DataFrame(), {
-            "trades":0,"winrate":np.nan,"profit_factor":np.nan,"max_dd_pct":np.nan,"cagr_pct":np.nan,
-            "total_return_pct":np.nan,"avg_trade_pct":np.nan,"median_trade_pct":np.nan,
-            "best_trade_pct":np.nan,"worst_trade_pct":np.nan,"avg_hold_days":np.nan,
-            "sharpe":np.nan,"vol_annual_pct":np.nan,"calmar_ratio":np.nan,
+            "trades": 0, "winrate": np.nan, "profit_factor": np.nan, "max_dd_pct": np.nan, "cagr_pct": np.nan,
+            "total_return_pct": np.nan, "avg_trade_pct": np.nan, "median_trade_pct": np.nan,
+            "best_trade_pct": np.nan, "worst_trade_pct": np.nan, "avg_hold_days": np.nan,
+            "sharpe": np.nan, "vol_annual_pct": np.nan, "calmar_ratio": np.nan,
         }
 
     valid = close.notna()
-    dates = pd.to_datetime(df_price.loc[valid,"trade_date"]).reset_index(drop=True)
+    dates = pd.to_datetime(df_price.loc[valid, "trade_date"]).reset_index(drop=True)
     close_v = close.loc[valid].reset_index(drop=True)
 
     macd, signal, delta = macd_series(close_v, fast, slow, sig)
@@ -350,70 +363,78 @@ def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window
         nf_sum_full = nf_ser.rolling(int(max(1, nf_window)), min_periods=1).sum()
         nf_sum = nf_sum_full.loc[valid].reset_index(drop=True)
 
-    trades = []; in_pos=False; entry_price=None; entry_date=None
-    equity = 1.0; fee = float(fee_bp)/10000.0
+    trades = []
+    in_pos = False
+    entry_price = None
+    entry_date = None
+    equity = 1.0
+    fee = float(fee_bp) / 10000.0
     equity_curve = []
 
     for i in range(len(close_v)):
         d = dates.iloc[i]
         nf_ok = True
-        if nf_sum is not None: nf_ok = nf_sum.iloc[i] >= 0
+        if nf_sum is not None:
+            nf_ok = nf_sum.iloc[i] >= 0
         cond_above = (macd.iloc[i] > 0) if require_above_zero else True
 
         if (not in_pos) and bool(bull.iloc[i]) and nf_ok and cond_above:
-            in_pos = True; entry_price = float(close_v.iloc[i]); entry_date = d
+            in_pos = True
+            entry_price = float(close_v.iloc[i])
+            entry_date = d
         elif in_pos and bool(bear.iloc[i]):
             exit_price = float(close_v.iloc[i]); exit_date = d
-            ret = (exit_price/entry_price - 1.0) - 2*fee
+            ret = (exit_price / entry_price - 1.0) - 2 * fee
             equity *= (1.0 + ret)
             trades.append({
                 "entry_date": entry_date.date(), "entry_price": entry_price,
                 "exit_date": exit_date.date(), "exit_price": exit_price,
-                "ret_pct": ret*100.0, "hold_days": int((exit_date.date()-entry_date.date()).days),
+                "ret_pct": ret * 100.0, "hold_days": int((exit_date.date() - entry_date.date()).days),
             })
-            in_pos = False; entry_price=None; entry_date=None
+            in_pos = False; entry_price = None; entry_date = None
         equity_curve.append({"date": d, "equity": equity})
 
     if in_pos:
         exit_price = float(close_v.iloc[-1]); exit_date = dates.iloc[-1]
-        ret = (exit_price/entry_price - 1.0) - 2*fee
+        ret = (exit_price / entry_price - 1.0) - 2 * fee
         equity *= (1.0 + ret)
         trades.append({
             "entry_date": entry_date.date(), "entry_price": entry_price,
             "exit_date": exit_date.date(), "exit_price": exit_price,
-            "ret_pct": ret*100.0, "hold_days": int((exit_date.date()-entry_date.date()).days),
+            "ret_pct": ret * 100.0, "hold_days": int((exit_date.date() - entry_date.date()).days),
         })
-        if equity_curve: equity_curve[-1]["equity"] = equity
+        if equity_curve:
+            equity_curve[-1]["equity"] = equity
 
     trades_df = pd.DataFrame(trades)
     eq_df = pd.DataFrame(equity_curve)
 
     if trades_df.empty:
         stats = {
-            "trades":0,"winrate":np.nan,"profit_factor":np.nan,"max_dd_pct":np.nan,"cagr_pct":np.nan,
-            "total_return_pct": (eq_df["equity"].iloc[-1]-1.0)*100.0 if not eq_df.empty else np.nan,
-            "avg_trade_pct":np.nan,"median_trade_pct":np.nan,"best_trade_pct":np.nan,"worst_trade_pct":np.nan,
-            "avg_hold_days":np.nan,"sharpe":np.nan,"vol_annual_pct":np.nan,"calmar_ratio":np.nan,
+            "trades": 0, "winrate": np.nan, "profit_factor": np.nan, "max_dd_pct": np.nan, "cagr_pct": np.nan,
+            "total_return_pct": (eq_df["equity"].iloc[-1] - 1.0) * 100.0 if not eq_df.empty else np.nan,
+            "avg_trade_pct": np.nan, "median_trade_pct": np.nan, "best_trade_pct": np.nan, "worst_trade_pct": np.nan,
+            "avg_hold_days": np.nan, "sharpe": np.nan, "vol_annual_pct": np.nan, "calmar_ratio": np.nan,
         }
         return trades_df, eq_df, stats
 
     wins = trades_df[trades_df["ret_pct"] > 0]
     losses = trades_df[trades_df["ret_pct"] <= 0]
-    pf = (wins["ret_pct"].sum()/abs(losses["ret_pct"].sum())) if not losses.empty else float("inf")
-    winrate = (len(wins)/len(trades_df))*100.0
+    pf = (wins["ret_pct"].sum() / abs(losses["ret_pct"].sum())) if not losses.empty else float("inf")
+    winrate = (len(wins) / len(trades_df)) * 100.0
 
     if not eq_df.empty:
         ec = eq_df.set_index("date")["equity"]
         roll_max = ec.cummax()
-        max_dd = ((ec/roll_max)-1.0).min()*100.0
-        days = (ec.index.max().date()-ec.index.min().date()).days if len(ec)>1 else 0
-        cagr = ((ec.iloc[-1])**(365.0/days)-1.0)*100.0 if days>0 else np.nan
-        total_ret = (ec.iloc[-1]-1.0)*100.0
+        max_dd = ((ec / roll_max) - 1.0).min() * 100.0
+        days = (ec.index.max().date() - ec.index.min().date()).days if len(ec) > 1 else 0
+        cagr = ((ec.iloc[-1]) ** (365.0 / days) - 1.0) * 100.0 if days > 0 else np.nan
+        total_ret = (ec.iloc[-1] - 1.0) * 100.0
         daily_ret = ec.pct_change().dropna()
-        vol_ann = (daily_ret.std()*math.sqrt(252))*100.0 if not daily_ret.empty else np.nan
-        sharpe = (daily_ret.mean()/daily_ret.std()*math.sqrt(252)) if (len(daily_ret)>1 and daily_ret.std()!=0) else np.nan
+        vol_ann = (daily_ret.std() * math.sqrt(252)) * 100.0 if not daily_ret.empty else np.nan
+        sharpe = (daily_ret.mean() / daily_ret.std() * math.sqrt(252)) if (len(daily_ret) > 1 and daily_ret.std() != 0) else np.nan
     else:
-        max_dd = np.nan; cagr=np.nan; total_ret=np.nan; vol_ann=np.nan; sharpe=np.nan
+        max_dd = np.nan; cagr = np.nan; total_ret = np.nan; vol_ann = np.nan; sharpe = np.nan
 
     stats = {
         "trades": int(len(trades_df)),
@@ -429,11 +450,11 @@ def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window
         "avg_hold_days": float(trades_df["hold_days"].mean()) if "hold_days" in trades_df.columns else np.nan,
         "sharpe": float(sharpe) if not pd.isna(sharpe) else np.nan,
         "vol_annual_pct": float(vol_ann) if not pd.isna(vol_ann) else np.nan,
-        "calmar_ratio": float((cagr/abs(max_dd)) if (not pd.isna(cagr) and not pd.isna(max_dd) and max_dd!=0) else np.nan),
+        "calmar_ratio": float((cagr / abs(max_dd)) if (not pd.isna(cagr) and not pd.isna(max_dd) and max_dd != 0) else np.nan),
     }
     return trades_df, eq_df, stats
 
-# ======== STATE DEFAULTS ========
+# === STATE DEFAULTS
 codes = list_codes()
 min_d, max_d = date_bounds()
 st.session_state.setdefault("kode_saham", (codes[0] if codes else None))
@@ -451,12 +472,12 @@ st.session_state.setdefault("mobile_mode", False)
 st.session_state.setdefault("bt_symbol", st.session_state.get("kode_saham"))
 st.session_state.setdefault("open_backtest", False)
 
-# ======== Sticky filter bar ========
+# === Sticky filter bar
 with st.container():
     st.markdown("<div class='sticky-filter'>", unsafe_allow_html=True)
     f1, f2, f3, f4 = st.columns([1.3, 1.0, 1.6, 0.9])
     with f1: st.selectbox("Pilih saham", options=codes, key="kode_saham")
-    with f2: st.selectbox("ADV window (hari)", ["All (Default)","1 Tahun","6 Bulan","3 Bulan","1 Bulan"], key="adv_mode")
+    with f2: st.selectbox("ADV window (hari)", ["All (Default)", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan"], key="adv_mode")
     with f3:
         dr = st.date_input("Rentang tanggal",
             value=st.session_state.get("date_range"),
@@ -478,33 +499,42 @@ DF_H     = 260 if MOBILE else 360
 SCAN_H   = 340 if MOBILE else 420
 TRADES_H = 260 if MOBILE else 320
 
-# ======== Quick range ========
+# === Quick range
 kode = st.session_state["kode_saham"]
-if not kode: st.stop()
+if not kode:
+    st.stop()
 td_series = get_trade_dates(kode)
 td_min = td_series.min().date() if not td_series.empty else min_d
 td_max = td_series.max().date() if not td_series.empty else max_d
-st.radio("Range cepat", ["All","1 Tahun","6 Bulan","3 Bulan","1 Bulan","5 Hari","Custom"],
+st.radio("Range cepat", ["All", "1 Tahun", "6 Bulan", "3 Bulan", "1 Bulan", "5 Hari", "Custom"],
          key="range_choice", horizontal=not MOBILE)
 
 def _apply_quick(choice):
-    if choice == "Custom": return
+    if choice == "Custom":
+        return
     start, end = td_min, td_max
-    if choice == "1 Tahun": end=td_max; start=max(td_min, td_max - relativedelta(years=1))
-    elif choice == "6 Bulan": end=td_max; start=max(td_min, td_max - relativedelta(months=6))
-    elif choice == "3 Bulan": end=td_max; start=max(td_min, td_max - relativedelta(months=3))
-    elif choice == "1 Bulan": end=td_max; start=max(td_min, td_max - relativedelta(months=1))
+    if choice == "1 Tahun":
+        end = td_max; start = max(td_min, td_max - relativedelta(years=1))
+    elif choice == "6 Bulan":
+        end = td_max; start = max(td_min, td_max - relativedelta(months=6))
+    elif choice == "3 Bulan":
+        end = td_max; start = max(td_min, td_max - relativedelta(months=3))
+    elif choice == "1 Bulan":
+        end = td_max; start = max(td_min, td_max - relativedelta(months=1))
     elif choice == "5 Hari":
         end = td_max
-        if not td_series.empty and len(td_series) >= 5: start = td_series.iloc[-5].date()
-        else: start = max(td_min, td_max - timedelta(days=7))
-    elif choice == "All": start, end = td_min, td_max
+        if not td_series.empty and len(td_series) >= 5:
+            start = td_series.iloc[-5].date()
+        else:
+            start = max(td_min, td_max - timedelta(days=7))
+    elif choice == "All":
+        start, end = td_min, td_max
     if st.session_state.get("date_range") != (start, end):
         st.session_state["date_range"] = (start, end); st.rerun()
 
 _apply_quick(st.session_state["range_choice"])
 
-# ======== Toggles ========
+# === Toggles
 with st.container():
     st.markdown("<div class='checks-row'>", unsafe_allow_html=True)
     cA, cB, cC = st.columns(3)
@@ -513,24 +543,25 @@ with st.container():
     with cC: st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ======== MACD preset ========
+# === MACD preset
 m1, m2, m3, m4 = st.columns([1.6, .8, .8, .8])
 with m1:
     st.selectbox("MACD preset",
-        ["12-26-9 (Standard)","5-35-5 (Fast)","8-17-9","10-30-9","20-50-9","Custom"], key="macd_preset")
+        ["12-26-9 (Standard)", "5-35-5 (Fast)", "8-17-9", "10-30-9", "20-50-9", "Custom"], key="macd_preset")
 if st.session_state["macd_preset"] == "Custom":
     with m2: st.number_input("Fast EMA", min_value=1, max_value=200, step=1, key="macd_fast")
     with m3: st.number_input("Slow EMA", min_value=2, max_value=400, step=1, key="macd_slow")
     with m4: st.number_input("Signal",   min_value=1, max_value=100, step=1, key="macd_signal")
 
-# ======== Load & derive data ========
+# === Load & derive data
 start, end = st.session_state["date_range"]
 df_raw = load_series(kode, start, end)
 if df_raw.empty:
-    st.warning("Data kosong buat rentang ini."); st.stop()
+    st.warning("Data kosong buat rentang ini.")
+    st.stop()
 df = add_rolling(ensure_metrics(df_raw), adv_mode=st.session_state["adv_mode"])
 
-# ======== KPI ========
+# === KPI
 st.divider()
 nama = (df["nama_perusahaan"].dropna().iloc[-1]
         if "nama_perusahaan" in df.columns and df["nama_perusahaan"].notna().any() else "-")
@@ -548,23 +579,23 @@ total_sell = df["foreign_sell"].sum(skipna=True) if "foreign_sell" in df.columns
 total_nf   = df["net_foreign_value"].sum(skipna=True)
 
 if MOBILE:
-    a,b = st.columns(2)
+    a, b = st.columns(2)
     with a:
         st.metric("Total Net Foreign", idr_short(total_nf))
         st.metric("Total Foreign Buy", idr_short(total_buy) if pd.notna(total_buy) else "-")
     with b:
-        pos_days = (df["net_foreign_value"]>0).sum()
-        st.metric("% Hari Net Buy", f"{(100*pos_days/len(df)):.0f}%")
+        pos_days = (df["net_foreign_value"] > 0).sum()
+        st.metric("% Hari Net Buy", f"{(100 * pos_days / len(df)):.0f}%")
         st.metric("Total Foreign Sell", idr_short(total_sell) if pd.notna(total_sell) else "-")
     st.metric("Max Ratio (nilai/ADV)", f"{df['ratio'].max(skipna=True):.2f}x" if df["ratio"].notna().any() else "-")
 else:
-    m1,m2,m3,m4,m5 = st.columns(5)
-    m1.metric("Total Net Foreign", idr_short(total_nf))
-    m2.metric("Total Foreign Buy", idr_short(total_buy) if pd.notna(total_buy) else "-")
-    m3.metric("Total Foreign Sell", idr_short(total_sell) if pd.notna(total_sell) else "-")
-    pos_days = (df["net_foreign_value"]>0).sum()
-    m4.metric("% Hari Net Buy", f"{(100*pos_days/len(df)):.0f}%")
-    m5.metric("Max Ratio (nilai/ADV)", f"{df['ratio'].max(skipna=True):.2f}x" if df["ratio"].notna().any() else "-")
+    m1a, m2a, m3a, m4a, m5a = st.columns(5)
+    m1a.metric("Total Net Foreign", idr_short(total_nf))
+    m2a.metric("Total Foreign Buy", idr_short(total_buy) if pd.notna(total_buy) else "-")
+    m3a.metric("Total Foreign Sell", idr_short(total_sell) if pd.notna(total_sell) else "-")
+    pos_days = (df["net_foreign_value"] > 0).sum()
+    m4a.metric("% Hari Net Buy", f"{(100 * pos_days / len(df)):.0f}%")
+    m5a.metric("Max Ratio (nilai/ADV)", f"{df['ratio'].max(skipna=True):.2f}x" if df["ratio"].notna().any() else "-")
 
 if df["net_foreign_value"].notna().any():
     max_buy_day = df.loc[df["net_foreign_value"].idxmax()]
@@ -572,7 +603,7 @@ if df["net_foreign_value"].notna().any():
     st.caption(f"🔎 Net Buy terbesar: **{max_buy_day['trade_date'].date()}** ({idr_short(max_buy_day['net_foreign_value'])})")
     st.caption(f"🔎 Net Sell terbesar: **{max_sell_day['trade_date'].date()}** ({idr_short(max_sell_day['net_foreign_value'])})")
 
-# ======== Charts ========
+# === Charts
 # Candlestick + MA + MACD arrows
 if price_series is not None and price_series.notna().any():
     open_series = None
@@ -604,30 +635,32 @@ if price_series is not None and price_series.notna().any():
         figC.add_trace(go.Scatter(x=df_cdl["trade_date"], y=ma20, name="MA 20", line=dict(color="#6c757d", width=1.8)))
         # Panah MACD
         try:
-            f,s,g = get_macd_params()
+            f, s, g = get_macd_params()
             close_m = price_series.dropna()
-            trade_m = df.loc[price_series.notna(),"trade_date"].reset_index(drop=True)
+            trade_m = df.loc[price_series.notna(), "trade_date"].reset_index(drop=True)
             ema_f = close_m.ewm(span=f, adjust=False, min_periods=1).mean()
             ema_s = close_m.ewm(span=s, adjust=False, min_periods=1).mean()
             macd_line = ema_f - ema_s
             signal_line = macd_line.ewm(span=g, adjust=False, min_periods=1).mean()
             delta = macd_line - signal_line
             prev = delta.shift(1)
-            bull_idx = (prev<=0)&(delta>0); bear_idx=(prev>=0)&(delta<0)
+            bull_idx = (prev <= 0) & (delta > 0)
+            bear_idx = (prev >= 0) & (delta < 0)
             t_cdl = df_cdl["trade_date"].reset_index(drop=True)
             map_low  = pd.Series(low_series[mask].values,  index=t_cdl)
             map_high = pd.Series(high_series[mask].values, index=t_cdl)
             bull_dates = [d for d in trade_m[bull_idx] if d in map_low.index]
             bear_dates = [d for d in trade_m[bear_idx] if d in map_high.index]
             if bull_dates:
-                yb = [float(map_low[d])*0.995 for d in bull_dates]
+                yb = [float(map_low[d]) * 0.995 for d in bull_dates]
                 figC.add_trace(go.Scatter(x=bull_dates, y=yb, mode="markers", name="Bullish cross (MACD)",
                                marker=dict(symbol="triangle-up", size=12, color="#22c55e")))
             if bear_dates:
-                ya = [float(map_high[d])*1.005 for d in bear_dates]
+                ya = [float(map_high[d]) * 1.005 for d in bear_dates]
                 figC.add_trace(go.Scatter(x=bear_dates, y=ya, mode="markers", name="Bearish cross (MACD)",
                                marker=dict(symbol="triangle-down", size=12, color="#ef4444")))
-        except Exception: pass
+        except Exception:
+            pass
 
         figC.update_layout(
             title="Candlestick (OHLC) + MA5/MA20",
@@ -645,16 +678,17 @@ if price_series is not None and price_series.notna().any():
 if price_series is not None and price_series.notna().any():
     sub_m = df[price_series.notna()][["trade_date"]].copy()
     close_m = price_series.dropna()
-    f,s,g = get_macd_params()
+    f, s, g = get_macd_params()
     ema_f = close_m.ewm(span=f, adjust=False, min_periods=1).mean()
     ema_s = close_m.ewm(span=s, adjust=False, min_periods=1).mean()
     macd_line = ema_f - ema_s
     signal_line = macd_line.ewm(span=g, adjust=False, min_periods=1).mean()
     hist = macd_line - signal_line
     prev = (macd_line - signal_line).shift(1)
-    bull = (prev<=0)&(hist>0); bear=(prev>=0)&(hist<0)
-    x_bull = sub_m.loc[bull,"trade_date"]; y_bull = macd_line[bull]
-    x_bear = sub_m.loc[bear,"trade_date"]; y_bear = macd_line[bear]
+    bull = (prev <= 0) & (hist > 0)
+    bear = (prev >= 0) & (hist < 0)
+    x_bull = sub_m.loc[bull, "trade_date"]; y_bull = macd_line[bull]
+    x_bear = sub_m.loc[bear, "trade_date"]; y_bear = macd_line[bear]
 
     figM = go.Figure()
     colorsM = np.where(hist >= 0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
@@ -677,8 +711,8 @@ if price_series is not None and price_series.notna().any():
 # Close vs NF
 if price_series is not None and price_series.notna().any():
     fig1 = go.Figure()
-    sub_nf = df[df["net_foreign_value"].notna()][["trade_date","net_foreign_value"]]
-    colors = np.where(sub_nf["net_foreign_value"]>=0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
+    sub_nf = df[df["net_foreign_value"].notna()][["trade_date", "net_foreign_value"]]
+    colors = np.where(sub_nf["net_foreign_value"] >= 0, "rgba(51,183,102,0.7)", "rgba(220,53,69,0.7)")
     fig1.add_bar(x=sub_nf["trade_date"], y=sub_nf["net_foreign_value"], name="Net Foreign (Rp)", marker_color=colors, yaxis="y2")
     sub_cl = df[price_series.notna()][["trade_date"]].assign(close=price_series.dropna())
     fig1.add_trace(go.Scatter(x=sub_cl["trade_date"], y=sub_cl["close"], name="Close", mode="lines+markers",
@@ -712,9 +746,9 @@ if price_series is not None and price_series.notna().any():
 # Volume vs AVG
 if "volume" in df.columns:
     fig5 = go.Figure()
-    sub_v  = df[df["volume"].notna()][["trade_date","volume"]]
+    sub_v  = df[df["volume"].notna()][["trade_date", "volume"]]
     fig5.add_bar(x=sub_v["trade_date"], y=sub_v["volume"], name="Volume")
-    sub_va = df[df["vol_avg"].notna()][["trade_date","vol_avg"]]
+    sub_va = df[df["vol_avg"].notna()][["trade_date", "vol_avg"]]
     fig5.add_trace(go.Scatter(x=sub_va["trade_date"], y=sub_va["vol_avg"], name="Vol AVG(20)"))
     fig5.update_layout(
         title="Volume vs AVG(20)", xaxis_title=None, yaxis_title="Lembar",
@@ -726,12 +760,13 @@ if "volume" in df.columns:
 
 # Spread (bps)
 if st.session_state["show_spread"] and "spread_bps" in df.columns:
-    sub_sp = df[df["spread_bps"].notna()][["trade_date","spread_bps"]]
+    sub_sp = df[df["spread_bps"].notna()][["trade_date", "spread_bps"]]
     if not sub_sp.empty:
         sp_vals = sub_sp["spread_bps"].dropna()
         p75 = float(np.nanpercentile(sp_vals, 75)) if len(sp_vals) else None
         fig6 = px.line(sub_sp, x="trade_date", y="spread_bps", title="Spread (bps)")
-        if p75 is not None: fig6.add_hline(y=p75, line_dash="dot", line_color="#dc3545", annotation_text=f"P75 ≈ {p75:.1f}")
+        if p75 is not None:
+            fig6.add_hline(y=p75, line_dash="dot", line_color="#dc3545", annotation_text=f"P75 ≈ {p75:.1f}")
         fig6.update_layout(height=H_OTHER, xaxis_title=None, yaxis_title="bps",
                            margin=dict(l=10, r=10, t=40, b=10) if MOBILE else dict(l=40, r=30, t=60, b=40))
         _apply_time_axis(fig6, sub_sp["trade_date"], start, end, st.session_state["hide_non_trading"])
@@ -750,18 +785,18 @@ with st.expander("Tabel data mentah (siap export)"):
         data=df.to_csv(index=False).encode("utf-8"),
         file_name=f"{kode}_foreign_flow_{start}_to_{end}.csv", mime="text/csv")
 
-st.caption("💡 Aktifkan **📱 Mobile Mode** untuk tampilan ringkas di HP.")
+st.caption("💡 Aktifkan Mobile Mode untuk tampilan ringkas di HP.")
 
 # ============================
-# 🔎 Scanner — MACD Cross + Net Foreign (persist)
+# Scanner — MACD Cross + Net Foreign (persist)
 # ============================
 st.divider()
 with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
-    c1,c2,c3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
     with c1: scan_all = st.checkbox("Scan semua kode", value=True, key="scan_all")
-    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1,max_value=365,value=15,step=1,key="scan_recency")
+    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=15, step=1, key="scan_recency")
     with c3: require_above_zero = st.checkbox("Syarat MACD > 0", value=False, key="scan_macdpos")
-    d1,d2,_ = st.columns(3)
+    d1, d2, _ = st.columns(3)
     with d1: require_nf = st.checkbox("Syarat NF rolling ≥ 0", value=True, key="scan_reqnf")
     with d2: nf_window  = st.number_input("Window NF (hari)", min_value=1, max_value=30, value=5, step=1, key="scan_nfwin")
 
@@ -771,8 +806,8 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
     df_scan = None
     if run_scan:
         with st.spinner("Mengambil data & scanning..."):
-            f,s,g = get_macd_params()
-            warmup_days = max(s*5, 150)
+            f, s, g = get_macd_params()
+            warmup_days = max(s * 5, 150)
             approx_days = int(warmup_days + recency + int(nf_window) + 30)
             start_scan = max(min_d, end - timedelta(days=approx_days))
             df_bulk = fetch_ohlc_bulk(watchlist, start_scan, end)
@@ -781,21 +816,22 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                 only_recent_days=int(recency), require_above_zero=bool(require_above_zero)
             )
         st.session_state["scanner_df"] = df_scan
-        st.session_state["scanner_meta"] = {"start_scan":start_scan,"end":end,"nf_window":int(nf_window),
-                                            "recency":int(recency),"require_nf":bool(require_nf),
-                                            "require_above_zero":bool(require_above_zero)}
+        st.session_state["scanner_meta"] = {"start_scan": start_scan, "end": end, "nf_window": int(nf_window),
+                                            "recency": int(recency), "require_nf": bool(require_nf),
+                                            "require_above_zero": bool(require_above_zero)}
     else:
         df_scan = st.session_state.get("scanner_df")
 
-    col_clear,_ = st.columns([1,4])
+    col_clear, _ = st.columns([1, 4])
     with col_clear:
         if st.button("🧹 Clear hasil scan", key="btn_clear_scan"):
-            for k in ["scanner_df","scanner_meta"]:
-                if k in st.session_state: del st.session_state[k]
+            for k in ["scanner_df", "scanner_meta"]:
+                if k in st.session_state:
+                    del st.session_state[k]
             st.stop()
 
     if df_scan is None or df_scan.empty:
-        st.caption("Klik **Jalankan Scan** untuk mulai. Hasil scan disimpan agar tidak hilang saat klik tombol lain.")
+        st.caption("Klik Jalankan Scan untuk mulai. Hasil scan disimpan agar tidak hilang saat klik tombol lain.")
     else:
         nf_col = next((c for c in df_scan.columns if c.startswith("NF_sum_") and c.endswith("d")), None)
         sort_cols, asc = [], []
@@ -807,7 +843,7 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
 
         # chips
         st.markdown("**Quick filters**")
-        ch1,ch2,ch3 = st.columns(3)
+        ch1, ch2, ch3 = st.columns(3)
         with ch1: chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", value=False)
         with ch2:
             if nf_col and df_scan[nf_col].notna().any():
@@ -823,16 +859,16 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
         if chip_macd_pos and "macd_above_zero" in view.columns: view = view[view["macd_above_zero"] == True]
         if chip_nf_p75 and nf_col and nf_p75_val is not None: view = view[view[nf_col] >= nf_p75_val]
 
-        order_cols = ["qualifies","days_ago","last_cross_date","kode","last_cross","macd_above_zero", nf_col, "close_last"]
+        order_cols = ["qualifies", "days_ago", "last_cross_date", "kode", "last_cross", "macd_above_zero", nf_col, "close_last"]
         order_cols = [c for c in order_cols if c and c in view.columns]
         st.dataframe(view[order_cols], use_container_width=True, height=SCAN_H)
 
         if nf_col and nf_p75_val is not None:
             quick_watch = df_scan_sorted.copy()
-            quick_watch = quick_watch[(quick_watch["days_ago"]<=3) & (quick_watch[nf_col] >= nf_p75_val)]
+            quick_watch = quick_watch[(quick_watch["days_ago"] <= 3) & (quick_watch[nf_col] >= nf_p75_val)]
             st.download_button("⬇️ Export Watchlist (≤3D & NF≥p75)",
                                data=quick_watch.to_csv(index=False).encode("utf-8"),
-                               file_name=f"watchlist_quick_{st.session_state.get('scanner_meta',{}).get('start_scan', start)}_to_{end}.csv",
+                               file_name=f"watchlist_quick_{st.session_state.get('scanner_meta', {}).get('start_scan', start)}_to_{end}.csv",
                                mime="text/csv")
         st.download_button("⬇️ Export Current View",
                            data=view.to_csv(index=False).encode("utf-8"),
@@ -843,9 +879,9 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
             st.caption("— Tidak ada kandidat pada filter yang dipilih.")
         else:
             for i, (_, row) in enumerate(view.head(50).iterrows()):
-                cA,cB,cC,cD,cE = st.columns([1.2,1,.8,1.2,1])
-                with cA: st.write(f"**{row.get('kode','-')}**")
-                with cB: st.write(row.get("last_cross","-"))
+                cA, cB, cC, cD, cE = st.columns([1.2, 1, .8, 1.2, 1])
+                with cA: st.write(f"**{row.get('kode', '-')}**")
+                with cB: st.write(row.get("last_cross", "-"))
                 with cC:
                     dago = row.get("days_ago", np.nan)
                     st.write(f"D{int(dago)}" if pd.notna(dago) else "-")
@@ -861,21 +897,23 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                         st.session_state["open_backtest"] = True
 
 # ============================
-# 🧪 Backtest — MACD Rules (simple)  (Popover ℹ️ di judul metrik)
+# Backtest — MACD Rules (simple) (popover ℹ️)
 # ============================
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
-    c1,c2,c3,c4 = st.columns([1.2,.9,.9,.9])
+    c1, c2, c3, c4 = st.columns([1.2, .9, .9, .9])
     current_bt_symbol = st.session_state.get("bt_symbol", st.session_state.get("kode_saham"))
-    try: idx_default = codes.index(current_bt_symbol) if (codes and current_bt_symbol in codes) else 0
-    except Exception: idx_default = 0
+    try:
+        idx_default = codes.index(current_bt_symbol) if (codes and current_bt_symbol in codes) else 0
+    except Exception:
+        idx_default = 0
     with c1:
-        bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default<len(codes) else 0, key="bt_sym_sel")
+        bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default < len(codes) else 0, key="bt_sym_sel")
         st.session_state["bt_symbol"] = bt_symbol
     with c2: bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1, key="bt_fee")
     with c3: bt_require_above = st.checkbox("Entry hanya jika MACD > 0", value=False, key="bt_above")
     with c4: bt_require_nf = st.checkbox("Entry hanya jika NF rolling ≥ 0", value=False, key="bt_reqnf")
-    c5,_ = st.columns([0.9,2.1])
+    c5, _ = st.columns([0.9, 2.1])
     with c5: bt_nf_window = st.number_input("NF window (hari)", min_value=1, max_value=30, value=5, step=1, key="bt_nfwin")
 
     df_bt = load_series(bt_symbol, start, end)
@@ -884,7 +922,7 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
     else:
         with st.spinner("Menjalankan backtest..."):
             try:
-                f,s,g = get_macd_params()
+                f, s, g = get_macd_params()
                 trades, eq_df, stats = backtest_macd(
                     df_bt, f, s, g,
                     require_above_zero=bool(bt_require_above),
@@ -895,67 +933,65 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
             except Exception as e:
                 st.error("Backtest error: " + str(e))
                 trades, eq_df, stats = pd.DataFrame(), pd.DataFrame(), {
-                    "trades":0,"winrate":np.nan,"profit_factor":np.nan,"max_dd_pct":np.nan,"cagr_pct":np.nan,
-                    "total_return_pct":np.nan,"avg_trade_pct":np.nan,"median_trade_pct":np.nan,
-                    "best_trade_pct":np.nan,"worst_trade_pct":np.nan,"avg_hold_days":np.nan,
-                    "sharpe":np.nan,"vol_annual_pct":np.nan,"calmar_ratio":np.nan,
+                    "trades": 0, "winrate": np.nan, "profit_factor": np.nan, "max_dd_pct": np.nan, "cagr_pct": np.nan,
+                    "total_return_pct": np.nan, "avg_trade_pct": np.nan, "median_trade_pct": np.nan,
+                    "best_trade_pct": np.nan, "worst_trade_pct": np.nan, "avg_hold_days": np.nan,
+                    "sharpe": np.nan, "vol_annual_pct": np.nan, "calmar_ratio": np.nan,
                 }
 
-        # teks info tiap metrik
         TT = {
-            "Trades":"Jumlah posisi (entry→exit) selama periode backtest.",
-            "Win Rate":"Persentase trade yang return-nya > 0 setelah biaya.",
-            "Profit Factor":"Total profit / total loss. >1 = profit; ∞ jika tidak ada loss.",
-            "Max DD":"Maximum drawdown: penurunan terdalam dari puncak equity ke lembah (%).",
-            "Total Return":"Kenaikan equity total dari awal ke akhir (reinvest penuh).",
-            "CAGR":"Compounded Annual Growth Rate (tahunan; jika rentang >0 hari).",
-            "Avg Trade":"Rata-rata % return per trade (setelah biaya).",
-            "Expectancy":"Ekspektasi rata-rata per trade (≈ Avg Trade).",
-            "Median Trade":"Median % return per trade.",
-            "Avg Hold":"Rata-rata lama memegang posisi (hari).",
-            "Best Trade":"Return % terbaik dari satu trade.",
-            "Worst Trade":"Return % terburuk dari satu trade.",
+            "Trades": "Jumlah posisi (entry→exit) selama periode backtest.",
+            "Win Rate": "Persentase trade yang return-nya > 0 setelah biaya.",
+            "Profit Factor": "Total profit / total loss. >1 = profit; ∞ jika tidak ada loss.",
+            "Max DD": "Maximum drawdown: penurunan terdalam dari puncak equity ke lembah (%).",
+            "Total Return": "Kenaikan equity total dari awal ke akhir (reinvest penuh).",
+            "CAGR": "Compounded Annual Growth Rate (tahunan; jika rentang >0 hari).",
+            "Avg Trade": "Rata-rata % return per trade (setelah biaya).",
+            "Expectancy": "Ekspektasi rata-rata per trade (≈ Avg Trade).",
+            "Median Trade": "Median % return per trade.",
+            "Avg Hold": "Rata-rata lama memegang posisi (hari).",
+            "Best Trade": "Return % terbaik dari satu trade.",
+            "Worst Trade": "Return % terburuk dari satu trade.",
         }
 
-        def fmt_pct(x, d=1): 
+        def fmt_pct(x, d=1):
             return "-" if x is None or pd.isna(x) else f"{float(x):.{d}f}%"
         pf = stats.get("profit_factor", np.nan)
-        pf_str = "∞" if (isinstance(pf,(float,int,np.floating)) and not math.isfinite(float(pf))) else (f"{float(pf):.2f}" if pf==pf else "-")
+        pf_str = "∞" if (isinstance(pf, (float, int, np.floating)) and not math.isfinite(float(pf))) else (f"{float(pf):.2f}" if pf == pf else "-")
         vals = {
-            "Trades": f"{int(stats.get('trades',0))}",
-            "Win Rate": fmt_pct(stats.get('winrate'),1),
+            "Trades": f"{int(stats.get('trades', 0))}",
+            "Win Rate": fmt_pct(stats.get('winrate'), 1),
             "Profit Factor": pf_str,
-            "Max DD": fmt_pct(stats.get('max_dd_pct'),1),
-            "Total Return": fmt_pct(stats.get('total_return_pct'),1),
-            "CAGR": fmt_pct(stats.get('cagr_pct'),1),
-            "Avg Trade": fmt_pct(stats.get('avg_trade_pct'),2),
-            "Expectancy": fmt_pct(stats.get('avg_trade_pct'),2),
-            "Median Trade": fmt_pct(stats.get('median_trade_pct'),2),
-            "Avg Hold": (f"{float(stats.get('avg_hold_days')):.1f} hari" 
-                        if stats.get('avg_hold_days',np.nan)==stats.get('avg_hold_days',np.nan) else "-"),
-            "Best Trade": fmt_pct(stats.get('best_trade_pct'),2),
-            "Worst Trade": fmt_pct(stats.get('worst_trade_pct'),2),
+            "Max DD": fmt_pct(stats.get('max_dd_pct'), 1),
+            "Total Return": fmt_pct(stats.get('total_return_pct'), 1),
+            "CAGR": fmt_pct(stats.get('cagr_pct'), 1),
+            "Avg Trade": fmt_pct(stats.get('avg_trade_pct'), 2),
+            "Expectancy": fmt_pct(stats.get('avg_trade_pct'), 2),
+            "Median Trade": fmt_pct(stats.get('median_trade_pct'), 2),
+            "Avg Hold": (f"{float(stats.get('avg_hold_days')):.1f} hari"
+                        if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-"),
+            "Best Trade": fmt_pct(stats.get('best_trade_pct'), 2),
+            "Worst Trade": fmt_pct(stats.get('worst_trade_pct'), 2),
         }
 
-        # render metric cards dengan popover ℹ️
         def metric_card(label: str, value: str):
-            html = f"""
-            <div class="mcard">
-              <div class="mcard-top">
-                 <div class="mcard-label">{escape(label)}</div>
-                 <details class="mcard-info">
-                   <summary aria-label="Info">ℹ️</summary>
-                   <div class="mcard-pop">{escape(TT.get(label,''))}</div>
-                 </details>
-              </div>
-              <div class="mcard-value">{escape(value)}</div>
-            </div>
-            """
+            html = """
+<div class="mcard">
+  <div class="mcard-top">
+     <div class="mcard-label">{lbl}</div>
+     <details class="mcard-info">
+       <summary aria-label="Info">ℹ️</summary>
+       <div class="mcard-pop">{desc}</div>
+     </details>
+  </div>
+  <div class="mcard-value">{val}</div>
+</div>
+""".format(lbl=escape(label), desc=escape(TT.get(label, "")), val=escape(value))
             st.markdown(html, unsafe_allow_html=True)
 
         st.markdown('<div class="mcards">', unsafe_allow_html=True)
-        for label in ["Trades","Win Rate","Profit Factor","Max DD","Total Return","CAGR",
-                      "Avg Trade","Expectancy","Median Trade","Avg Hold","Best Trade","Worst Trade"]:
+        for label in ["Trades", "Win Rate", "Profit Factor", "Max DD", "Total Return", "CAGR",
+                      "Avg Trade", "Expectancy", "Median Trade", "Avg Hold", "Best Trade", "Worst Trade"]:
             metric_card(label, vals[label])
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -966,11 +1002,10 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
             unsafe_allow_html=True,
         )
 
-        # equity curve
         if not eq_df.empty:
             figEQ = px.line(eq_df, x="date", y="equity", title="Equity Curve (1.0 = awal)")
             figEQ.add_hline(y=1.0, line_dash="dot", line_color="#94a3b8", annotation_text="Start")
-            figEQ.update_traces(line={'width':2.2})
+            figEQ.update_traces(line={'width': 2.2})
             figEQ.update_layout(height=H_MACD, margin=dict(l=10, r=10, t=40, b=10) if MOBILE else dict(l=40, r=30, t=60, b=40))
             _apply_time_axis(figEQ, pd.to_datetime(eq_df["date"]), start, end, st.session_state["hide_non_trading"])
             st.plotly_chart(figEQ, use_container_width=True)
@@ -978,14 +1013,13 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
                                data=eq_df.to_csv(index=False).encode("utf-8"),
                                file_name=f"equity_curve_{bt_symbol}_{start}_to_{end}.csv", mime="text/csv")
 
-        # trades table
         if not trades.empty:
             tv = trades.copy()
             if "entry_price" in tv.columns: tv["entry_price"] = tv["entry_price"].map(lambda x: f"{x:,.0f}".replace(",", "."))
             if "exit_price" in tv.columns:  tv["exit_price"]  = tv["exit_price"].map(lambda x: f"{x:,.0f}".replace(",", "."))
             if "ret_pct" in tv.columns:     tv["ret_pct"]     = tv["ret_pct"].map(lambda x: f"{x:.2f}%")
             if "hold_days" in tv.columns:   tv["hold_days"]   = tv["hold_days"].astype(int)
-            cols = [c for c in ["entry_date","entry_price","exit_date","exit_price","hold_days","ret_pct"] if c in tv.columns]
+            cols = [c for c in ["entry_date", "entry_price", "exit_date", "exit_price", "hold_days", "ret_pct"] if c in tv.columns]
             st.dataframe(tv[cols], use_container_width=True, height=TRADES_H)
             st.download_button("⬇️ Download Trades CSV",
                                data=trades.to_csv(index=False).encode("utf-8"),
