@@ -11,6 +11,8 @@ import pandas as pd
 import numpy as np
 import math
 import streamlit as st
+from typing import Optional
+from datetime import timedelta, date
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -263,7 +265,7 @@ def macd_cross_flags(delta: pd.Series):
 
 
 def scan_universe(kodes: list, start: date, end: date, fast: int, slow: int, sig: int,
-                  nf_window: int = 5, filter_nf: bool = True, only_recent_days: int | None = 15,
+                  nf_window: int = 5, filter_nf: bool = True, only_recent_days: Optional[int] = 15,
                   require_above_zero: bool = False) -> pd.DataFrame:
     rows = []
     for kd in kodes:
@@ -488,7 +490,7 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
 
 def scan_universe_fast(df_bulk: pd.DataFrame, fast: int, slow: int, sig: int,
                        nf_window: int = 5, filter_nf: bool = True,
-                       only_recent_days: int | None = 15,
+                       only_recent_days: Optional[int] = 15,
                        require_above_zero: bool = False) -> pd.DataFrame:
     if df_bulk is None or df_bulk.empty:
         return pd.DataFrame()
