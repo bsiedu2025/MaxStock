@@ -1,9 +1,8 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus (HP-friendly + Scanner Chips + Export + Send-to-Backtest)
-# - 📱 Mobile Mode toggle
-# - Scanner: chip filter cepat (≤3D, NF≥p75, MACD>0), Export Watchlist, tombol "Kirim ke Backtest" per ticker
-# - Backtest metrics dihitung DI DALAM backtest_macd(...)
-# - Python 3.10 friendly, guard kolom fleksibel
+# Daily Stock Movement – Foreign Flow Focus
+# Fix: Persist scanner results (session_state) + Send-to-Backtest tanpa menghapus hasil scan
+# Plus: Mobile Mode, chips filter, export watchlist, export current view
+# Backtest metrics tetap di dalam backtest_macd(...). Python 3.10 friendly, kolom guarded.
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -34,7 +33,6 @@ st.markdown(
         backdrop-filter: blur(6px); border-bottom: 1px solid #e5e7eb; padding: .5rem .25rem .75rem .25rem;
         box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04);
     }
-    /* chip look (untuk checkbox filter cepat) */
     .chip label { border:1px solid #e5e7eb; padding:6px 10px; border-radius:9999px; background:#fff; }
     @media (max-width: 480px) {
       .sticky-filter { padding: .35rem .15rem .5rem .15rem; }
@@ -88,7 +86,7 @@ def date_bounds():
         _close(con)
 
 @st.cache_data(ttl=300)
-def get_trade_dates(kode: str) -> pd.Series:
+def get_trade_dates(kode):
     con = get_db_connection(); _alive(con)
     try:
         q = "SELECT trade_date FROM data_harian WHERE kode_saham=%s ORDER BY trade_date"
@@ -100,7 +98,7 @@ def get_trade_dates(kode: str) -> pd.Series:
         _close(con)
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
+def load_series(kode, start, end):
     con = get_db_connection(); _alive(con)
     try:
         cols_df = pd.read_sql(
@@ -144,7 +142,7 @@ def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
         _close(con)
 
 # === rangebreaks ===
-def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
+def _compute_rangebreaks(trade_dates, start, end, hide_non_trading):
     if not hide_non_trading:
         return []
     rb = [dict(bounds=["sat", "mon"])]
@@ -158,12 +156,12 @@ def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date, hide_no
             rb.append(dict(values=holidays))
     return rb
 
-def _apply_time_axis(fig, trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
+def _apply_time_axis(fig, trade_dates, start, end, hide_non_trading):
     fig.update_xaxes(rangebreaks=_compute_rangebreaks(trade_dates, start, end, hide_non_trading))
     return fig
 
 # === metrics helper ===
-def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_metrics(df):
     df = df.copy()
     if "net_foreign_value" not in df.columns or df["net_foreign_value"].isna().all():
         if {"foreign_buy", "foreign_sell"}.issubset(df.columns):
@@ -195,7 +193,7 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # rolling & derived
-def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
+def add_rolling(df, adv_mode):
     df = df.sort_values("trade_date").copy()
     nilai = pd.to_numeric(df.get("nilai"), errors="coerce")
     mode_to_win = {"1 Bulan": 20, "3 Bulan": 60, "6 Bulan": 120, "1 Tahun": 252}
@@ -211,7 +209,7 @@ def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
     return df
 
 # utils
-def idr_short(x: float) -> str:
+def idr_short(x):
     try: n = float(x)
     except Exception: return "-"
     a = abs(n)
@@ -246,7 +244,7 @@ def get_macd_params():
     return f, s, g
 
 # --- MACD core ---
-def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
+def macd_series(close, fast, slow, sig):
     close = pd.to_numeric(close, errors="coerce").dropna()
     ema_fast = close.ewm(span=fast, adjust=False, min_periods=1).mean()
     ema_slow = close.ewm(span=slow, adjust=False, min_periods=1).mean()
@@ -255,7 +253,7 @@ def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
     delta = macd - signal
     return macd, signal, delta
 
-def macd_cross_flags(delta: pd.Series):
+def macd_cross_flags(delta):
     prev = delta.shift(1)
     bull = (prev <= 0) & (delta > 0)
     bear = (prev >= 0) & (delta < 0)
@@ -263,7 +261,7 @@ def macd_cross_flags(delta: pd.Series):
 
 # -------- Bulk fetch (scanner) --------
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
+def fetch_ohlc_bulk(codes, start, end, chunk_size=200):
     if not codes:
         return pd.DataFrame()
     con = get_db_connection(); _alive(con)
@@ -315,15 +313,15 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
         _close(con)
 
 def scan_universe_fast(
-    df_bulk: pd.DataFrame,
-    fast: int,
-    slow: int,
-    sig: int,
-    nf_window: int = 5,
-    filter_nf: bool = True,
-    only_recent_days: int | None = 15,
-    require_above_zero: bool = False,
-) -> pd.DataFrame:
+    df_bulk,
+    fast,
+    slow,
+    sig,
+    nf_window=5,
+    filter_nf=True,
+    only_recent_days=15,
+    require_above_zero=False,
+):
     if df_bulk is None or df_bulk.empty:
         return pd.DataFrame()
     out = []
@@ -373,14 +371,14 @@ def scan_universe_fast(
 
 # -------- Backtest (metrics di dalam fungsi) --------
 def backtest_macd(
-    df_price: pd.DataFrame,
-    fast: int,
-    slow: int,
-    sig: int,
-    require_above_zero: bool = False,
-    nf_window: int = 0,
-    require_nf: bool = False,
-    fee_bp: int = 0,
+    df_price,
+    fast,
+    slow,
+    sig,
+    require_above_zero=False,
+    nf_window=0,
+    require_nf=False,
+    fee_bp=0,
 ):
     # pilih close
     close = None
@@ -517,7 +515,7 @@ if "macd_signal" not in st.session_state:
 if "mobile_mode" not in st.session_state:
     st.session_state["mobile_mode"] = False
 if "bt_symbol" not in st.session_state:
-    st.session_state["bt_symbol"] = st.session_state.get("kode_saham")  # sinkron awal
+    st.session_state["bt_symbol"] = st.session_state.get("kode_saham")
 if "open_backtest" not in st.session_state:
     st.session_state["open_backtest"] = False
 
@@ -573,7 +571,7 @@ st.radio(
     horizontal=not MOBILE,
 )
 
-def _apply_quick(choice: str):
+def _apply_quick(choice):
     if choice == "Custom": return
     start, end = td_min, td_max
     if choice == "1 Tahun":
@@ -966,25 +964,27 @@ with st.expander("Tabel data mentah (siap export)"):
 st.caption("💡 Aktifkan **📱 Mobile Mode** untuk tampilan ringkas di HP: radio vertikal, chart dipendekkan, margin kecil, KPI ditumpuk.")
 
 # ============================
-# 🔎 Scanner — MACD Cross + Net Foreign (dengan chips & export watchlist)
+# 🔎 Scanner — MACD Cross + Net Foreign (persist hasil + chips & export)
 # ============================
 st.divider()
 with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
     c1, c2, c3 = st.columns([1, 1, 1])
-    with c1: scan_all = st.checkbox("Scan semua kode", value=True)
-    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=15, step=1)
-    with c3: require_above_zero = st.checkbox("Syarat MACD > 0", value=False)
+    with c1: scan_all = st.checkbox("Scan semua kode", value=True, key="scan_all")
+    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=15, step=1, key="scan_recency")
+    with c3: require_above_zero = st.checkbox("Syarat MACD > 0", value=False, key="scan_macdpos")
 
     d1, d2, d3 = st.columns([1, 1, 1])
-    with d1: require_nf = st.checkbox("Syarat NF rolling ≥ 0", value=True)
-    with d2: nf_window  = st.number_input("Window NF (hari)", min_value=1, max_value=30, value=5, step=1)
+    with d1: require_nf = st.checkbox("Syarat NF rolling ≥ 0", value=True, key="scan_reqnf")
+    with d2: nf_window  = st.number_input("Window NF (hari)", min_value=1, max_value=30, value=5, step=1, key="scan_nfwin")
     with d3:
         preset_txt = ",".join(map(str, get_macd_params()))
         st.caption(f"Preset MACD aktif: **{preset_txt}**")
 
-    watchlist = codes if scan_all else st.multiselect("Watchlist", options=codes, default=[kode] if kode else [])
-    run_scan = st.button("🚀 Jalankan Scan", type="primary")
+    watchlist = codes if scan_all else st.multiselect("Watchlist", options=codes, default=[kode] if kode else [], key="scan_watchlist")
+    run_scan = st.button("🚀 Jalankan Scan", type="primary", key="btn_scan")
 
+    # --- Persist / restore hasil scan ---
+    df_scan = None
     if run_scan:
         with st.spinner("Mengambil data & scanning cepat..."):
             fast, slow, sig = get_macd_params()
@@ -997,95 +997,114 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                 nf_window=int(nf_window), filter_nf=bool(require_nf),
                 only_recent_days=int(recency), require_above_zero=bool(require_above_zero),
             )
-
-        if df_scan is None or df_scan.empty:
-            st.info("Tidak ada hasil yang memenuhi filter.")
-        else:
-            # --- dynamic NF column & p75 ---
-            nf_col = None
-            for c in df_scan.columns:
-                if c.startswith("NF_sum_") and c.endswith("d"):
-                    nf_col = c; break
-
-            # sort default
-            sort_cols, ascending = [], []
-            if "qualifies" in df_scan.columns: sort_cols.append("qualifies"); ascending.append(False)
-            if "days_ago" in df_scan.columns: sort_cols.append("days_ago"); ascending.append(True)
-            if "last_cross_date" in df_scan.columns: sort_cols.append("last_cross_date"); ascending.append(False)
-            if nf_col: sort_cols.append(nf_col); ascending.append(False)
-
-            df_scan_sorted = df_scan.sort_values(sort_cols, ascending=ascending) if sort_cols else df_scan.copy()
-
-            # --- chips (quick filters) ---
-            st.markdown("**Quick filters**")
-            ch1, ch2, ch3 = st.columns(3)
-            with ch1:
-                chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", help="Hanya cross yang terjadi maksimal 3 hari lalu.", value=False)
-            with ch2:
-                if nf_col and df_scan[nf_col].notna().any():
-                    nf_p75_val = float(np.nanpercentile(df_scan[nf_col], 75))
-                    chip_nf_p75 = st.checkbox(f"NF ≥ p75 (≈ {nf_p75_val:,.0f})", key="chip_nf_p75", value=False)
-                else:
-                    nf_p75_val = None
-                    chip_nf_p75 = st.checkbox("NF ≥ p75", key="chip_nf_p75", value=False, disabled=True)
-            with ch3:
-                chip_macd_pos = st.checkbox("MACD > 0", key="chip_macd_pos", value=False)
-
-            # apply chips
-            view = df_scan_sorted.copy()
-            if chip_recent3 and "days_ago" in view.columns:
-                view = view[view["days_ago"] <= 3]
-            if chip_macd_pos and "macd_above_zero" in view.columns:
-                view = view[view["macd_above_zero"] == True]
-            if chip_nf_p75 and nf_col and nf_p75_val is not None:
-                view = view[view[nf_col] >= nf_p75_val]
-
-            # show table
-            order_cols = [
-                "qualifies","days_ago","last_cross_date","kode","last_cross",
-                "macd_above_zero", nf_col if nf_col else None, "close_last",
-            ]
-            order_cols = [c for c in order_cols if c and c in view.columns]
-            st.dataframe(view[order_cols], use_container_width=True, height=SCAN_H)
-
-            # export watchlist (≤3D & NF≥p75) tombol cepat
-            if nf_col and nf_p75_val is not None:
-                quick_watch = df_scan_sorted.copy()
-                quick_watch = quick_watch[(quick_watch["days_ago"] <= 3) & (quick_watch[nf_col] >= nf_p75_val)]
-                st.download_button(
-                    "⬇️ Export Watchlist (≤3D & NF≥p75)",
-                    data=quick_watch.to_csv(index=False).encode("utf-8"),
-                    file_name=f"watchlist_quick_{start_scan}_to_{end}.csv",
-                    mime="text/csv",
-                    help="Hasil filter cepat untuk monitoring intraday.",
-                )
-
-            # --- Kirim ke Backtest per-ticker (tombol) ---
-            st.markdown("**Kirim ke Backtest (per-ticker)**")
-            if view.empty:
-                st.caption("— Tidak ada kandidat pada filter yang dipilih.")
-            else:
-                max_buttons = 30  # batasi agar UI ringan
-                show_rows = view.head(max_buttons)
-                for _, row in show_rows.iterrows():
-                    colA, colB, colC, colD, colE = st.columns([1.2, 1, 0.8, 1.2, 1])
-                    with colA: st.write(f"**{row.get('kode','-')}**")
-                    with colB: st.write(row.get("last_cross","-"))
-                    with colC: st.write(f"D{int(row.get('days_ago',-1))}" if not pd.isna(row.get('days_ago')) else "-")
-                    with colD:
-                        if nf_col:
-                            val = row.get(nf_col, np.nan)
-                            st.write(f"NF: {val:,.0f}" if pd.notna(val) else "NF: -")
-                        else:
-                            st.write("NF: -")
-                    with colE:
-                        if st.button("Kirim ke Backtest", key=f"send_bt_{row.get('kode','?')}"):
-                            st.session_state["bt_symbol"] = row.get("kode")
-                            st.session_state["open_backtest"] = True
-                            try: st.rerun()
-                            except Exception: st.experimental_rerun()
+        st.session_state["scanner_df"] = df_scan
+        st.session_state["scanner_meta"] = {
+            "start_scan": start_scan, "end": end, "nf_window": int(nf_window),
+            "recency": int(recency), "require_nf": bool(require_nf), "require_above_zero": bool(require_above_zero),
+        }
     else:
-        st.caption("Klik **Jalankan Scan** untuk mulai. Scanner pakai bulk query + vectorized MACD biar ngebut.")
+        df_scan = st.session_state.get("scanner_df", None)
+
+    # Tombol clear
+    col_clear, _ = st.columns([1, 4])
+    with col_clear:
+        if st.button("🧹 Clear hasil scan", key="btn_clear_scan"):
+            for k in ["scanner_df", "scanner_meta"]:
+                if k in st.session_state: del st.session_state[k]
+            st.stop()
+
+    if df_scan is None or df_scan.empty:
+        st.caption("Klik **Jalankan Scan** untuk mulai. Hasil scan disimpan agar tidak hilang saat klik tombol lain.")
+    else:
+        # dynamic NF col & p75
+        nf_col = None
+        for c in df_scan.columns:
+            if c.startswith("NF_sum_") and c.endswith("d"):
+                nf_col = c; break
+
+        # sort default
+        sort_cols, ascending = [], []
+        if "qualifies" in df_scan.columns: sort_cols.append("qualifies"); ascending.append(False)
+        if "days_ago" in df_scan.columns: sort_cols.append("days_ago"); ascending.append(True)
+        if "last_cross_date" in df_scan.columns: sort_cols.append("last_cross_date"); ascending.append(False)
+        if nf_col: sort_cols.append(nf_col); ascending.append(False)
+        df_scan_sorted = df_scan.sort_values(sort_cols, ascending=ascending) if sort_cols else df_scan.copy()
+
+        # chips
+        st.markdown("**Quick filters**")
+        ch1, ch2, ch3 = st.columns(3)
+        with ch1:
+            chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", value=False)
+        with ch2:
+            if nf_col and df_scan[nf_col].notna().any():
+                nf_p75_val = float(np.nanpercentile(df_scan[nf_col], 75))
+                chip_nf_p75 = st.checkbox(f"NF ≥ p75 (≈ {nf_p75_val:,.0f})", key="chip_nf_p75", value=False)
+            else:
+                nf_p75_val = None
+                chip_nf_p75 = st.checkbox("NF ≥ p75", key="chip_nf_p75", value=False, disabled=True)
+        with ch3:
+            chip_macd_pos = st.checkbox("MACD > 0", key="chip_macd_pos", value=False)
+
+        # apply chips
+        view = df_scan_sorted.copy()
+        if chip_recent3 and "days_ago" in view.columns:
+            view = view[view["days_ago"] <= 3]
+        if chip_macd_pos and "macd_above_zero" in view.columns:
+            view = view[view["macd_above_zero"] == True]
+        if chip_nf_p75 and nf_col and nf_p75_val is not None:
+            view = view[view[nf_col] >= nf_p75_val]
+
+        # show table
+        order_cols = [
+            "qualifies","days_ago","last_cross_date","kode","last_cross",
+            "macd_above_zero", nf_col if nf_col else None, "close_last",
+        ]
+        order_cols = [c for c in order_cols if c and c in view.columns]
+        st.dataframe(view[order_cols], use_container_width=True, height=SCAN_H)
+
+        # export buttons
+        if nf_col and nf_p75_val is not None:
+            quick_watch = df_scan_sorted.copy()
+            quick_watch = quick_watch[(quick_watch["days_ago"] <= 3) & (quick_watch[nf_col] >= nf_p75_val)]
+            st.download_button(
+                "⬇️ Export Watchlist (≤3D & NF≥p75)",
+                data=quick_watch.to_csv(index=False).encode("utf-8"),
+                file_name=f"watchlist_quick_{st.session_state.get('scanner_meta',{}).get('start_scan', start)}_to_{end}.csv",
+                mime="text/csv",
+            )
+        st.download_button(
+            "⬇️ Export Current View",
+            data=view.to_csv(index=False).encode("utf-8"),
+            file_name="scan_current_view.csv",
+            mime="text/csv",
+        )
+
+        # --- Kirim ke Backtest per-ticker ---
+        st.markdown("**Kirim ke Backtest (per-ticker)**")
+        if view.empty:
+            st.caption("— Tidak ada kandidat pada filter yang dipilih.")
+        else:
+            max_buttons = 50
+            show_rows = view.head(max_buttons)
+            for i, (_, row) in enumerate(show_rows.iterrows()):
+                colA, colB, colC, colD, colE = st.columns([1.2, 1, 0.8, 1.2, 1])
+                with colA: st.write(f"**{row.get('kode','-')}**")
+                with colB: st.write(row.get("last_cross","-"))
+                with colC:
+                    dago = row.get("days_ago", np.nan)
+                    st.write(f"D{int(dago)}" if pd.notna(dago) else "-")
+                with colD:
+                    if nf_col:
+                        val = row.get(nf_col, np.nan)
+                        st.write(f"NF: {val:,.0f}" if pd.notna(val) else "NF: -")
+                    else:
+                        st.write("NF: -")
+                with colE:
+                    if st.button("Kirim ke Backtest", key=f"send_bt_{i}_{row.get('kode','?')}"):
+                        st.session_state["bt_symbol"] = row.get("kode")
+                        st.session_state["open_backtest"] = True
+                        # Tidak perlu st.rerun(); klik button otomatis trigger rerun
+                        # Hasil scan tetap ada karena disimpan di session_state["scanner_df"]
 
 # ============================
 # 🧪 Backtest — MACD Rules (simple)
@@ -1093,7 +1112,6 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
     b1, b2, b3 = st.columns([1, 1, 1])
-    # pilih default symbol dari session_state['bt_symbol'] bila ada
     current_bt_symbol = st.session_state.get("bt_symbol", st.session_state.get("kode_saham"))
     try:
         idx_default = codes.index(current_bt_symbol) if (codes and current_bt_symbol in codes) else 0
@@ -1101,7 +1119,7 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
         idx_default = 0
     with b1:
         bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default < len(codes) else 0)
-        st.session_state["bt_symbol"] = bt_symbol  # sinkron tiap perubahan
+        st.session_state["bt_symbol"] = bt_symbol
     with b2: bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1)
     with b3: bt_require_above = st.checkbox("Entry hanya jika MACD > 0", value=False)
 
