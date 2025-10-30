@@ -420,29 +420,65 @@ def backtest_macd(df_price: pd.DataFrame, fast: int, slow: int, sig: int,
 
 # -------- Bulk fetch for fast scanner --------
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_ohlc_bulk(codes, start, end):
+def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
+    """Bulk fetch close & NF untuk banyak kode dengan fallback kolom dinamis dan chunking.
+    Menghindari error kolom tidak ada dan query IN yang terlalu panjang.
+    """
     if not codes:
         return pd.DataFrame()
     con = get_db_connection(); _alive(con)
     try:
-        placeholders = ','.join(['%s'] * len(codes))
-        sql = f"""
-            SELECT kode_saham,
-                   trade_date,
-                   COALESCE(penutupan, close_price) AS close,
-                   net_foreign_value
-            FROM data_harian
-            WHERE trade_date BETWEEN %s AND %s
-              AND kode_saham IN ({placeholders})
-            ORDER BY kode_saham, trade_date
-        """
-        params = [start, end] + list(codes)
-        df = pd.read_sql(sql, con, params=params)
+        # --- Deteksi kolom tersedia ---
+        cols = pd.read_sql(
+            "SELECT LOWER(column_name) AS col FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = 'data_harian'", con
+        )
+        have = set(cols['col'].tolist())
+        # harga penutupan candidates
+        price_candidates = ['penutupan', 'close_price', 'closing', 'close']
+        price_col = next((c for c in price_candidates if c in have), None)
+        if price_col is None:
+            raise RuntimeError("Tidak ditemukan kolom harga penutupan pada data_harian (butuh salah satu dari penutupan/close_price/closing/close)")
+        # net foreign:
+        nf_expr = None
+        if 'net_foreign_value' in have:
+            nf_expr = 'net_foreign_value'
+        elif {'foreign_buy','foreign_sell'}.issubset(have):
+            nf_expr = '(foreign_buy - foreign_sell)'
+        else:
+            nf_expr = 'NULL'
+
+        # --- Ambil per chunk ---
+        all_parts = []
+        start_param = pd.to_datetime(start)
+        end_param = pd.to_datetime(end)
+        for i in range(0, len(codes), max(1, int(chunk_size))):
+            chunk = codes[i:i+chunk_size]
+            if not chunk:
+                continue
+            placeholders = ','.join(['%s'] * len(chunk))
+            sql = f"""
+                SELECT kode_saham,
+                       trade_date,
+                       {price_col} AS close,
+                       {nf_expr} AS net_foreign_value
+                FROM data_harian
+                WHERE trade_date BETWEEN %s AND %s
+                  AND kode_saham IN ({placeholders})
+                ORDER BY kode_saham, trade_date
+            """
+            params = [start_param, end_param] + list(chunk)
+            part = pd.read_sql(sql, con, params=params)
+            all_parts.append(part)
+        if not all_parts:
+            return pd.DataFrame()
+        df = pd.concat(all_parts, ignore_index=True)
         if df.empty:
             return df
         df['trade_date'] = pd.to_datetime(df['trade_date'])
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
-        df['net_foreign_value'] = pd.to_numeric(df['net_foreign_value'], errors='coerce')
+        if 'net_foreign_value' in df.columns:
+            df['net_foreign_value'] = pd.to_numeric(df['net_foreign_value'], errors='coerce')
         df = df.dropna(subset=['close'])
         return df
     finally:
@@ -456,6 +492,7 @@ def scan_universe_fast(df_bulk: pd.DataFrame, fast: int, slow: int, sig: int,
     if df_bulk is None or df_bulk.empty:
         return pd.DataFrame()
     out = []
+    global_end = pd.to_datetime(df_bulk['trade_date'].max()) if not df_bulk.empty else pd.to_datetime(end)
     for kd, g in df_bulk.groupby('kode_saham'):
         g = g.sort_values('trade_date').copy()
         close = g['close']
@@ -470,10 +507,10 @@ def scan_universe_fast(df_bulk: pd.DataFrame, fast: int, slow: int, sig: int,
                 last_type, last_date = 'Bearish', last_bear_date
         if last_date is None:
             continue
-        days_ago = (pd.to_datetime(df_bulk['trade_date'].max()).normalize() - pd.to_datetime(last_date).normalize()).days
+        days_ago = (global_end.normalize() - pd.to_datetime(last_date).normalize()).days
         nf_sum = np.nan
         nf_ok = True
-        if filter_nf:
+        if filter_nf and 'net_foreign_value' in g.columns:
             nf = g['net_foreign_value'].fillna(0.0)
             nf_sum = float(nf.tail(int(nf_window)).sum())
             nf_ok = nf_sum >= 0
