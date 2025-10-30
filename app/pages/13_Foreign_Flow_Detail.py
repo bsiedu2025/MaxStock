@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
+import math
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -1059,7 +1060,8 @@ st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=False):
     b1, b2, b3 = st.columns([1,1,1])
     with b1:
-        bt_symbol = st.selectbox("Kode saham", options=codes, index=(codes.index(kode) if kode in codes else 0))
+        idx_default = (codes.index(kode) if (codes and kode in codes) else 0)
+        bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default < len(codes) else 0)
     with b2:
         bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1)
     with b3:
@@ -1076,20 +1078,33 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=False):
         st.info("Data kosong untuk backtest.")
     else:
         with st.spinner("Menjalankan backtest..."):
-            fast, slow, sig = get_macd_params()
-            trades, eq_df, stats = backtest_macd(
-                df_bt, fast, slow, sig,
-                require_above_zero=bool(bt_require_above),
-                nf_window=int(bt_nf_window), require_nf=bool(bt_require_nf),
-                fee_bp=int(bt_fee)
-            )
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Trades", int(stats.get("trades", 0)))
-        m2.metric("Win Rate", f"{stats.get('winrate', np.nan):.1f}%" if not pd.isna(stats.get('winrate', np.nan)) else "-")
-        pf_val = stats.get("profit_factor", np.nan)
-        m3.metric("Profit Factor", "∞" if isinstance(pf_val, float) and np.isinf(pf_val) else (f"{pf_val:.2f}" if not pd.isna(pf_val) else "-"))
-        m4.metric("Max DD", f"{stats.get('max_dd_pct', np.nan):.1f}%" if not pd.isna(stats.get('max_dd_pct', np.nan)) else "-")
-        m5.metric("Total Return", f"{stats.get('total_return_pct', np.nan):.1f}%" if not pd.isna(stats.get('total_return_pct', np.nan)) else "-")
+            try:
+                fast, slow, sig = get_macd_params()
+                trades, eq_df, stats = backtest_macd(
+                    df_bt, fast, slow, sig,
+                    require_above_zero=bool(bt_require_above),
+                    nf_window=int(bt_nf_window), require_nf=bool(bt_require_nf),
+                    fee_bp=int(bt_fee)
+                )
+            except Exception as e:
+                st.error("Backtest error: " + str(e))
+                trades, eq_df, stats = pd.DataFrame(), pd.DataFrame(), {"trades":0,"winrate":np.nan,"profit_factor":np.nan,"max_dd_pct":np.nan,"cagr_pct":np.nan,"total_return_pct":np.nan}
+
+        # --- Metrics ---
+        try:
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Trades", int(stats.get("trades", 0)))
+            winrate_val = stats.get('winrate', np.nan)
+            m2.metric("Win Rate", f"{float(winrate_val):.1f}%" if winrate_val==winrate_val else "-")
+            pf_val = stats.get("profit_factor", np.nan)
+            pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val==pf_val else "-")
+            m3.metric("Profit Factor", pf_str)
+            dd_val = stats.get('max_dd_pct', np.nan)
+            m4.metric("Max DD", f"{float(dd_val):.1f}%" if dd_val==dd_val else "-")
+            tr_val = stats.get('total_return_pct', np.nan)
+            m5.metric("Total Return", f"{float(tr_val):.1f}%" if tr_val==tr_val else "-")
+        except Exception as e:
+            st.caption("⚠️ Gagal menampilkan ringkasan metrics: " + str(e))
 
         if not eq_df.empty:
             figEQ = px.line(eq_df, x="date", y="equity", title="Equity Curve (1.0 = awal)")
