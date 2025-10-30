@@ -1,8 +1,9 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus
-# Fix: Persist scanner results (session_state) + Send-to-Backtest tanpa menghapus hasil scan
-# Plus: Mobile Mode, chips filter, export watchlist, export current view
-# Backtest metrics tetap di dalam backtest_macd(...). Python 3.10 friendly, kolom guarded.
+# Daily Stock Movement – Foreign Flow Focus (HP-friendly + Scanner persist + Backtest polished)
+# - 📱 Mobile Mode toggle
+# - Scanner: chip filter cepat (≤3D, NF≥p75, MACD>0), Export, "Kirim ke Backtest" (persist hasil)
+# - Backtest: UI dirapikan, metrik lengkap; SEMUA perhitungan metrik ADA DI DALAM backtest_macd(...)
+# - Python 3.10 friendly, guard kolom fleksibel
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -34,6 +35,8 @@ st.markdown(
         box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04);
     }
     .chip label { border:1px solid #e5e7eb; padding:6px 10px; border-radius:9999px; background:#fff; }
+    /* metric subtle titles */
+    .metric-note { color:#64748b; font-size:12px; margin-top:-6px; }
     @media (max-width: 480px) {
       .sticky-filter { padding: .35rem .15rem .5rem .15rem; }
       div[role='radiogroup'] label { padding:6px 10px; }
@@ -86,7 +89,7 @@ def date_bounds():
         _close(con)
 
 @st.cache_data(ttl=300)
-def get_trade_dates(kode):
+def get_trade_dates(kode: str) -> pd.Series:
     con = get_db_connection(); _alive(con)
     try:
         q = "SELECT trade_date FROM data_harian WHERE kode_saham=%s ORDER BY trade_date"
@@ -98,7 +101,7 @@ def get_trade_dates(kode):
         _close(con)
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_series(kode, start, end):
+def load_series(kode: str, start: date, end: date) -> pd.DataFrame:
     con = get_db_connection(); _alive(con)
     try:
         cols_df = pd.read_sql(
@@ -142,7 +145,7 @@ def load_series(kode, start, end):
         _close(con)
 
 # === rangebreaks ===
-def _compute_rangebreaks(trade_dates, start, end, hide_non_trading):
+def _compute_rangebreaks(trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
     if not hide_non_trading:
         return []
     rb = [dict(bounds=["sat", "mon"])]
@@ -156,12 +159,12 @@ def _compute_rangebreaks(trade_dates, start, end, hide_non_trading):
             rb.append(dict(values=holidays))
     return rb
 
-def _apply_time_axis(fig, trade_dates, start, end, hide_non_trading):
+def _apply_time_axis(fig, trade_dates: pd.Series, start: date, end: date, hide_non_trading: bool):
     fig.update_xaxes(rangebreaks=_compute_rangebreaks(trade_dates, start, end, hide_non_trading))
     return fig
 
 # === metrics helper ===
-def ensure_metrics(df):
+def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "net_foreign_value" not in df.columns or df["net_foreign_value"].isna().all():
         if {"foreign_buy", "foreign_sell"}.issubset(df.columns):
@@ -193,7 +196,7 @@ def ensure_metrics(df):
     return df
 
 # rolling & derived
-def add_rolling(df, adv_mode):
+def add_rolling(df: pd.DataFrame, adv_mode: str) -> pd.DataFrame:
     df = df.sort_values("trade_date").copy()
     nilai = pd.to_numeric(df.get("nilai"), errors="coerce")
     mode_to_win = {"1 Bulan": 20, "3 Bulan": 60, "6 Bulan": 120, "1 Tahun": 252}
@@ -209,7 +212,7 @@ def add_rolling(df, adv_mode):
     return df
 
 # utils
-def idr_short(x):
+def idr_short(x: float) -> str:
     try: n = float(x)
     except Exception: return "-"
     a = abs(n)
@@ -244,7 +247,7 @@ def get_macd_params():
     return f, s, g
 
 # --- MACD core ---
-def macd_series(close, fast, slow, sig):
+def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
     close = pd.to_numeric(close, errors="coerce").dropna()
     ema_fast = close.ewm(span=fast, adjust=False, min_periods=1).mean()
     ema_slow = close.ewm(span=slow, adjust=False, min_periods=1).mean()
@@ -253,7 +256,7 @@ def macd_series(close, fast, slow, sig):
     delta = macd - signal
     return macd, signal, delta
 
-def macd_cross_flags(delta):
+def macd_cross_flags(delta: pd.Series):
     prev = delta.shift(1)
     bull = (prev <= 0) & (delta > 0)
     bear = (prev >= 0) & (delta < 0)
@@ -261,7 +264,7 @@ def macd_cross_flags(delta):
 
 # -------- Bulk fetch (scanner) --------
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_ohlc_bulk(codes, start, end, chunk_size=200):
+def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
     if not codes:
         return pd.DataFrame()
     con = get_db_connection(); _alive(con)
@@ -313,15 +316,15 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size=200):
         _close(con)
 
 def scan_universe_fast(
-    df_bulk,
-    fast,
-    slow,
-    sig,
-    nf_window=5,
-    filter_nf=True,
-    only_recent_days=15,
-    require_above_zero=False,
-):
+    df_bulk: pd.DataFrame,
+    fast: int,
+    slow: int,
+    sig: int,
+    nf_window: int = 5,
+    filter_nf: bool = True,
+    only_recent_days: int | None = 15,
+    require_above_zero: bool = False,
+) -> pd.DataFrame:
     if df_bulk is None or df_bulk.empty:
         return pd.DataFrame()
     out = []
@@ -369,16 +372,16 @@ def scan_universe_fast(
         )
     return pd.DataFrame(out)
 
-# -------- Backtest (metrics di dalam fungsi) --------
+# -------- Backtest (SEMUA METRIK dihitung di sini) --------
 def backtest_macd(
-    df_price,
-    fast,
-    slow,
-    sig,
-    require_above_zero=False,
-    nf_window=0,
-    require_nf=False,
-    fee_bp=0,
+    df_price: pd.DataFrame,
+    fast: int,
+    slow: int,
+    sig: int,
+    require_above_zero: bool = False,
+    nf_window: int = 0,
+    require_nf: bool = False,
+    fee_bp: int = 0,
 ):
     # pilih close
     close = None
@@ -390,6 +393,8 @@ def backtest_macd(
         return pd.DataFrame(), pd.DataFrame(), {
             "trades": 0, "winrate": np.nan, "profit_factor": np.nan,
             "max_dd_pct": np.nan, "cagr_pct": np.nan, "total_return_pct": np.nan,
+            "avg_trade_pct": np.nan, "median_trade_pct": np.nan, "best_trade_pct": np.nan, "worst_trade_pct": np.nan,
+            "avg_hold_days": np.nan, "sharpe": np.nan, "vol_annual_pct": np.nan, "calmar_ratio": np.nan,
         }
 
     valid = close.notna()
@@ -424,11 +429,12 @@ def backtest_macd(
             exit_price = float(close_v.iloc[i]); exit_date = d
             ret = (exit_price / entry_price - 1.0) - 2 * fee
             equity *= (1.0 + ret)
+            hold_days = int((exit_date.date() - entry_date.date()).days)
             trades.append(
                 {
                     "entry_date": entry_date.date(), "entry_price": entry_price,
                     "exit_date": exit_date.date(), "exit_price": exit_price,
-                    "ret_pct": ret * 100.0,
+                    "ret_pct": ret * 100.0, "hold_days": hold_days,
                 }
             )
             in_pos = False; entry_price = None; entry_date = None
@@ -439,11 +445,12 @@ def backtest_macd(
         exit_price = float(close_v.iloc[-1]); exit_date = dates.iloc[-1]
         ret = (exit_price / entry_price - 1.0) - 2 * fee
         equity *= (1.0 + ret)
+        hold_days = int((exit_date.date() - entry_date.date()).days)
         trades.append(
             {
                 "entry_date": entry_date.date(), "entry_price": entry_price,
                 "exit_date": exit_date.date(), "exit_price": exit_price,
-                "ret_pct": ret * 100.0,
+                "ret_pct": ret * 100.0, "hold_days": hold_days,
             }
         )
         if equity_curve:
@@ -452,11 +459,14 @@ def backtest_macd(
     trades_df = pd.DataFrame(trades)
     eq_df = pd.DataFrame(equity_curve)
 
+    # jika tidak ada trade, tetap kembalikan metrik lengkap (NaN)
     if trades_df.empty:
         stats = {
             "trades": 0, "winrate": np.nan, "profit_factor": np.nan,
             "max_dd_pct": np.nan, "cagr_pct": np.nan,
             "total_return_pct": (eq_df["equity"].iloc[-1] - 1.0) * 100.0 if not eq_df.empty else np.nan,
+            "avg_trade_pct": np.nan, "median_trade_pct": np.nan, "best_trade_pct": np.nan, "worst_trade_pct": np.nan,
+            "avg_hold_days": np.nan, "sharpe": np.nan, "vol_annual_pct": np.nan, "calmar_ratio": np.nan,
         }
         return trades_df, eq_df, stats
 
@@ -466,6 +476,7 @@ def backtest_macd(
     pf = (wins["ret_pct"].sum() / abs(losses["ret_pct"].sum())) if not losses.empty else float("inf")
     winrate = (len(wins) / len(trades_df)) * 100.0
 
+    # equity stats
     if not eq_df.empty:
         ec = eq_df.set_index("date")["equity"]
         roll_max = ec.cummax()
@@ -473,8 +484,19 @@ def backtest_macd(
         days = (ec.index.max().date() - ec.index.min().date()).days if len(ec) > 1 else 0
         cagr = ((ec.iloc[-1]) ** (365.0 / days) - 1.0) * 100.0 if days > 0 else np.nan
         total_ret = (ec.iloc[-1] - 1.0) * 100.0
+        daily_ret = ec.pct_change().dropna()
+        vol_ann = (daily_ret.std() * math.sqrt(252)) * 100.0 if not daily_ret.empty else np.nan
+        sharpe = (daily_ret.mean() / daily_ret.std() * math.sqrt(252)) if (len(daily_ret) > 1 and daily_ret.std() != 0) else np.nan
     else:
-        max_dd = np.nan; cagr = np.nan; total_ret = np.nan
+        max_dd = np.nan; cagr = np.nan; total_ret = np.nan; vol_ann = np.nan; sharpe = np.nan
+
+    # trade stats
+    avg_trade = trades_df["ret_pct"].mean()
+    med_trade = trades_df["ret_pct"].median()
+    best_trade = trades_df["ret_pct"].max()
+    worst_trade = trades_df["ret_pct"].min()
+    avg_hold = trades_df["hold_days"].mean() if "hold_days" in trades_df.columns else np.nan
+    calmar = (cagr / abs(max_dd)) if (not pd.isna(cagr) and not pd.isna(max_dd) and max_dd != 0) else np.nan
 
     stats = {
         "trades": int(len(trades_df)),
@@ -483,6 +505,14 @@ def backtest_macd(
         "max_dd_pct": float(max_dd),
         "cagr_pct": float(cagr),
         "total_return_pct": float(total_ret),
+        "avg_trade_pct": float(avg_trade),
+        "median_trade_pct": float(med_trade),
+        "best_trade_pct": float(best_trade),
+        "worst_trade_pct": float(worst_trade),
+        "avg_hold_days": float(avg_hold) if not pd.isna(avg_hold) else np.nan,
+        "sharpe": float(sharpe) if not pd.isna(sharpe) else np.nan,
+        "vol_annual_pct": float(vol_ann) if not pd.isna(vol_ann) else np.nan,
+        "calmar_ratio": float(calmar) if not pd.isna(calmar) else np.nan,
     }
     return trades_df, eq_df, stats
 
@@ -571,7 +601,7 @@ st.radio(
     horizontal=not MOBILE,
 )
 
-def _apply_quick(choice):
+def _apply_quick(choice: str):
     if choice == "Custom": return
     start, end = td_min, td_max
     if choice == "1 Tahun":
@@ -1103,30 +1133,35 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                     if st.button("Kirim ke Backtest", key=f"send_bt_{i}_{row.get('kode','?')}"):
                         st.session_state["bt_symbol"] = row.get("kode")
                         st.session_state["open_backtest"] = True
-                        # Tidak perlu st.rerun(); klik button otomatis trigger rerun
-                        # Hasil scan tetap ada karena disimpan di session_state["scanner_df"]
+                        # Rerun otomatis oleh mekanisme tombol; hasil scan tetap karena disimpan di session_state
 
 # ============================
-# 🧪 Backtest — MACD Rules (simple)
+# 🧪 Backtest — MACD Rules (simple)  (Tampilan dirapikan)
 # ============================
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
-    b1, b2, b3 = st.columns([1, 1, 1])
+    # --- Controls row (ringkas)
+    c1, c2, c3, c4 = st.columns([1.2, 0.9, 0.9, 0.9])
     current_bt_symbol = st.session_state.get("bt_symbol", st.session_state.get("kode_saham"))
     try:
         idx_default = codes.index(current_bt_symbol) if (codes and current_bt_symbol in codes) else 0
     except Exception:
         idx_default = 0
-    with b1:
-        bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default < len(codes) else 0)
+    with c1:
+        bt_symbol = st.selectbox("Kode saham", options=codes, index=idx_default if idx_default < len(codes) else 0, key="bt_sym_sel")
         st.session_state["bt_symbol"] = bt_symbol
-    with b2: bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1)
-    with b3: bt_require_above = st.checkbox("Entry hanya jika MACD > 0", value=False)
+    with c2:
+        bt_fee = st.number_input("Biaya/Slippage (bps per sisi)", min_value=0, max_value=100, value=0, step=1, key="bt_fee")
+    with c3:
+        bt_require_above = st.checkbox("Entry hanya jika MACD > 0", value=False, key="bt_above")
+    with c4:
+        bt_require_nf = st.checkbox("Entry hanya jika NF rolling ≥ 0", value=False, key="bt_reqnf")
 
-    e1, e2 = st.columns([1, 1])
-    with e1: bt_require_nf = st.checkbox("Entry hanya jika NF rolling ≥ 0", value=False)
-    with e2: bt_nf_window  = st.number_input("NF window (hari)", min_value=1, max_value=30, value=5, step=1)
+    c5, _ = st.columns([0.9, 2.1])
+    with c5:
+        bt_nf_window  = st.number_input("NF window (hari)", min_value=1, max_value=30, value=5, step=1, key="bt_nfwin")
 
+    # --- Run backtest
     df_bt = load_series(bt_symbol, start, end)
     if df_bt.empty:
         st.info("Data kosong untuk backtest.")
@@ -1145,48 +1180,109 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
                 st.error("Backtest error: " + str(e))
                 trades, eq_df, stats = (
                     pd.DataFrame(), pd.DataFrame(),
-                    {"trades": 0,"winrate": np.nan,"profit_factor": np.nan,"max_dd_pct": np.nan,"cagr_pct": np.nan,"total_return_pct": np.nan},
+                    {"trades": 0,"winrate": np.nan,"profit_factor": np.nan,"max_dd_pct": np.nan,
+                     "cagr_pct": np.nan,"total_return_pct": np.nan,
+                     "avg_trade_pct": np.nan,"median_trade_pct": np.nan,"best_trade_pct": np.nan,"worst_trade_pct": np.nan,
+                     "avg_hold_days": np.nan,"sharpe": np.nan,"vol_annual_pct": np.nan,"calmar_ratio": np.nan},
                 )
 
+        # --- Metrics grid (2 baris)
         try:
             if not MOBILE:
-                r1, r2, r3, r4, r5 = st.columns(5)
-                r1.metric("Trades", int(stats.get("trades", 0)))
-                winrate_val = stats.get("winrate", np.nan)
-                r2.metric("Win Rate", f"{float(winrate_val):.1f}%" if winrate_val == winrate_val else "-")
+                r1 = st.columns(6)
+                r1[0].metric("Trades", int(stats.get("trades", 0)))
+                r1[1].metric("Win Rate", f"{float(stats.get('winrate', np.nan)):.1f}%"
+                            if stats.get('winrate', np.nan) == stats.get('winrate', np.nan) else "-")
                 pf_val = stats.get("profit_factor", np.nan)
                 pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val == pf_val else "-")
-                dd_val = stats.get("max_dd_pct", np.nan)
-                r3.metric("Profit Factor", pf_str)
-                r4.metric("Max DD", f"{float(dd_val):.1f}%" if dd_val == dd_val else "-")
-                tr_val = stats.get("total_return_pct", np.nan)
-                r5.metric("Total Return", f"{float(tr_val):.1f}%" if tr_val == tr_val else "-")
+                r1[2].metric("Profit Factor", pf_str)
+                r1[3].metric("Max DD", f"{float(stats.get('max_dd_pct', np.nan)):.1f}%"
+                            if stats.get('max_dd_pct', np.nan) == stats.get('max_dd_pct', np.nan) else "-")
+                r1[4].metric("Total Return", f"{float(stats.get('total_return_pct', np.nan)):.1f}%"
+                            if stats.get('total_return_pct', np.nan) == stats.get('total_return_pct', np.nan) else "-")
+                r1[5].metric("CAGR", f"{float(stats.get('cagr_pct', np.nan)):.1f}%"
+                            if stats.get('cagr_pct', np.nan) == stats.get('cagr_pct', np.nan) else "-")
+
+                r2 = st.columns(6)
+                r2[0].metric("Avg Trade", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%"
+                            if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-")
+                r2[1].metric("Expectancy", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%")
+                r2[2].metric("Median Trade", f"{float(stats.get('median_trade_pct', np.nan)):.2f}%"
+                            if stats.get('median_trade_pct', np.nan) == stats.get('median_trade_pct', np.nan) else "-")
+                r2[3].metric("Avg Hold", f"{float(stats.get('avg_hold_days', np.nan)):.1f} hari"
+                            if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-")
+                r2[4].metric("Best Trade", f"{float(stats.get('best_trade_pct', np.nan)):.2f}%"
+                            if stats.get('best_trade_pct', np.nan) == stats.get('best_trade_pct', np.nan) else "-")
+                r2[5].metric("Worst Trade", f"{float(stats.get('worst_trade_pct', np.nan)):.2f}%"
+                            if stats.get('worst_trade_pct', np.nan) == stats.get('worst_trade_pct', np.nan) else "-")
+                st.markdown(
+                    f"<div class='metric-note'>Vol tahunan ≈ {float(stats.get('vol_annual_pct', np.nan)):.1f}% · Sharpe ≈ "
+                    f"{float(stats.get('sharpe', np.nan)):.2f} · Calmar ≈ {float(stats.get('calmar_ratio', np.nan)):.2f}</div>",
+                    unsafe_allow_html=True,
+                )
             else:
-                r1, r2 = st.columns(2)
-                r1.metric("Trades", int(stats.get("trades", 0)))
-                winrate_val = stats.get("winrate", np.nan)
-                r2.metric("Win Rate", f"{float(winrate_val):.1f}%" if winrate_val == winrate_val else "-")
-                r3, r4 = st.columns(2)
+                r1c1, r1c2 = st.columns(2)
+                r1c1.metric("Trades", int(stats.get("trades", 0)))
+                r1c2.metric("Win Rate", f"{float(stats.get('winrate', np.nan)):.1f}%"
+                           if stats.get('winrate', np.nan) == stats.get('winrate', np.nan) else "-")
+                r2c1, r2c2 = st.columns(2)
                 pf_val = stats.get("profit_factor", np.nan)
                 pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val == pf_val else "-")
-                dd_val = stats.get("max_dd_pct", np.nan)
-                r3.metric("Profit Factor", pf_str)
-                r4.metric("Max DD", f"{float(dd_val):.1f}%" if dd_val == dd_val else "-")
-                tr_val = stats.get("total_return_pct", np.nan)
-                st.metric("Total Return", f"{float(tr_val):.1f}%" if tr_val == tr_val else "-")
+                r2c1.metric("Profit Factor", pf_str)
+                r2c2.metric("Max DD", f"{float(stats.get('max_dd_pct', np.nan)):.1f}%"
+                           if stats.get('max_dd_pct', np.nan) == stats.get('max_dd_pct', np.nan) else "-")
+                r3c1, r3c2 = st.columns(2)
+                r3c1.metric("Total Return", f"{float(stats.get('total_return_pct', np.nan)):.1f}%"
+                           if stats.get('total_return_pct', np.nan) == stats.get('total_return_pct', np.nan) else "-")
+                r3c2.metric("CAGR", f"{float(stats.get('cagr_pct', np.nan)):.1f}%"
+                           if stats.get('cagr_pct', np.nan) == stats.get('cagr_pct', np.nan) else "-")
+                r4c1, r4c2 = st.columns(2)
+                r4c1.metric("Avg Trade", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%"
+                           if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-")
+                r4c2.metric("Median Trade", f"{float(stats.get('median_trade_pct', np.nan)):.2f}%"
+                           if stats.get('median_trade_pct', np.nan) == stats.get('median_trade_pct', np.nan) else "-")
+                r5c1, r5c2 = st.columns(2)
+                r5c1.metric("Avg Hold", f"{float(stats.get('avg_hold_days', np.nan)):.1f} hari"
+                           if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-")
+                r5c2.metric("Sharpe", f"{float(stats.get('sharpe', np.nan)):.2f}"
+                           if stats.get('sharpe', np.nan) == stats.get('sharpe', np.nan) else "-")
+                st.markdown(
+                    f"<div class='metric-note'>Best {float(stats.get('best_trade_pct', np.nan)):.2f}% · Worst {float(stats.get('worst_trade_pct', np.nan)):.2f}% "
+                    f"· Vol tahunan ≈ {float(stats.get('vol_annual_pct', np.nan)):.1f}%</div>",
+                    unsafe_allow_html=True,
+                )
         except Exception as e:
             st.caption("⚠️ Gagal menampilkan ringkasan metrics: " + str(e))
 
+        # --- Equity curve (rapih)
         if not eq_df.empty:
             figEQ = px.line(eq_df, x="date", y="equity", title="Equity Curve (1.0 = awal)")
+            figEQ.add_hline(y=1.0, line_dash="dot", line_color="#94a3b8", annotation_text="Start")
+            figEQ.update_traces(line={'width': 2.2})
             figEQ.update_layout(height=H_MACD, margin=dict(l=10, r=10, t=40, b=10) if MOBILE else dict(l=40, r=30, t=60, b=40))
             _apply_time_axis(figEQ, pd.to_datetime(eq_df["date"]), start, end, hide_non_trading)
             st.plotly_chart(figEQ, use_container_width=True)
-
-        if not trades.empty:
-            st.dataframe(trades, use_container_width=True, height=TRADES_H)
             st.download_button(
-                "⬇️ Download trades CSV",
+                "⬇️ Download Equity Curve CSV",
+                data=eq_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"equity_curve_{bt_symbol}_{start}_to_{end}.csv",
+                mime="text/csv",
+            )
+
+        # --- Trades table (format rapi)
+        if not trades.empty:
+            tv = trades.copy()
+            for c in ["entry_price", "exit_price"]:
+                if c in tv.columns:
+                    tv[c] = tv[c].map(lambda x: format_money(x, 0))
+            if "ret_pct" in tv.columns:
+                tv["ret_pct"] = tv["ret_pct"].map(lambda x: f"{x:.2f}%")
+            if "hold_days" in tv.columns:
+                tv["hold_days"] = tv["hold_days"].astype(int)
+            order_cols = [c for c in ["entry_date","entry_price","exit_date","exit_price","hold_days","ret_pct"] if c in tv.columns]
+            st.dataframe(tv[order_cols], use_container_width=True, height=TRADES_H)
+            st.download_button(
+                "⬇️ Download Trades CSV",
                 data=trades.to_csv(index=False).encode("utf-8"),
                 file_name=f"trades_{bt_symbol}_{start}_to_{end}.csv",
                 mime="text/csv",
