@@ -9,6 +9,7 @@
 # - MACD panel + cross markers
 # - Scanner cepat (persist di session_state) + Export + Kirim ke Backtest
 # - Backtest: SEMUA metrik dihitung di dalam backtest_macd(...), metrik cards pakai popover ℹ️
+# - UPDATE: Metrik backtest ditata dalam 2 baris (6 kartu per baris)
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -36,10 +37,9 @@ section.main > div { padding-top: .5rem; }
 .checks-row { display:flex; align-items:center; gap:1.25rem; }
 .checks-row div[data-testid='stCheckbox']{margin-bottom:0!important}
 
-/* Metric cards grid */
-.mcards { display:grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap:12px; }
+/* Metric card */
 .mcard { border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#fff;
-         box-shadow: 0 1px 3px rgba(0,0,0,.06); position:relative; }
+         box-shadow: 0 1px 3px rgba(0,0,0,.06); position:relative; width:100%; }
 .mcard-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .mcard-label { color:#64748b; font-size:12px; font-weight:700; margin-bottom:2px; }
 
@@ -56,9 +56,6 @@ section.main > div { padding-top: .5rem; }
 
 .mcard-value { font-size:22px; font-weight:800; line-height:1.1; margin-top:2px; }
 .metric-note { color:#64748b; font-size:12px; margin-top:6px; }
-
-@media (max-width: 980px) { .mcards { grid-template-columns: repeat(3,minmax(0,1fr)); } }
-@media (max-width: 640px) { .mcards { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 
 /* Radios seperti chips */
 div[role='radiogroup']{display:flex;flex-wrap:wrap;gap:.25rem .5rem}
@@ -906,7 +903,7 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                         st.session_state["open_backtest"] = True
 
 # ============================
-# Backtest — MACD Rules (simple) (popover ℹ️)
+# Backtest — MACD Rules (simple) (popover ℹ️) — 2 baris
 # ============================
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
@@ -1002,11 +999,19 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
 """.format(lbl=escape(label), desc=escape(TT.get(label,"")), val=escape(value))
             st.markdown(html, unsafe_allow_html=True)
 
-        st.markdown('<div class="mcards">', unsafe_allow_html=True)
-        for label in ["Trades","Win Rate","Profit Factor","Max DD","Total Return","CAGR",
-                      "Avg Trade","Expectancy","Median Trade","Avg Hold","Best Trade","Worst Trade"]:
-            metric_card(label, vals[label])
-        st.markdown('</div>', unsafe_allow_html=True)
+        # ---- ROW 1 (6 metrics)
+        row1_labels = ["Trades","Win Rate","Profit Factor","Max DD","Total Return","CAGR"]
+        cols1 = st.columns(6)
+        for i, lab in enumerate(row1_labels):
+            with cols1[i]:
+                metric_card(lab, vals[lab])
+
+        # ---- ROW 2 (6 metrics)
+        row2_labels = ["Avg Trade","Expectancy","Median Trade","Avg Hold","Best Trade","Worst Trade"]
+        cols2 = st.columns(6)
+        for i, lab in enumerate(row2_labels):
+            with cols2[i]:
+                metric_card(lab, vals[lab])
 
         meta_html = "<div class='metric-note'>Vol tahunan ≈ {} · Sharpe ≈ {} · Calmar ≈ {}</div>".format(
             fmt_pct(stats.get("vol_annual_pct"),1),
