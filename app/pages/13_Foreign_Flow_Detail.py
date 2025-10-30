@@ -1048,8 +1048,41 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                 "⬇️ Download hasil scan (CSV)",
                 data=df_scan.to_csv(index=False).encode("utf-8"),
                 file_name=f"scan_macd_{start_scan}_to_{end}.csv",
-                mime="text/csv",
+                mime=\"text/csv\",
             )
+
+            # ===== Ranking + Quick Action (tambahan) =====
+            try:
+                nf_col = f"NF_sum_{int(nf_window)}d"
+                dfv = df_scan.copy()
+                nf_vals = pd.to_numeric(dfv.get(nf_col, pd.Series(np.nan)), errors='coerce')
+                if nf_vals.notna().any() and (nf_vals.max() - nf_vals.min()) > 0:
+                    nf_norm = (nf_vals - nf_vals.min()) / (nf_vals.max() - nf_vals.min())
+                else:
+                    nf_norm = pd.Series(0.5, index=dfv.index)
+                recency = np.exp(-0.35 * pd.to_numeric(dfv['days_ago'], errors='coerce').fillna(999))
+                macd_up = dfv.get('macd_above_zero', False).astype(bool).astype(int)
+                bull = (dfv.get('last_cross', '') == 'Bullish').astype(int)
+                dfv['score'] = (0.4*nf_norm + 0.3*recency + 0.2*macd_up + 0.1*bull).round(3)
+                st.caption("
+**Ranking kandidat (score = 40% NF + 30% recency + 20% MACD>0 + 10% bullish)**
+")
+                only_q = st.checkbox("Tampilkan hanya yang qualifies", value=True, key='only_q_rank')
+                dfshow = dfv[dfv['qualifies']] if (only_q and 'qualifies' in dfv.columns) else dfv
+                order_cols = ['score','qualifies','days_ago','last_cross_date','kode','last_cross','macd_above_zero', nf_col, 'close_last']
+                show_cols = [c for c in order_cols if c in dfshow.columns]
+                df_ranked = dfshow.sort_values(['qualifies','score','days_ago'], ascending=[False, False, True])[show_cols]
+                st.dataframe(df_ranked, use_container_width=True, height=420)
+                if not df_ranked.empty:
+                    cc1, cc2 = st.columns([3,1])
+                    with cc1:
+                        pick_code = st.selectbox("Pilih kode untuk dibuka di chart", options=df_ranked['kode'].tolist(), key='pick_code_rank')
+                    with cc2:
+                        if st.button("Set ke chart", use_container_width=True, key='btn_set_chart'):
+                            st.session_state['kode_saham'] = pick_code
+                            st.rerun()
+            except Exception:
+                pass
     else:
         st.caption("Klik **Jalankan Scan** untuk mulai. Scanner menggunakan bulk query + vectorized MACD agar jauh lebih cepat.")
 
