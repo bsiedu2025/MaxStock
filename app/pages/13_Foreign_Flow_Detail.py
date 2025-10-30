@@ -1,7 +1,7 @@
 # app/pages/13_Foreign_Flow_Detail.py
 # Daily Stock Movement – Foreign Flow Focus (OK-base fix)
 # - Fix fatal SyntaxError: stray backtest metrics block outside function
-# - Keep UI/UX: sticky filter + shadow, quick ranges, hide non‑trading days, MACD panel, scanner, backtest
+# - Keep UI/UX: sticky filter + shadow, quick ranges, hide non-trading days, MACD panel, scanner, backtest
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
