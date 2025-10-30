@@ -7,6 +7,7 @@
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
+from __future__ import annotations
 import pandas as pd
 import numpy as np
 import math
@@ -247,7 +248,7 @@ def get_macd_params():
 
 # --- MACD core helpers ---
 
-def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
+def macd_series(close, fast, slow, sig):
     close = pd.to_numeric(close, errors="coerce").dropna()
     ema_fast = close.ewm(span=fast, adjust=False, min_periods=1).mean()
     ema_slow = close.ewm(span=slow, adjust=False, min_periods=1).mean()
@@ -257,16 +258,16 @@ def macd_series(close: pd.Series, fast: int, slow: int, sig: int):
     return macd, signal, delta
 
 
-def macd_cross_flags(delta: pd.Series):
+def macd_cross_flags(delta):
     prev = delta.shift(1)
     bull = (prev <= 0) & (delta > 0)
     bear = (prev >= 0) & (delta < 0)
     return bull, bear
 
 
-def scan_universe(kodes: list, start: date, end: date, fast: int, slow: int, sig: int,
-                  nf_window: int = 5, filter_nf: bool = True, only_recent_days: Optional[int] = 15,
-                  require_above_zero: bool = False) -> pd.DataFrame:
+def scan_universe(kodes, start, end, fast, slow, sig,
+                  nf_window=5, filter_nf=True, only_recent_days=15,
+                  require_above_zero=False):
     rows = []
     for kd in kodes:
         try:
@@ -330,9 +331,9 @@ def scan_universe(kodes: list, start: date, end: date, fast: int, slow: int, sig
     return pd.DataFrame(rows)
 
 
-def backtest_macd(df_price: pd.DataFrame, fast: int, slow: int, sig: int,
-                   require_above_zero: bool = False, nf_window: int = 0, require_nf: bool = False,
-                   fee_bp: int = 0):
+def backtest_macd(df_price, fast, slow, sig,
+                   require_above_zero=False, nf_window=0, require_nf=False,
+                   fee_bp=0)::
     # choose close
     close = None
     if "penutupan" in df_price.columns and df_price["penutupan"].notna().any():
@@ -423,7 +424,7 @@ def backtest_macd(df_price: pd.DataFrame, fast: int, slow: int, sig: int,
 
 # -------- Bulk fetch for fast scanner --------
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
+def fetch_ohlc_bulk(codes, start, end, chunk_size=200):
     """Bulk fetch close & NF untuk banyak kode dengan fallback kolom dinamis dan chunking.
     Menghindari error kolom tidak ada dan query IN yang terlalu panjang.
     """
@@ -488,10 +489,10 @@ def fetch_ohlc_bulk(codes, start, end, chunk_size: int = 200):
         _close(con)
 
 
-def scan_universe_fast(df_bulk: pd.DataFrame, fast: int, slow: int, sig: int,
-                       nf_window: int = 5, filter_nf: bool = True,
-                       only_recent_days: Optional[int] = 15,
-                       require_above_zero: bool = False) -> pd.DataFrame:
+def scan_universe_fast(df_bulk, fast, slow, sig,
+                       nf_window=5, filter_nf=True,
+                       only_recent_days=15,
+                       require_above_zero=False):
     if df_bulk is None or df_bulk.empty:
         return pd.DataFrame()
     out = []
