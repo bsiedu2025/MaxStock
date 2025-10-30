@@ -838,22 +838,24 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
 
         st.markdown("**Quick filters**")
 
-        # Slider percentile untuk NF (aktif kalau kolom NF ada)
+        # Slider percentile untuk NF (aktif kalau kolom NF ada) — FIX: jangan assign langsung ke session_state
         if nf_col and df_scan[nf_col].notna().any():
-            st.session_state["chip_nf_pctile"] = st.slider(
+            default_pct = int(st.session_state.get("chip_nf_pctile", 75))
+            nf_pctile = st.slider(
                 "NF percentile (untuk filter NF ≥ p)", min_value=50, max_value=95,
-                value=int(st.session_state.get("chip_nf_pctile", 75)), step=1, key="chip_nf_pctile"
+                value=default_pct, step=1, key="chip_nf_pctile"
             )
-            nf_thr = float(np.nanpercentile(df_scan[nf_col], st.session_state["chip_nf_pctile"]))
+            nf_thr = float(np.nanpercentile(df_scan[nf_col], nf_pctile))
         else:
             nf_thr = None
+            nf_pctile = int(st.session_state.get("chip_nf_pctile", 75))
 
         # Baris checkbox chips
         ch1, ch2, ch3, ch4 = st.columns(4)
         with ch1: chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", value=bool(st.session_state.get("chip_recent3", False)))
         with ch2:
             lbl = "NF ≥ p{}{}".format(
-                int(st.session_state.get("chip_nf_pctile", 75)),
+                int(nf_pctile),
                 " (≈ {:,.0f})".format(nf_thr) if nf_thr is not None else ""
             )
             chip_nf_p = st.checkbox(lbl, key="chip_nf_enable", value=bool(st.session_state.get("chip_nf_enable", False)),
@@ -874,7 +876,7 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
         if nf_col and nf_thr is not None:
             quick_watch = df_scan_sorted.copy()
             quick_watch = quick_watch[(quick_watch["days_ago"]<=3) & (quick_watch[nf_col] >= nf_thr)]
-            st.download_button("⬇️ Export Watchlist (≤3D & NF≥p{})".format(int(st.session_state["chip_nf_pctile"])),
+            st.download_button("⬇️ Export Watchlist (≤3D & NF≥p{})".format(int(nf_pctile)),
                                data=quick_watch.to_csv(index=False).encode("utf-8"),
                                file_name="watchlist_quick_{}_to_{}.csv".format(
                                    st.session_state.get("scanner_meta",{}).get("start_scan", start), end),
