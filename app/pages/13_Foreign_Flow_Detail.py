@@ -1,8 +1,9 @@
 # app/pages/13_Foreign_Flow_Detail.py
-# Daily Stock Movement – Foreign Flow Focus (HP-friendly + Scanner persist + Backtest polished)
+# Daily Stock Movement – Foreign Flow Focus (HP-friendly + Scanner persist + Backtest polished + Tooltip metrics)
 # - 📱 Mobile Mode toggle
 # - Scanner: chip filter cepat (≤3D, NF≥p75, MACD>0), Export, "Kirim ke Backtest" (persist hasil)
-# - Backtest: UI dirapikan, metrik lengkap; SEMUA perhitungan metrik ADA DI DALAM backtest_macd(...)
+# - Backtest: metrik lengkap; SEMUA perhitungan metrik ADA DI DALAM backtest_macd(...)
+# - Tooltip pada judul metrik (hover untuk lihat definisi)
 # - Python 3.10 friendly, guard kolom fleksibel
 
 from datetime import date, timedelta
@@ -13,6 +14,7 @@ import math
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+from html import escape
 
 from db_utils import get_db_connection, get_db_name
 
@@ -35,11 +37,21 @@ st.markdown(
         box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04);
     }
     .chip label { border:1px solid #e5e7eb; padding:6px 10px; border-radius:9999px; background:#fff; }
-    /* metric subtle titles */
+    /* metric subtle notes */
     .metric-note { color:#64748b; font-size:12px; margin-top:-6px; }
+    /* custom metric cards with tooltip */
+    .mcards { display:grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap:12px; }
+    .mcard { border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#fff;
+             box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .mcard-label { color:#64748b; font-size:12px; font-weight:600; margin-bottom:4px;
+                   text-decoration: underline dotted; cursor: help; }
+    .mcard-value { font-size:22px; font-weight:700; line-height:1.1; }
+    @media (max-width: 980px) { .mcards { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+    @media (max-width: 640px) { .mcards { grid-template-columns: repeat(2,minmax(0,1fr)); } }
     @media (max-width: 480px) {
       .sticky-filter { padding: .35rem .15rem .5rem .15rem; }
       div[role='radiogroup'] label { padding:6px 10px; }
+      .mcard-value { font-size:20px; }
     }
     </style>
     """,
@@ -706,7 +718,7 @@ if df["net_foreign_value"].notna().any():
 
 # ---------- Charts ----------
 # Candlestick
-if show_price:
+if price_series is not None and price_series.notna().any():
     open_series = None
     if "open_price" in df.columns and df["open_price"].notna().any():
         open_series = pd.to_numeric(df["open_price"], errors="coerce")
@@ -1133,10 +1145,9 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                     if st.button("Kirim ke Backtest", key=f"send_bt_{i}_{row.get('kode','?')}"):
                         st.session_state["bt_symbol"] = row.get("kode")
                         st.session_state["open_backtest"] = True
-                        # Rerun otomatis oleh mekanisme tombol; hasil scan tetap karena disimpan di session_state
 
 # ============================
-# 🧪 Backtest — MACD Rules (simple)  (Tampilan dirapikan)
+# 🧪 Backtest — MACD Rules (simple)  (Tampilan dirapikan + Tooltip)
 # ============================
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
@@ -1186,75 +1197,70 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
                      "avg_hold_days": np.nan,"sharpe": np.nan,"vol_annual_pct": np.nan,"calmar_ratio": np.nan},
                 )
 
-        # --- Metrics grid (2 baris)
-        try:
-            if not MOBILE:
-                r1 = st.columns(6)
-                r1[0].metric("Trades", int(stats.get("trades", 0)))
-                r1[1].metric("Win Rate", f"{float(stats.get('winrate', np.nan)):.1f}%"
-                            if stats.get('winrate', np.nan) == stats.get('winrate', np.nan) else "-")
-                pf_val = stats.get("profit_factor", np.nan)
-                pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val == pf_val else "-")
-                r1[2].metric("Profit Factor", pf_str)
-                r1[3].metric("Max DD", f"{float(stats.get('max_dd_pct', np.nan)):.1f}%"
-                            if stats.get('max_dd_pct', np.nan) == stats.get('max_dd_pct', np.nan) else "-")
-                r1[4].metric("Total Return", f"{float(stats.get('total_return_pct', np.nan)):.1f}%"
-                            if stats.get('total_return_pct', np.nan) == stats.get('total_return_pct', np.nan) else "-")
-                r1[5].metric("CAGR", f"{float(stats.get('cagr_pct', np.nan)):.1f}%"
-                            if stats.get('cagr_pct', np.nan) == stats.get('cagr_pct', np.nan) else "-")
+        # --- Tooltip dictionary (judul → penjelasan singkat) ---
+        TT = {
+            "Trades": "Jumlah posisi (entry→exit) yang terjadi selama periode backtest.",
+            "Win Rate": "Persentase trade yang menghasilkan return > 0 (setelah biaya).",
+            "Profit Factor": "Total profit / total loss. >1 = profit. ∞ jika tidak ada loss.",
+            "Max DD": "Maximum drawdown: penurunan terdalam dari puncak equity ke lembah (%).",
+            "Total Return": "Kenaikan equity total dari awal ke akhir dengan reinvest 100% tiap trade.",
+            "CAGR": "Compounded Annual Growth Rate (tahunan, jika rentang >0 hari).",
+            "Avg Trade": "Rata-rata % return per trade (sudah termasuk biaya).",
+            "Expectancy": "Ekspektasi rata-rata per trade (≈ Avg Trade).",
+            "Median Trade": "Nilai tengah dari distribusi return trade (%).",
+            "Avg Hold": "Rata-rata lama memegang posisi (hari).",
+            "Best Trade": "Return % terbaik pada satu trade.",
+            "Worst Trade": "Return % terburuk pada satu trade.",
+        }
+        # --- helper card ---
+        def metric_card(label: str, value: str):
+            tip = escape(TT.get(label, ""))
+            html = f"""
+            <div class="mcard" >
+              <div class="mcard-label" title="{tip}">{escape(label)}</div>
+              <div class="mcard-value">{escape(value)}</div>
+            </div>
+            """
+            st.markdown(html, unsafe_allow_html=True)
 
-                r2 = st.columns(6)
-                r2[0].metric("Avg Trade", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%"
-                            if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-")
-                r2[1].metric("Expectancy", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%")
-                r2[2].metric("Median Trade", f"{float(stats.get('median_trade_pct', np.nan)):.2f}%"
-                            if stats.get('median_trade_pct', np.nan) == stats.get('median_trade_pct', np.nan) else "-")
-                r2[3].metric("Avg Hold", f"{float(stats.get('avg_hold_days', np.nan)):.1f} hari"
-                            if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-")
-                r2[4].metric("Best Trade", f"{float(stats.get('best_trade_pct', np.nan)):.2f}%"
-                            if stats.get('best_trade_pct', np.nan) == stats.get('best_trade_pct', np.nan) else "-")
-                r2[5].metric("Worst Trade", f"{float(stats.get('worst_trade_pct', np.nan)):.2f}%"
-                            if stats.get('worst_trade_pct', np.nan) == stats.get('worst_trade_pct', np.nan) else "-")
-                st.markdown(
-                    f"<div class='metric-note'>Vol tahunan ≈ {float(stats.get('vol_annual_pct', np.nan)):.1f}% · Sharpe ≈ "
-                    f"{float(stats.get('sharpe', np.nan)):.2f} · Calmar ≈ {float(stats.get('calmar_ratio', np.nan)):.2f}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                r1c1, r1c2 = st.columns(2)
-                r1c1.metric("Trades", int(stats.get("trades", 0)))
-                r1c2.metric("Win Rate", f"{float(stats.get('winrate', np.nan)):.1f}%"
-                           if stats.get('winrate', np.nan) == stats.get('winrate', np.nan) else "-")
-                r2c1, r2c2 = st.columns(2)
-                pf_val = stats.get("profit_factor", np.nan)
-                pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val == pf_val else "-")
-                r2c1.metric("Profit Factor", pf_str)
-                r2c2.metric("Max DD", f"{float(stats.get('max_dd_pct', np.nan)):.1f}%"
-                           if stats.get('max_dd_pct', np.nan) == stats.get('max_dd_pct', np.nan) else "-")
-                r3c1, r3c2 = st.columns(2)
-                r3c1.metric("Total Return", f"{float(stats.get('total_return_pct', np.nan)):.1f}%"
-                           if stats.get('total_return_pct', np.nan) == stats.get('total_return_pct', np.nan) else "-")
-                r3c2.metric("CAGR", f"{float(stats.get('cagr_pct', np.nan)):.1f}%"
-                           if stats.get('cagr_pct', np.nan) == stats.get('cagr_pct', np.nan) else "-")
-                r4c1, r4c2 = st.columns(2)
-                r4c1.metric("Avg Trade", f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%"
-                           if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-")
-                r4c2.metric("Median Trade", f"{float(stats.get('median_trade_pct', np.nan)):.2f}%"
-                           if stats.get('median_trade_pct', np.nan) == stats.get('median_trade_pct', np.nan) else "-")
-                r5c1, r5c2 = st.columns(2)
-                r5c1.metric("Avg Hold", f"{float(stats.get('avg_hold_days', np.nan)):.1f} hari"
-                           if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-")
-                r5c2.metric("Sharpe", f"{float(stats.get('sharpe', np.nan)):.2f}"
-                           if stats.get('sharpe', np.nan) == stats.get('sharpe', np.nan) else "-")
-                st.markdown(
-                    f"<div class='metric-note'>Best {float(stats.get('best_trade_pct', np.nan)):.2f}% · Worst {float(stats.get('worst_trade_pct', np.nan)):.2f}% "
-                    f"· Vol tahunan ≈ {float(stats.get('vol_annual_pct', np.nan)):.1f}%</div>",
-                    unsafe_allow_html=True,
-                )
-        except Exception as e:
-            st.caption("⚠️ Gagal menampilkan ringkasan metrics: " + str(e))
+        # --- format values
+        pf_val = stats.get("profit_factor", np.nan)
+        pf_str = "∞" if (isinstance(pf_val, (float, int, np.floating)) and not math.isfinite(float(pf_val))) else (f"{float(pf_val):.2f}" if pf_val == pf_val else "-")
+        vals = {
+            "Trades": f"{int(stats.get('trades', 0))}",
+            "Win Rate": f"{float(stats.get('winrate', np.nan)):.1f}%" if stats.get('winrate', np.nan) == stats.get('winrate', np.nan) else "-",
+            "Profit Factor": pf_str,
+            "Max DD": f"{float(stats.get('max_dd_pct', np.nan)):.1f}%" if stats.get('max_dd_pct', np.nan) == stats.get('max_dd_pct', np.nan) else "-",
+            "Total Return": f"{float(stats.get('total_return_pct', np.nan)):.1f}%" if stats.get('total_return_pct', np.nan) == stats.get('total_return_pct', np.nan) else "-",
+            "CAGR": f"{float(stats.get('cagr_pct', np.nan)):.1f}%" if stats.get('cagr_pct', np.nan) == stats.get('cagr_pct', np.nan) else "-",
+            "Avg Trade": f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%" if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-",
+            "Expectancy": f"{float(stats.get('avg_trade_pct', np.nan)):.2f}%"
+                           if stats.get('avg_trade_pct', np.nan) == stats.get('avg_trade_pct', np.nan) else "-",
+            "Median Trade": f"{float(stats.get('median_trade_pct', np.nan)):.2f}%"
+                            if stats.get('median_trade_pct', np.nan) == stats.get('median_trade_pct', np.nan) else "-",
+            "Avg Hold": f"{float(stats.get('avg_hold_days', np.nan)):.1f} hari"
+                        if stats.get('avg_hold_days', np.nan) == stats.get('avg_hold_days', np.nan) else "-",
+            "Best Trade": f"{float(stats.get('best_trade_pct', np.nan)):.2f}%"
+                          if stats.get('best_trade_pct', np.nan) == stats.get('best_trade_pct', np.nan) else "-",
+            "Worst Trade": f"{float(stats.get('worst_trade_pct', np.nan)):.2f}%"
+                           if stats.get('worst_trade_pct', np.nan) == stats.get('worst_trade_pct', np.nan) else "-",
+        }
 
-        # --- Equity curve (rapih)
+        # --- Render in grid with tooltip (responsive)
+        st.markdown('<div class="mcards">', unsafe_allow_html=True)
+        for label in ["Trades","Win Rate","Profit Factor","Max DD","Total Return","CAGR",
+                      "Avg Trade","Expectancy","Median Trade","Avg Hold","Best Trade","Worst Trade"]:
+            metric_card(label, vals[label])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            f"<div class='metric-note'>Vol tahunan ≈ {float(stats.get('vol_annual_pct', np.nan)):.1f}% · "
+            f"Sharpe ≈ {float(stats.get('sharpe', np.nan)):.2f} · "
+            f"Calmar ≈ {float(stats.get('calmar_ratio', np.nan)):.2f}</div>",
+            unsafe_allow_html=True,
+        )
+
+        # --- Equity curve
         if not eq_df.empty:
             figEQ = px.line(eq_df, x="date", y="equity", title="Equity Curve (1.0 = awal)")
             figEQ.add_hline(y=1.0, line_dash="dot", line_color="#94a3b8", annotation_text="Start")
@@ -1269,7 +1275,7 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
                 mime="text/csv",
             )
 
-        # --- Trades table (format rapi)
+        # --- Trades table
         if not trades.empty:
             tv = trades.copy()
             for c in ["entry_price", "exit_price"]:
