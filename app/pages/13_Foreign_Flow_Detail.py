@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
 # 13_Foreign_Flow_Detail.py
-# Foreign Flow Detail — Streamlit
-# - Mobile Mode toggle (HP friendly)
-# - Sticky filter bar + shadow
-# - Hide non-trading days
-# - Quick range: All, 1Y, 6M, 3M, 1M, 5D, Custom
-# - Candlestick + MA5/20 + panah MACD + alert cross
-# - MACD panel + cross markers
-# - Scanner cepat (persist di session_state) + Export + Kirim ke Backtest
-# - Backtest: SEMUA metrik dihitung di dalam backtest_macd(...), metrik cards pakai popover ℹ️
-# - UPDATE: Metrik backtest ditata dalam 2 baris (6 kartu per baris)
+# Foreign Flow Detail — Streamlit (Python 3.10 compatible)
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
@@ -21,13 +12,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from html import escape
 
-# --- Project helper (harus ada di repo lo)
+# --- Helper DB (pastikan ada di repo lo)
 from db_utils import get_db_connection, get_db_name
 
 THEME = "#3AA6A0"
 st.set_page_config(page_title="📈 Foreign Flow Detail", page_icon="📈", layout="wide")
 
-# === Global CSS (bukan f-string; aman dari parser)
+# ---------- Global CSS ----------
 st.markdown("""
 <style>
 section.main > div { padding-top: .5rem; }
@@ -36,14 +27,10 @@ section.main > div { padding-top: .5rem; }
   box-shadow: 0 8px 16px rgba(0,0,0,.06), 0 1px 0 rgba(0,0,0,.04); }
 .checks-row { display:flex; align-items:center; gap:1.25rem; }
 .checks-row div[data-testid='stCheckbox']{margin-bottom:0!important}
-
-/* Metric card */
 .mcard { border:1px solid #e5e7eb; border-radius:12px; padding:10px 12px; background:#fff;
          box-shadow: 0 1px 3px rgba(0,0,0,.06); position:relative; width:100%; }
 .mcard-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .mcard-label { color:#64748b; font-size:12px; font-weight:700; margin-bottom:2px; }
-
-/* CSS-only popover via <details> */
 .mcard-info { position:relative; }
 .mcard-info > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center;
   padding:0 6px; height:18px; border-radius:9999px; border:1px solid #c7d2fe; background:#eef2ff;
@@ -53,11 +40,8 @@ section.main > div { padding-top: .5rem; }
 .mcard-pop { position:absolute; top:24px; right:0; width:240px; z-index:100;
   background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px;
   box-shadow:0 8px 24px rgba(2,6,23,.12); color:#334155; font-size:12px; }
-
 .mcard-value { font-size:22px; font-weight:800; line-height:1.1; margin-top:2px; }
 .metric-note { color:#64748b; font-size:12px; margin-top:6px; }
-
-/* Radios seperti chips */
 div[role='radiogroup']{display:flex;flex-wrap:wrap;gap:.25rem .5rem}
 div[role='radiogroup'] label{border:1px solid #e5e7eb;padding:6px 12px;border-radius:9999px;background:#fff}
 </style>
@@ -66,7 +50,7 @@ div[role='radiogroup'] label{border:1px solid #e5e7eb;padding:6px 12px;border-ra
 st.title("📈 Pergerakan Harian Saham — Fokus Foreign Flow")
 st.caption("DB aktif: **{}**".format(get_db_name()))
 
-# === DB helpers
+# ---------- DB helpers ----------
 def _alive(conn):
     try:
         conn.reconnect(attempts=2, delay=1)
@@ -144,7 +128,7 @@ def load_series(kode, start, end):
     finally:
         _close(con)
 
-# === Helpers
+# ---------- Utils ----------
 def _compute_rangebreaks(trade_dates, start, end, hide_non_trading):
     if not hide_non_trading:
         return []
@@ -216,7 +200,7 @@ def idr_short(x):
             return "{} {}".format(str(round(n / v, 2)).replace(".", ","), nama).replace(",", ".")
     return "{:,.0f}".format(n).replace(",", ".")
 
-# === MACD
+# ---------- MACD ----------
 def get_macd_params():
     preset = st.session_state.get("macd_preset", "12-26-9 (Standard)")
     presets = {
@@ -246,7 +230,7 @@ def macd_cross_flags(delta):
     prev = delta.shift(1)
     return (prev <= 0) & (delta > 0), (prev >= 0) & (delta < 0)
 
-# === Bulk fetch untuk Scanner
+# ---------- Bulk fetch untuk Scanner ----------
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_ohlc_bulk(codes, start, end, chunk_size=200):
     if not codes:
@@ -339,7 +323,7 @@ def scan_universe_fast(df_bulk, fast, slow, sig, nf_window=5, filter_nf=True, on
         })
     return pd.DataFrame(out)
 
-# === Backtest (SEMUA metrik di sini)
+# ---------- Backtest (semua metrik di sini) ----------
 def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window=0, require_nf=False, fee_bp=0):
     close = None
     if "penutupan" in df_price.columns and df_price["penutupan"].notna().any():
@@ -458,7 +442,7 @@ def backtest_macd(df_price, fast, slow, sig, require_above_zero=False, nf_window
     }
     return trades_df, eq_df, stats
 
-# === STATE DEFAULTS
+# ---------- STATE DEFAULTS ----------
 codes = list_codes()
 min_d, max_d = date_bounds()
 st.session_state.setdefault("kode_saham", (codes[0] if codes else None))
@@ -474,9 +458,10 @@ st.session_state.setdefault("macd_slow", 26)
 st.session_state.setdefault("macd_signal", 9)
 st.session_state.setdefault("mobile_mode", False)
 st.session_state.setdefault("bt_symbol", st.session_state.get("kode_saham"))
+st.session_state.setdefault("bt_sym_sel", st.session_state.get("kode_saham"))
 st.session_state.setdefault("open_backtest", False)
 
-# === Sticky filter bar
+# ---------- Sticky bar ----------
 with st.container():
     st.markdown("<div class='sticky-filter'>", unsafe_allow_html=True)
     f1, f2, f3, f4 = st.columns([1.3, 1.0, 1.6, 0.9])
@@ -503,7 +488,7 @@ DF_H     = 260 if MOBILE else 360
 SCAN_H   = 340 if MOBILE else 420
 TRADES_H = 260 if MOBILE else 320
 
-# === Quick range
+# ---------- Quick range ----------
 kode = st.session_state["kode_saham"]
 if not kode:
     st.stop()
@@ -538,7 +523,7 @@ def _apply_quick(choice):
 
 _apply_quick(st.session_state["range_choice"])
 
-# === Toggles
+# ---------- Toggles ----------
 with st.container():
     st.markdown("<div class='checks-row'>", unsafe_allow_html=True)
     cA, cB, cC = st.columns(3)
@@ -547,7 +532,7 @@ with st.container():
     with cC: st.checkbox("Hide non-trading days (skip weekend & libur bursa)", key="hide_non_trading")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# === MACD preset
+# ---------- MACD Preset ----------
 m1, m2, m3, m4 = st.columns([1.6, .8, .8, .8])
 with m1:
     st.selectbox("MACD preset",
@@ -557,7 +542,7 @@ if st.session_state["macd_preset"] == "Custom":
     with m3: st.number_input("Slow EMA", min_value=2, max_value=400, step=1, key="macd_slow")
     with m4: st.number_input("Signal",   min_value=1, max_value=100, step=1, key="macd_signal")
 
-# === Load & derive data
+# ---------- Load & derive ----------
 start, end = st.session_state["date_range"]
 df_raw = load_series(kode, start, end)
 if df_raw.empty:
@@ -565,13 +550,12 @@ if df_raw.empty:
     st.stop()
 df = add_rolling(ensure_metrics(df_raw), adv_mode=st.session_state["adv_mode"])
 
-# === KPI
+# ---------- KPI ----------
 st.divider()
 nama = (df["nama_perusahaan"].dropna().iloc[-1]
         if "nama_perusahaan" in df.columns and df["nama_perusahaan"].notna().any() else "-")
 st.subheader("{} — {}".format(kode, nama))
 
-# price series
 price_series = None
 if "penutupan" in df.columns and df["penutupan"].notna().any():
     price_series = pd.to_numeric(df["penutupan"], errors="coerce")
@@ -607,8 +591,7 @@ if df["net_foreign_value"].notna().any():
     st.caption("🔎 Net Buy terbesar: **{}** ({})".format(max_buy_day["trade_date"].date(), idr_short(max_buy_day["net_foreign_value"])))
     st.caption("🔎 Net Sell terbesar: **{}** ({})".format(max_sell_day["trade_date"].date(), idr_short(max_sell_day["net_foreign_value"])))
 
-# === Charts
-# Candlestick + MA + MACD arrows
+# ---------- Charts (candlestick, MACD, dll) ----------
 if price_series is not None and price_series.notna().any():
     if "open_price" in df.columns and df["open_price"].notna().any():
         open_series = pd.to_numeric(df["open_price"], errors="coerce")
@@ -636,7 +619,6 @@ if price_series is not None and price_series.notna().any():
         ))
         figC.add_trace(go.Scatter(x=df_cdl["trade_date"], y=ma5,  name="MA 5",  line=dict(color="#0d6efd", width=1.8)))
         figC.add_trace(go.Scatter(x=df_cdl["trade_date"], y=ma20, name="MA 20", line=dict(color="#6c757d", width=1.8)))
-        # Panah MACD
         try:
             f, s, g = get_macd_params()
             close_m = price_series.dropna()
@@ -899,16 +881,20 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                         st.write("NF: -")
                 with cE:
                     if st.button("Kirim ke Backtest", key="send_bt_{}_{}".format(i, row.get("kode","?"))):
-                        st.session_state["bt_symbol"] = row.get("kode")
+                        # >>> FIX: sinkronkan ke selectbox backtest + buka expander + rerun
+                        kd = row.get("kode")
+                        st.session_state["bt_symbol"] = kd
+                        st.session_state["bt_sym_sel"] = kd   # supaya selectbox pindah
                         st.session_state["open_backtest"] = True
+                        st.rerun()
 
 # ============================
-# Backtest — MACD Rules (simple) (popover ℹ️) — 2 baris
+# Backtest — MACD Rules (simple) — 2 baris + popover info
 # ============================
 st.divider()
 with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_state.get("open_backtest", False)):
     c1, c2, c3, c4 = st.columns([1.2,.9,.9,.9])
-    current_bt_symbol = st.session_state.get("bt_symbol", st.session_state.get("kode_saham"))
+    current_bt_symbol = st.session_state.get("bt_sym_sel", st.session_state.get("bt_symbol", st.session_state.get("kode_saham")))
     try:
         idx_default = codes.index(current_bt_symbol) if (codes and current_bt_symbol in codes) else 0
     except Exception:
@@ -999,14 +985,14 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
 """.format(lbl=escape(label), desc=escape(TT.get(label,"")), val=escape(value))
             st.markdown(html, unsafe_allow_html=True)
 
-        # ---- ROW 1 (6 metrics)
+        # Baris 1
         row1_labels = ["Trades","Win Rate","Profit Factor","Max DD","Total Return","CAGR"]
         cols1 = st.columns(6)
         for i, lab in enumerate(row1_labels):
             with cols1[i]:
                 metric_card(lab, vals[lab])
 
-        # ---- ROW 2 (6 metrics)
+        # Baris 2
         row2_labels = ["Avg Trade","Expectancy","Median Trade","Avg Hold","Best Trade","Worst Trade"]
         cols2 = st.columns(6)
         for i, lab in enumerate(row2_labels):
@@ -1031,9 +1017,7 @@ with st.expander("🧪 Backtest — MACD Rules (simple)", expanded=st.session_st
                                data=eq_df.to_csv(index=False).encode("utf-8"),
                                file_name="equity_curve_{}_{}_to_{}.csv".format(bt_symbol, start, end), mime="text/csv")
 
-        if not 'trades' in locals():
-            trades = pd.DataFrame()
-        if not trades.empty:
+        if 'trades' in locals() and not trades.empty:
             tv = trades.copy()
             if "entry_price" in tv.columns: tv["entry_price"] = tv["entry_price"].map(lambda x: "{:,.0f}".format(x).replace(",", "."))
             if "exit_price" in tv.columns:  tv["exit_price"]  = tv["exit_price"].map(lambda x: "{:,.0f}".format(x).replace(",", "."))
