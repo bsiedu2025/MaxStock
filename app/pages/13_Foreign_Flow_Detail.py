@@ -460,6 +460,12 @@ st.session_state.setdefault("mobile_mode", False)
 st.session_state.setdefault("bt_symbol", st.session_state.get("kode_saham"))
 st.session_state.setdefault("bt_sym_sel", st.session_state.get("kode_saham"))
 st.session_state.setdefault("open_backtest", False)
+# scanner quick-filter defaults
+st.session_state.setdefault("chip_recent3", False)
+st.session_state.setdefault("chip_nf_pctile", 75)
+st.session_state.setdefault("chip_nf_enable", False)
+st.session_state.setdefault("chip_macd_pos", False)
+st.session_state.setdefault("chip_bullish_only", False)
 
 # ---------- Sticky bar ----------
 with st.container():
@@ -779,7 +785,7 @@ st.divider()
 with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
     c1, c2, c3 = st.columns(3)
     with c1: scan_all = st.checkbox("Scan semua kode", value=True, key="scan_all")
-    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=15, step=1, key="scan_recency")
+    with c2: recency  = st.number_input("Cross dalam X hari terakhir", min_value=1, max_value=365, value=5, step=1, key="scan_recency")
     with c3: require_above_zero = st.checkbox("Syarat MACD > 0", value=False, key="scan_macdpos")
     d1, d2, _ = st.columns(3)
     with d1: require_nf = st.checkbox("Syarat NF rolling ≥ 0", value=True, key="scan_reqnf")
@@ -831,29 +837,44 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
         df_scan_sorted = df_scan.sort_values(sort_cols, ascending=asc) if sort_cols else df_scan.copy()
 
         st.markdown("**Quick filters**")
-        ch1, ch2, ch3 = st.columns(3)
-        with ch1: chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", value=False)
+
+        # Slider percentile untuk NF (aktif kalau kolom NF ada)
         if nf_col and df_scan[nf_col].notna().any():
-            nf_p75_val = float(np.nanpercentile(df_scan[nf_col], 75))
-            with ch2: chip_nf_p75 = st.checkbox("NF ≥ p75 (≈ {:,.0f})".format(nf_p75_val), key="chip_nf_p75", value=False)
+            st.session_state["chip_nf_pctile"] = st.slider(
+                "NF percentile (untuk filter NF ≥ p)", min_value=50, max_value=95,
+                value=int(st.session_state.get("chip_nf_pctile", 75)), step=1, key="chip_nf_pctile"
+            )
+            nf_thr = float(np.nanpercentile(df_scan[nf_col], st.session_state["chip_nf_pctile"]))
         else:
-            nf_p75_val = None
-            with ch2: chip_nf_p75 = st.checkbox("NF ≥ p75", key="chip_nf_p75", value=False, disabled=True)
-        with ch3: chip_macd_pos = st.checkbox("MACD > 0", key="chip_macd_pos", value=False)
+            nf_thr = None
+
+        # Baris checkbox chips
+        ch1, ch2, ch3, ch4 = st.columns(4)
+        with ch1: chip_recent3 = st.checkbox("≤ 3 hari", key="chip_recent3", value=bool(st.session_state.get("chip_recent3", False)))
+        with ch2:
+            lbl = "NF ≥ p{}{}".format(
+                int(st.session_state.get("chip_nf_pctile", 75)),
+                " (≈ {:,.0f})".format(nf_thr) if nf_thr is not None else ""
+            )
+            chip_nf_p = st.checkbox(lbl, key="chip_nf_enable", value=bool(st.session_state.get("chip_nf_enable", False)),
+                                    disabled=(nf_thr is None))
+        with ch3: chip_macd_pos = st.checkbox("MACD > 0", key="chip_macd_pos", value=bool(st.session_state.get("chip_macd_pos", False)))
+        with ch4: chip_bull = st.checkbox("Bullish only", key="chip_bullish_only", value=bool(st.session_state.get("chip_bullish_only", False)))
 
         view = df_scan_sorted.copy()
         if chip_recent3 and "days_ago" in view.columns: view = view[view["days_ago"] <= 3]
         if chip_macd_pos and "macd_above_zero" in view.columns: view = view[view["macd_above_zero"] == True]
-        if chip_nf_p75 and nf_col and nf_p75_val is not None: view = view[view[nf_col] >= nf_p75_val]
+        if chip_nf_p and (nf_thr is not None) and nf_col in view.columns: view = view[view[nf_col] >= nf_thr]
+        if chip_bull and "last_cross" in view.columns: view = view[view["last_cross"].str.lower() == "bullish"]
 
         order_cols = ["qualifies","days_ago","last_cross_date","kode","last_cross","macd_above_zero", nf_col, "close_last"]
         order_cols = [c for c in order_cols if c and c in view.columns]
         st.dataframe(view[order_cols], use_container_width=True, height=SCAN_H)
 
-        if nf_col and nf_p75_val is not None:
+        if nf_col and nf_thr is not None:
             quick_watch = df_scan_sorted.copy()
-            quick_watch = quick_watch[(quick_watch["days_ago"]<=3) & (quick_watch[nf_col] >= nf_p75_val)]
-            st.download_button("⬇️ Export Watchlist (≤3D & NF≥p75)",
+            quick_watch = quick_watch[(quick_watch["days_ago"]<=3) & (quick_watch[nf_col] >= nf_thr)]
+            st.download_button("⬇️ Export Watchlist (≤3D & NF≥p{})".format(int(st.session_state["chip_nf_pctile"])),
                                data=quick_watch.to_csv(index=False).encode("utf-8"),
                                file_name="watchlist_quick_{}_to_{}.csv".format(
                                    st.session_state.get("scanner_meta",{}).get("start_scan", start), end),
@@ -881,7 +902,6 @@ with st.expander("🔎 Scanner — MACD Cross + Net Foreign", expanded=False):
                         st.write("NF: -")
                 with cE:
                     if st.button("Kirim ke Backtest", key="send_bt_{}_{}".format(i, row.get("kode","?"))):
-                        # >>> FIX: sinkronkan ke selectbox backtest + buka expander + rerun
                         kd = row.get("kode")
                         st.session_state["bt_symbol"] = kd
                         st.session_state["bt_sym_sel"] = kd   # supaya selectbox pindah
