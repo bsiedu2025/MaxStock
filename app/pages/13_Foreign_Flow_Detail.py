@@ -7,7 +7,6 @@
 
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
-from __future__ import annotations
 import pandas as pd
 import numpy as np
 import math
