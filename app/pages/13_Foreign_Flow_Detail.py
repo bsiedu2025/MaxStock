@@ -47,7 +47,7 @@ div[role='radiogroup'] label{border:1px solid #e5e7eb;padding:6px 12px;border-ra
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 Pergerakan Harian Saham — Fokus Foreign Flow")
+st.title("📈 Foreign Flow")
 st.caption("DB aktif: **{}**".format(get_db_name()))
 
 # ---------- DB helpers ----------
