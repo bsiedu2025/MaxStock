@@ -4,7 +4,7 @@ name: Daily Stock Price Update
 on:
   # Menjalankan workflow setiap hari pada pukul 00:00 UTC (sekitar jam 7 pagi WIB)
   schedule:
-    - cron: '0 0 * * *' 
+    - cron: '0 11,23 * * *' 
   # Bisa juga di-trigger manual
   workflow_dispatch:
 
