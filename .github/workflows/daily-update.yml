@@ -18,7 +18,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x' # Ganti dengan versi Python yang lo pakai
+          python-version: '3.12' # Ganti dengan versi Python yang lo pakai
           
       - name: Install Dependencies
         # Asumsi dependencies lo ada di requirements.txt 
